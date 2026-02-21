@@ -139,3 +139,4 @@ scripts/          # Build scripts
 - 2026-02-21: Added double-entry password validation, success alerts, and try/catch error handling in AddEntryModal
 - 2026-02-21: Updated biometric auth to use empty fallbackLabel and check hasHardwareAsync() before prompting
 - 2026-02-21: Added web fallback (localStorage) for SecureStore operations
+- 2026-02-21: Created hidden Debug screen (long-press "Vault" title) for testing determinism/sensitivity of key derivation with orbit logging
