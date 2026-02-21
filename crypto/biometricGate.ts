@@ -40,7 +40,8 @@ export async function requireFreshBiometric(): Promise<boolean> {
   try {
     const result = await LocalAuthentication.authenticateAsync({
       promptMessage: "Authenticate to view password",
-      disableDeviceFallback: true,
+      disableDeviceFallback: false,
+      fallbackLabel: "Use Passcode",
     });
 
     if (result.success) {

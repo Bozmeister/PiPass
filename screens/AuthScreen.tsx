@@ -70,7 +70,8 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         promptMessage: hasHardware
           ? "Use biometrics to unlock PiPass"
           : "Authenticate to access PiPass vault",
-        disableDeviceFallback: true,
+        disableDeviceFallback: false,
+        fallbackLabel: "Use Passcode",
       });
 
       if (result.success) {
