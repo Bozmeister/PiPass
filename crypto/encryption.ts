@@ -1,7 +1,12 @@
 import CryptoJS from "crypto-js";
+import * as ExpoCrypto from "expo-crypto";
 
 export function encryptData(plaintext: string, key: string): string {
-  const iv = CryptoJS.lib.WordArray.random(16);
+  const randomBytes = ExpoCrypto.getRandomBytes(16);
+  const ivHexStr = Array.from(randomBytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  const iv = CryptoJS.enc.Hex.parse(ivHexStr);
 
   const keyWordArray = CryptoJS.enc.Hex.parse(key);
 

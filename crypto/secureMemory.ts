@@ -1,3 +1,5 @@
+import * as ExpoCrypto from "expo-crypto";
+
 export function wipeBuffer(buffer: Uint8Array): void {
   for (let i = 0; i < buffer.length; i++) {
     buffer[i] = 0;
@@ -37,11 +39,7 @@ export function bytesToHex(bytes: Uint8Array): string {
 }
 
 export function generateRandomBytes(length: number): Uint8Array {
-  const bytes = new Uint8Array(length);
-  for (let i = 0; i < length; i++) {
-    bytes[i] = Math.floor(Math.random() * 256);
-  }
-  return bytes;
+  return ExpoCrypto.getRandomBytes(length);
 }
 
 export function xorBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
