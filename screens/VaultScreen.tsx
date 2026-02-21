@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { View, Text, FlatList, Pressable, Alert, Platform, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import { VaultEntry } from "../workers/vaultWorker";
 import {
   encryptVaultEntry,
@@ -23,6 +24,7 @@ import FaviconImage from "../components/FaviconImage";
 const DEFAULT_PI_SEED = 42;
 
 export default function VaultScreen() {
+  const router = useRouter();
   const insets = useSafeAreaInsets();
   const [entries, setEntries] = useState<VaultEntry[]>([]);
   const keySharesRef = useRef<KeyShares | null>(null);
@@ -201,7 +203,9 @@ export default function VaultScreen() {
           alignItems: "center",
         }}
       >
-        <Text style={{ color: "#fff", fontSize: 28, fontWeight: "bold" }}>Vault</Text>
+        <Pressable onLongPress={() => router.push("/debug")} testID="vault-title">
+          <Text style={{ color: "#fff", fontSize: 28, fontWeight: "bold" }}>Vault</Text>
+        </Pressable>
         <Pressable onPress={() => setShowAddModal(true)} testID="add-entry-button">
           <Ionicons name="add-circle-outline" size={28} color="#fff" />
         </Pressable>
