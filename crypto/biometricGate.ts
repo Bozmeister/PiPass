@@ -40,20 +40,16 @@ export async function requireFreshBiometric(): Promise<boolean> {
   try {
     const result = await LocalAuthentication.authenticateAsync({
       promptMessage: "Authenticate to view password",
-      disableDeviceFallback: false,
+      disableDeviceFallback: true,
     });
-
-    console.log("[BiometricGate] authenticateAsync result:", JSON.stringify(result));
 
     if (result.success) {
       lastBiometricTimestamp = Date.now();
       return true;
     }
 
-    console.log("[BiometricGate] Auth failed with error:", result.error);
     return false;
   } catch (err) {
-    console.error("[BiometricGate] authenticateAsync threw:", err);
     return false;
   }
 }
