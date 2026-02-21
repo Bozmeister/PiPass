@@ -1,48 +1,74 @@
-import { Asset } from "expo-asset";
-import * as FileSystem from "expo-file-system";
-import { Platform } from "react-native";
-
 let piDigitsCache: string | null = null;
+let cachedDigitCount = 0;
 
-export async function loadPiDigits(): Promise<string> {
-  if (piDigitsCache) return piDigitsCache;
+function computePiChudnovsky(numDigits: number): string {
+  const EXTRA = 20;
+  const N = numDigits + EXTRA;
+  const ONE = 10n ** BigInt(N);
+  const C3_OVER_24 = 10939058860032000n;
 
-  if (Platform.OS === "web") {
-    try {
-      const asset = Asset.fromModule(require("../assets/pi_digits.txt"));
-      await asset.downloadAsync();
-      if (asset.localUri) {
-        const content = await FileSystem.readAsStringAsync(asset.localUri);
-        piDigitsCache = content;
-        return content;
+  function binarySplit(
+    a: number,
+    b: number
+  ): { P: bigint; Q: bigint; T: bigint } {
+    if (b - a === 1) {
+      const k = BigInt(a);
+      let Pab: bigint, Qab: bigint;
+      if (a === 0) {
+        Pab = 1n;
+        Qab = 1n;
+      } else {
+        Pab = (6n * k - 5n) * (2n * k - 1n) * (6n * k - 1n);
+        Qab = k * k * k * C3_OVER_24;
       }
-    } catch {}
-
-    const fallback =
-      "31415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679821480865132823066470938446095505822317253594081284811174502841027019385211055596446229489549303819644288109756659334461284756482337867831652712019091456485669234603486104543266482133936072602491412737245870066063155881748815209209628292540917153643678925903600113305305488204665213841469519415116094330572703657595919530921861173819326117931051185480744623799627495673518857527248912279381830119491298336733624406566430860213949463952247371907021798609437027705392171762931767523846748184676694051320005681271452635608277857713427577896091736371787214684409012249534301465495853710507922796892589235420199561121290219608640344181598136297747713099605187072113499999983729780499510597317328160963185950244594553469083026425223082533446850352619311881710100031378387528865875332083814206171776691473035982534904287554687311595628638823537875937519577818577805321712268066130019278766111959092164201989";
-    piDigitsCache = fallback;
-    return fallback;
-  }
-
-  try {
-    const asset = Asset.fromModule(require("../assets/pi_digits.txt"));
-    await asset.downloadAsync();
-    if (asset.localUri) {
-      const content = await FileSystem.readAsStringAsync(asset.localUri);
-      piDigitsCache = content;
-      return content;
+      const Tab = Pab * (13591409n + 545140134n * k);
+      if (a & 1) {
+        return { P: Pab, Q: Qab, T: -Tab };
+      }
+      return { P: Pab, Q: Qab, T: Tab };
     }
-  } catch (err) {
-    console.error("Failed to load pi_digits.txt:", err);
+
+    const m = (a + b) >> 1;
+    const left = binarySplit(a, m);
+    const right = binarySplit(m, b);
+
+    return {
+      P: left.P * right.P,
+      Q: left.Q * right.Q,
+      T: left.T * right.Q + left.P * right.T,
+    };
   }
 
-  const fallback =
-    "31415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679821480865132823066470938446095505822317253594081284811174502841027019385211055596446229489549303819644288109756659334461284756482337867831652712019091456485669234603486104543266482133936072602491412737245870066063155881748815209209628292540917153643678925903600113305305488204665213841469519415116094330572703657595919530921861173819326117931051185480744623799627495673518857527248912279381830119491298336733624406566430860213949463952247371907021798609437027705392171762931767523846748184676694051320005681271452635608277857713427577896091736371787214684409012249534301465495853710507922796892589235420199561121290219608640344181598136297747713099605187072113499999983729780499510597317328160963185950244594553469083026425223082533446850352619311881710100031378387528865875332083814206171776691473035982534904287554687311595628638823537875937519577818577805321712268066130019278766111959092164201989";
-  piDigitsCache = fallback;
-  return fallback;
+  const terms = Math.ceil(N / 14) + 2;
+  const { Q, T } = binarySplit(0, terms);
+
+  const sqrtInput = 10005n * ONE * ONE;
+  let x = sqrtInput;
+  let y = (x + 1n) / 2n;
+  while (y < x) {
+    x = y;
+    y = (x + sqrtInput / x) / 2n;
+  }
+
+  const pi = (Q * 426880n * x) / T;
+  return pi.toString().substring(0, numDigits);
 }
 
-export function extractPiDigits(piString: string, startIndex: number, count: number): number[] {
+export function getPiDigits(minDigits: number): string {
+  if (piDigitsCache && cachedDigitCount >= minDigits) {
+    return piDigitsCache;
+  }
+
+  const target = Math.max(minDigits, 1000);
+  piDigitsCache = computePiChudnovsky(target);
+  cachedDigitCount = target;
+  return piDigitsCache;
+}
+
+export function extractPiDigits(startIndex: number, count: number): number[] {
+  const needed = startIndex + count;
+  const piString = getPiDigits(needed);
+
   const digits: number[] = [];
   for (let i = 0; i < count; i++) {
     const idx = (startIndex + i) % piString.length;

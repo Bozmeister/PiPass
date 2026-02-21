@@ -1,4 +1,4 @@
-export { loadPiDigits, extractPiDigits, mapDigitsToCoordinates } from "./pi";
+export { getPiDigits, extractPiDigits, mapDigitsToCoordinates } from "./pi";
 export type { PiCoordinates } from "./pi";
 export {
   mandelbrotOrbit,
@@ -8,5 +8,5 @@ export {
   MAX_ITERATIONS,
 } from "./mandelbrot";
 export type { OrbitResult, GridPoint } from "./mandelbrot";
-export { deriveClusterKey, deriveClusterKeySync } from "./keyDerivation";
+export { deriveClusterKey } from "./keyDerivation";
 export { encryptData, decryptData } from "./encryption";

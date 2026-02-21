@@ -32,16 +32,16 @@ export default function VaultScreen() {
     initializeVault();
   }, []);
 
-  async function initializeVault() {
+  function initializeVault() {
     setDerivingKey(true);
     try {
-      const key = await deriveMasterKey(DEFAULT_PI_SEED);
+      const key = deriveMasterKey(DEFAULT_PI_SEED);
       setMasterKey(key);
     } catch (err) {
       console.error("Failed to derive master key:", err);
     }
     setDerivingKey(false);
-    await loadEntries();
+    loadEntries();
   }
 
   async function loadEntries() {

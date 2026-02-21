@@ -1,7 +1,7 @@
 import CryptoJS from "crypto-js";
 import * as Device from "expo-device";
 import { Platform } from "react-native";
-import { loadPiDigits, extractPiDigits, mapDigitsToCoordinates } from "./pi";
+import { extractPiDigits, mapDigitsToCoordinates } from "./pi";
 import { computeFullPipeline, GridPoint } from "./mandelbrot";
 
 function getDeviceIdentifier(): string {
@@ -34,35 +34,8 @@ function serializeOrbits(grid: GridPoint[]): string {
   return JSON.stringify(orbits);
 }
 
-export async function deriveClusterKey(userPiSeed: number): Promise<string> {
-  const piString = await loadPiDigits();
-
-  const digits30 = extractPiDigits(piString, userPiSeed, 30);
-
-  const coords = mapDigitsToCoordinates(digits30);
-
-  const grid = computeFullPipeline(
-    coords.x,
-    coords.y,
-    coords.zoomFactor,
-    coords.jitterDigits
-  );
-
-  const orbitData = serializeOrbits(grid);
-  const deviceId = getDeviceIdentifier();
-  const seedStr = userPiSeed.toString();
-
-  const hashInput = orbitData + deviceId + seedStr;
-  const clusterKey = CryptoJS.SHA256(hashInput).toString(CryptoJS.enc.Hex);
-
-  return clusterKey;
-}
-
-export function deriveClusterKeySync(
-  piString: string,
-  userPiSeed: number
-): string {
-  const digits30 = extractPiDigits(piString, userPiSeed, 30);
+export function deriveClusterKey(userPiSeed: number): string {
+  const digits30 = extractPiDigits(userPiSeed, 30);
 
   const coords = mapDigitsToCoordinates(digits30);
 

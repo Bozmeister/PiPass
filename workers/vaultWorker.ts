@@ -57,8 +57,8 @@ export function decryptVaultEntry(
   };
 }
 
-export async function deriveMasterKey(userPiSeed: number): Promise<string> {
-  return await deriveClusterKey(userPiSeed);
+export function deriveMasterKey(userPiSeed: number): string {
+  return deriveClusterKey(userPiSeed);
 }
 
 function generateId(): string {
