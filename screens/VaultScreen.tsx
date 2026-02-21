@@ -120,8 +120,8 @@ export default function VaultScreen() {
 
     try {
       const bioResult = await requireFreshBiometric();
+      console.log("[VaultScreen] biometric result:", bioResult);
       if (!bioResult) {
-        setSelectedEntry(null);
         setDecrypting(false);
         if (Platform.OS === "web") {
           alert("Authentication required to view passwords.");
@@ -133,9 +133,15 @@ export default function VaultScreen() {
 
       const decrypted = decryptVaultEntry(entry, keySharesRef.current);
       setDecryptedEntry(decrypted);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Decryption failed:", err);
       setDecryptedEntry(null);
+      const msg = err?.message || "Unknown error";
+      if (Platform.OS === "web") {
+        alert("Decryption error: " + msg);
+      } else {
+        Alert.alert("Decryption Error", msg);
+      }
     }
     setDecrypting(false);
   }
