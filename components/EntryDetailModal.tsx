@@ -1,14 +1,17 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { View, Text, Pressable, Modal, ScrollView, Platform, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { VaultEntry, DecryptedVaultEntry } from "../workers/vaultWorker";
+import { extractPiDigits, mapDigitsToCoordinates } from "../crypto/pi";
+import FractalBackground from "./FractalBackground";
 
 interface EntryDetailModalProps {
   visible: boolean;
   entry: VaultEntry;
   decryptedEntry: DecryptedVaultEntry | null;
   decrypting: boolean;
+  piIndex: number;
   onClose: () => void;
   onDelete: () => void;
 }
@@ -18,6 +21,7 @@ export default function EntryDetailModal({
   entry,
   decryptedEntry,
   decrypting,
+  piIndex,
   onClose,
   onDelete,
 }: EntryDetailModalProps) {
@@ -27,10 +31,22 @@ export default function EntryDetailModal({
   const password = decryptedEntry?.password || "";
   const notes = decryptedEntry?.notes;
 
+  const fractalCoords = useMemo(() => {
+    const digits = extractPiDigits(piIndex, 30);
+    const coords = mapDigitsToCoordinates(digits);
+    return coords;
+  }, [piIndex]);
+
   return (
     <Modal visible={visible} animationType="slide" transparent>
       <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
-        <View style={{ backgroundColor: "#111", borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: "80%" }}>
+        <View style={{ backgroundColor: "#111", borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: "80%", overflow: "hidden" }}>
+          <FractalBackground
+            centerX={fractalCoords.x}
+            centerY={fractalCoords.y}
+            zoom={fractalCoords.zoomFactor}
+            piIndex={piIndex}
+          />
           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 16, borderBottomWidth: 1, borderBottomColor: "#222" }}>
             <Pressable onPress={onClose}>
               <Ionicons name="close" size={24} color="#fff" />

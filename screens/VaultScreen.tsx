@@ -242,6 +242,7 @@ export default function VaultScreen() {
           entry={selectedEntry}
           decryptedEntry={decryptedEntry}
           decrypting={decrypting}
+          piIndex={DEFAULT_PI_SEED}
           onClose={handleCloseDetail}
           onDelete={() => handleDeleteEntry(selectedEntry.id)}
         />
