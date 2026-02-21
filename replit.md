@@ -2,7 +2,7 @@
 
 ## Overview
 
-PiPass is a mobile password manager built with Expo (React Native) that uses a novel cryptographic approach — the "Entropy Engine" — combining 1 million Pi digits, Mandelbrot set orbit computations, and device-specific identifiers for deterministic key derivation. The app stores encrypted vault entries locally on-device using Expo SecureStore (with localStorage fallback on web), protected by biometric authentication (Face ID/fingerprint). It includes an Express backend server, though the core vault functionality operates client-side.
+PiPass is a mobile password manager built with Expo (React Native) that uses a novel cryptographic approach — the "Entropy Engine" — combining on-the-fly Pi digit computation (Chudnovsky algorithm), Mandelbrot set orbit computations, and device-specific identifiers for deterministic key derivation. The app stores encrypted vault entries locally on-device using Expo SecureStore (with localStorage fallback on web), protected by biometric authentication (Face ID/fingerprint). It includes an Express backend server, though the core vault functionality operates client-side.
 
 ## User Preferences
 
@@ -23,7 +23,7 @@ Preferred communication style: Simple, everyday language.
 
 The key derivation pipeline ("Cluster Key") works as follows:
 
-1. **Pi Extraction** (`pi.ts`): Load 1 million digits of Pi from `assets/pi_digits.txt`. Extract 30 digits starting from a user-defined seed index.
+1. **Pi Extraction** (`pi.ts`): Compute Pi digits on-the-fly using the Chudnovsky algorithm with binary splitting (no static file). Extract 30 digits starting from a user-defined seed index. Results cached in memory.
    - Digits 1–10: Map to X-coordinate (Range: -2.0 to 2.0)
    - Digits 11–20: Map to Y-coordinate (Range: -2.0 to 2.0)
    - Digits 21–25: Map to Logarithmic Zoom Factor (Range: 10^1 to 10^12)
@@ -45,7 +45,7 @@ The key derivation pipeline ("Cluster Key") works as follows:
 
 ### Local Storage (`workers/` directory)
 - **Vault Storage** (`storageWorker.ts`): Uses `expo-secure-store` for encrypted on-device storage on native, with `localStorage` fallback on web. Entries stored individually with a separate index key tracking all entry IDs
-- **Vault Worker** (`vaultWorker.ts`): Handles encrypt/decrypt operations on `VaultEntry` objects. Encrypts password and optionally notes fields. `deriveMasterKey()` is now async and calls `deriveClusterKey(userPiSeed)`
+- **Vault Worker** (`vaultWorker.ts`): Handles encrypt/decrypt operations on `VaultEntry` objects. Encrypts password and optionally notes fields. `deriveMasterKey()` is synchronous and calls `deriveClusterKey(userPiSeed)`
 
 ### Backend (Express server)
 - **Location**: `server/` directory
@@ -113,9 +113,10 @@ scripts/          # Build scripts
 - `REPLIT_DOMAINS` — Comma-separated deployment domains (CORS)
 
 ### Metro Configuration
-- `metro.config.js` includes `.txt` in asset extensions to support loading `pi_digits.txt`
+- `metro.config.js` — default Expo config (no custom asset extensions needed)
 
 ## Recent Changes
+- 2026-02-21: Removed static pi_digits.txt — Pi digits now computed on-the-fly using Chudnovsky algorithm with binary splitting. Key derivation is fully synchronous, no file I/O needed
 - 2026-02-21: Implemented full Entropy Engine — Pi-based 3x3 Mandelbrot grid with orbit capture, deterministic jitter, device-tied SHA-256 hashing for AES key derivation
 - 2026-02-21: Added double-entry password validation, success alerts, and try/catch error handling in AddEntryModal
 - 2026-02-21: Updated biometric auth to use empty fallbackLabel and check hasHardwareAsync() before prompting
