@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { View, Text, TextInput, Pressable, Modal, ScrollView, Platform, KeyboardAvoidingView } from "react-native";
+import { View, Text, TextInput, Pressable, Modal, ScrollView, Platform, KeyboardAvoidingView, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -12,7 +12,7 @@ interface AddEntryModalProps {
     password: string;
     url?: string;
     notes?: string;
-  }) => void;
+  }) => Promise<void>;
 }
 
 export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModalProps) {
@@ -20,28 +20,52 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
   const [title, setTitle] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [url, setUrl] = useState("");
   const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  function handleSave() {
-    if (!title.trim() || !username.trim() || !password.trim()) return;
+  const passwordsMatch = password === confirmPassword;
+  const showMismatch = confirmPassword.length > 0 && !passwordsMatch;
+  const isValid = !!(title.trim() && username.trim() && password.trim() && confirmPassword.trim() && passwordsMatch);
 
-    onSave({
-      title: title.trim(),
-      username: username.trim(),
-      password: password.trim(),
-      url: url.trim() || undefined,
-      notes: notes.trim() || undefined,
-    });
+  async function handleSave() {
+    if (!isValid || saving) return;
 
-    setTitle("");
-    setUsername("");
-    setPassword("");
-    setUrl("");
-    setNotes("");
+    setSaving(true);
+    try {
+      await onSave({
+        title: title.trim(),
+        username: username.trim(),
+        password: password.trim(),
+        url: url.trim() || undefined,
+        notes: notes.trim() || undefined,
+      });
+
+      setTitle("");
+      setUsername("");
+      setPassword("");
+      setConfirmPassword("");
+      setUrl("");
+      setNotes("");
+
+      if (Platform.OS === "web") {
+        alert("Entry Saved");
+      } else {
+        Alert.alert("Success", "Entry Saved");
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("AddEntryModal save error:", message);
+      if (Platform.OS === "web") {
+        alert("Failed to save entry: " + message);
+      } else {
+        Alert.alert("Error", "Failed to save entry: " + message);
+      }
+    } finally {
+      setSaving(false);
+    }
   }
-
-  const isValid = title.trim() && username.trim() && password.trim();
 
   return (
     <Modal visible={visible} animationType="slide" transparent>
@@ -57,8 +81,10 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
                 <Ionicons name="close" size={24} color="#fff" />
               </Pressable>
               <Text style={{ color: "#fff", fontSize: 17, fontWeight: "600" }}>Add Entry</Text>
-              <Pressable onPress={handleSave} disabled={!isValid}>
-                <Text style={{ color: isValid ? "#4CAF50" : "#555", fontSize: 16, fontWeight: "600" }}>Save</Text>
+              <Pressable onPress={handleSave} disabled={!isValid || saving}>
+                <Text style={{ color: isValid && !saving ? "#4CAF50" : "#555", fontSize: 16, fontWeight: "600" }}>
+                  {saving ? "Saving..." : "Save"}
+                </Text>
               </Pressable>
             </View>
 
@@ -95,6 +121,32 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
                 style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16 }}
                 testID="password-input"
               />
+
+              <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Confirm Password *</Text>
+              <TextInput
+                value={confirmPassword}
+                onChangeText={setConfirmPassword}
+                placeholder="Re-enter password"
+                placeholderTextColor="#555"
+                secureTextEntry
+                autoCapitalize="none"
+                style={{
+                  color: "#fff",
+                  fontSize: 16,
+                  backgroundColor: "#1a1a1a",
+                  borderRadius: 8,
+                  padding: 12,
+                  marginBottom: showMismatch ? 4 : 16,
+                  borderWidth: showMismatch ? 1 : 0,
+                  borderColor: showMismatch ? "#ff4444" : "transparent",
+                }}
+                testID="confirm-password-input"
+              />
+              {showMismatch && (
+                <Text style={{ color: "#ff4444", fontSize: 12, marginBottom: 16 }} testID="mismatch-warning">
+                  Mismatch
+                </Text>
+              )}
 
               <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>URL</Text>
               <TextInput

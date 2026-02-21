@@ -1,3 +1,4 @@
+import { Platform } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { VaultEntry } from "./vaultWorker";
 
@@ -5,8 +6,35 @@ const VAULT_KEY_PREFIX = "pipass_vault_";
 const VAULT_INDEX_KEY = "pipass_vault_index";
 const MASTER_KEY_HASH_KEY = "pipass_master_hash";
 
+async function getItem(key: string): Promise<string | null> {
+  if (Platform.OS === "web") {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+  return await SecureStore.getItemAsync(key);
+}
+
+async function setItem(key: string, value: string): Promise<void> {
+  if (Platform.OS === "web") {
+    localStorage.setItem(key, value);
+    return;
+  }
+  await SecureStore.setItemAsync(key, value);
+}
+
+async function deleteItem(key: string): Promise<void> {
+  if (Platform.OS === "web") {
+    localStorage.removeItem(key);
+    return;
+  }
+  await SecureStore.deleteItemAsync(key);
+}
+
 async function getVaultIndex(): Promise<string[]> {
-  const indexStr = await SecureStore.getItemAsync(VAULT_INDEX_KEY);
+  const indexStr = await getItem(VAULT_INDEX_KEY);
   if (!indexStr) return [];
   try {
     return JSON.parse(indexStr);
@@ -16,12 +44,12 @@ async function getVaultIndex(): Promise<string[]> {
 }
 
 async function setVaultIndex(ids: string[]): Promise<void> {
-  await SecureStore.setItemAsync(VAULT_INDEX_KEY, JSON.stringify(ids));
+  await setItem(VAULT_INDEX_KEY, JSON.stringify(ids));
 }
 
 export async function saveEntry(entry: VaultEntry): Promise<void> {
   const entryKey = VAULT_KEY_PREFIX + entry.id;
-  await SecureStore.setItemAsync(entryKey, JSON.stringify(entry));
+  await setItem(entryKey, JSON.stringify(entry));
 
   const index = await getVaultIndex();
   if (!index.includes(entry.id)) {
@@ -32,7 +60,7 @@ export async function saveEntry(entry: VaultEntry): Promise<void> {
 
 export async function getEntry(id: string): Promise<VaultEntry | null> {
   const entryKey = VAULT_KEY_PREFIX + id;
-  const entryStr = await SecureStore.getItemAsync(entryKey);
+  const entryStr = await getItem(entryKey);
   if (!entryStr) return null;
   try {
     return JSON.parse(entryStr);
@@ -57,7 +85,7 @@ export async function getAllEntries(): Promise<VaultEntry[]> {
 
 export async function deleteEntry(id: string): Promise<void> {
   const entryKey = VAULT_KEY_PREFIX + id;
-  await SecureStore.deleteItemAsync(entryKey);
+  await deleteItem(entryKey);
 
   const index = await getVaultIndex();
   const newIndex = index.filter((i) => i !== id);
@@ -66,22 +94,22 @@ export async function deleteEntry(id: string): Promise<void> {
 
 export async function updateEntry(entry: VaultEntry): Promise<void> {
   const entryKey = VAULT_KEY_PREFIX + entry.id;
-  await SecureStore.setItemAsync(entryKey, JSON.stringify(entry));
+  await setItem(entryKey, JSON.stringify(entry));
 }
 
 export async function saveMasterKeyHash(hash: string): Promise<void> {
-  await SecureStore.setItemAsync(MASTER_KEY_HASH_KEY, hash);
+  await setItem(MASTER_KEY_HASH_KEY, hash);
 }
 
 export async function getMasterKeyHash(): Promise<string | null> {
-  return await SecureStore.getItemAsync(MASTER_KEY_HASH_KEY);
+  return await getItem(MASTER_KEY_HASH_KEY);
 }
 
 export async function clearVault(): Promise<void> {
   const index = await getVaultIndex();
   for (const id of index) {
-    await SecureStore.deleteItemAsync(VAULT_KEY_PREFIX + id);
+    await deleteItem(VAULT_KEY_PREFIX + id);
   }
-  await SecureStore.deleteItemAsync(VAULT_INDEX_KEY);
-  await SecureStore.deleteItemAsync(MASTER_KEY_HASH_KEY);
+  await deleteItem(VAULT_INDEX_KEY);
+  await deleteItem(MASTER_KEY_HASH_KEY);
 }

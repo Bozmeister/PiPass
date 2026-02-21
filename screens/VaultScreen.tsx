@@ -51,12 +51,21 @@ export default function VaultScreen() {
     url?: string;
     notes?: string;
   }) {
-    if (!masterKey) return;
+    if (!masterKey) {
+      console.error("handleAddEntry: masterKey is not set");
+      throw new Error("Vault key not ready. Please restart the app.");
+    }
 
-    const encrypted = encryptVaultEntry(entry, masterKey);
-    await saveEntry(encrypted);
-    await loadEntries();
-    setShowAddModal(false);
+    try {
+      const encrypted = encryptVaultEntry(entry, masterKey);
+      await saveEntry(encrypted);
+      await loadEntries();
+      setShowAddModal(false);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("handleAddEntry failed:", message);
+      throw err;
+    }
   }
 
   async function handleDeleteEntry(id: string) {

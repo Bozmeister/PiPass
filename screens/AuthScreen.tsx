@@ -65,9 +65,12 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     }
 
     try {
+      const hasHardware = await LocalAuthentication.hasHardwareAsync();
       const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: "Authenticate to access PiPass vault",
-        fallbackLabel: "Use passcode",
+        promptMessage: hasHardware
+          ? "Use biometrics to unlock PiPass"
+          : "Authenticate to access PiPass vault",
+        fallbackLabel: "",
         disableDeviceFallback: false,
       });
 
