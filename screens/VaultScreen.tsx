@@ -18,6 +18,7 @@ import {
 } from "../workers/storageWorker";
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
+import FaviconImage from "../components/FaviconImage";
 
 const DEFAULT_PI_SEED = 42;
 
@@ -157,7 +158,7 @@ export default function VaultScreen() {
           alignItems: "center",
         }}
       >
-        <Ionicons name="key-outline" size={20} color="#888" />
+        <FaviconImage url={item.url} size={28} />
         <View style={{ marginLeft: 12, flex: 1 }}>
           <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" }}>{item.title}</Text>
           <Text style={{ color: "#888", fontSize: 13, marginTop: 2 }}>{item.username}</Text>
