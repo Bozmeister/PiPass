@@ -17,6 +17,7 @@ Preferred communication style: Simple, everyday language.
 - **Auth Flow**: `app/(tabs)/index.tsx` toggles between `AuthScreen` (biometric gate) and `VaultScreen` based on local auth state. Biometric prompt uses `fallbackLabel: ""` and checks `hasHardwareAsync()` before prompting
 - **UI Components**: Custom modals (`AddEntryModal`, `EntryDetailModal`) for CRUD operations on vault entries
   - `AddEntryModal`: Includes double-entry password validation (confirm password field), red "Mismatch" warning, success Alert on save, try/catch error handling
+  - `FaviconImage`: Fetches website favicons from Google's favicon service, caches locally via expo-file-system on native, globe icon fallback
 - **Error Handling**: Class-based `ErrorBoundary` component wraps the app with a fallback UI
 
 ### Cryptography — The Entropy Engine (`crypto/` directory)
@@ -91,7 +92,7 @@ workers/          # Storage and vault encryption logic
   vaultWorker.ts  # Encrypt/decrypt VaultEntry objects
 server/           # Express backend
 shared/           # Shared types and database schema
-lib/              # Client utilities (React Query config)
+lib/              # Client utilities (React Query config, logoUrl)
 constants/        # Theme colors
 scripts/          # Build scripts
 ```
