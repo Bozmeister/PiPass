@@ -43,9 +43,23 @@ The key derivation pipeline ("Cluster Key") works as follows:
 
 4. **AES-256-CBC Encryption** (`encryption.ts`): Random IVs per encryption. Ciphertext stored as `iv:ciphertext` hex format.
 
+5. **Secure Memory** (`secureMemory.ts`):
+   - `wipeBuffer()`: Zeroes out Uint8Array buffers immediately after use
+   - `splitKeyIntoShares()`: Splits a key into two XOR shares (ShareA ⊕ ShareB = Key)
+   - `combineShares()`: Recombines shares at moment of use, result wiped after
+   - All sensitive data uses Uint8Array for controlled memory allocation
+   - `hexToBytes()`/`bytesToHex()` conversions keep data in byte arrays
+
+6. **Biometric Gate** (`biometricGate.ts`):
+   - `requireFreshBiometric()`: Forces a new biometric prompt every time
+   - 2-second staleness window — biometric result expires after 2000ms
+   - `invalidateBiometric()`: Immediately marks auth as stale
+   - No cached "authenticated" state — each decryption triggers a fresh check
+   - Web fallback auto-passes (no biometric hardware available)
+
 ### Local Storage (`workers/` directory)
 - **Vault Storage** (`storageWorker.ts`): Uses `expo-secure-store` for encrypted on-device storage on native, with `localStorage` fallback on web. Entries stored individually with a separate index key tracking all entry IDs
-- **Vault Worker** (`vaultWorker.ts`): Handles encrypt/decrypt operations on `VaultEntry` objects. Encrypts password and optionally notes fields. `deriveMasterKey()` is synchronous and calls `deriveClusterKey(userPiSeed)`
+- **Vault Worker** (`vaultWorker.ts`): Handles encrypt/decrypt operations on `VaultEntry` objects. Encrypts password and optionally notes fields. `deriveMasterKeyShares()` returns XOR-split key shares, never a raw key string. Key is recombined only inside encrypt/decrypt functions and wiped immediately after
 
 ### Backend (Express server)
 - **Location**: `server/` directory
@@ -116,6 +130,9 @@ scripts/          # Build scripts
 - `metro.config.js` — default Expo config (no custom asset extensions needed)
 
 ## Recent Changes
+- 2026-02-21: Added secure memory management — wipeBuffer() zeroes Uint8Array after use, all sensitive data in byte arrays
+- 2026-02-21: Implemented XOR key splitting — master key stored as ShareA ⊕ ShareB, never as single string in memory
+- 2026-02-21: Added biometric gate — requireFreshBiometric() forces new check per decryption, 2-second staleness window, no cached auth
 - 2026-02-21: Removed static pi_digits.txt — Pi digits now computed on-the-fly using Chudnovsky algorithm with binary splitting. Key derivation is fully synchronous, no file I/O needed
 - 2026-02-21: Implemented full Entropy Engine — Pi-based 3x3 Mandelbrot grid with orbit capture, deterministic jitter, device-tied SHA-256 hashing for AES key derivation
 - 2026-02-21: Added double-entry password validation, success alerts, and try/catch error handling in AddEntryModal
