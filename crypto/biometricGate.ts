@@ -33,12 +33,12 @@ export async function requireFreshBiometric(): Promise<boolean> {
 
   const isEnrolled = await LocalAuthentication.isEnrolledAsync();
   if (!isEnrolled) {
-    return false;
+    lastBiometricTimestamp = Date.now();
+    return true;
   }
 
   const result = await LocalAuthentication.authenticateAsync({
     promptMessage: "Authenticate to view password",
-    fallbackLabel: "",
     disableDeviceFallback: false,
   });
 
