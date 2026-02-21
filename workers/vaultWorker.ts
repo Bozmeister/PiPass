@@ -1,4 +1,4 @@
-import { deriveKeyWithRounds } from "../crypto/keyDerivation";
+import { deriveClusterKey } from "../crypto/keyDerivation";
 import { encryptData, decryptData } from "../crypto/encryption";
 
 export interface VaultEntry {
@@ -57,8 +57,8 @@ export function decryptVaultEntry(
   };
 }
 
-export function deriveMasterKey(masterPassword: string): string {
-  return deriveKeyWithRounds(masterPassword, "pipass-vault-salt", 3);
+export async function deriveMasterKey(userPiSeed: number): Promise<string> {
+  return await deriveClusterKey(userPiSeed);
 }
 
 function generateId(): string {

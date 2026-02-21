@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { View, Text, FlatList, Pressable, Alert, Platform } from "react-native";
+import { View, Text, FlatList, Pressable, Alert, Platform, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { VaultEntry } from "../workers/vaultWorker";
@@ -17,21 +17,32 @@ import {
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
 
-const MASTER_PASSWORD = "pipass-local-master";
+const DEFAULT_PI_SEED = 42;
 
 export default function VaultScreen() {
   const insets = useSafeAreaInsets();
   const [entries, setEntries] = useState<VaultEntry[]>([]);
   const [masterKey, setMasterKey] = useState<string>("");
   const [loading, setLoading] = useState(true);
+  const [derivingKey, setDerivingKey] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<VaultEntry | null>(null);
 
   useEffect(() => {
-    const key = deriveMasterKey(MASTER_PASSWORD);
-    setMasterKey(key);
-    loadEntries();
+    initializeVault();
   }, []);
+
+  async function initializeVault() {
+    setDerivingKey(true);
+    try {
+      const key = await deriveMasterKey(DEFAULT_PI_SEED);
+      setMasterKey(key);
+    } catch (err) {
+      console.error("Failed to derive master key:", err);
+    }
+    setDerivingKey(false);
+    await loadEntries();
+  }
 
   async function loadEntries() {
     setLoading(true);
@@ -121,6 +132,18 @@ export default function VaultScreen() {
     ),
     []
   );
+
+  if (derivingKey) {
+    return (
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
+        <ActivityIndicator size="large" color="#fff" />
+        <Text style={{ color: "#fff", fontSize: 16, marginTop: 16 }}>Deriving Cluster Key...</Text>
+        <Text style={{ color: "#888", fontSize: 12, marginTop: 8, textAlign: "center", paddingHorizontal: 32 }}>
+          Computing Mandelbrot orbits from Pi coordinates
+        </Text>
+      </View>
+    );
+  }
 
   if (loading) {
     return (
