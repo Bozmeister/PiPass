@@ -1,51 +1,84 @@
 import CryptoJS from "crypto-js";
-import { extractPiDigits, piDigitsToSeed } from "./pi";
-import { mandelbrotSequence } from "./mandelbrot";
+import * as Device from "expo-device";
+import { Platform } from "react-native";
+import { loadPiDigits, extractPiDigits, mapDigitsToCoordinates } from "./pi";
+import { computeFullPipeline, GridPoint } from "./mandelbrot";
 
-export function deriveKey(
-  masterPassword: string,
-  salt: string = "pipass-default-salt",
-  piStartIndex: number = 0,
-  piDigitCount: number = 64,
-  mandelbrotIterations: number = 100
-): string {
-  const piDigits = extractPiDigits(piStartIndex, piDigitCount);
-
-  const seed = piDigitsToSeed(piDigits);
-
-  const mandelbrotInput = piDigits.map((d) => (d + seed) % 10);
-
-  const mandelbrotOutput = mandelbrotSequence(mandelbrotInput, mandelbrotIterations);
-
-  const combinedData = [
-    masterPassword,
-    salt,
-    piDigits.join(""),
-    mandelbrotOutput.join(","),
-    seed.toString(),
-  ].join("|");
-
-  const hash = CryptoJS.SHA256(combinedData).toString(CryptoJS.enc.Hex);
-
-  return hash;
-}
-
-export function deriveKeyWithRounds(
-  masterPassword: string,
-  salt: string = "pipass-default-salt",
-  rounds: number = 3
-): string {
-  let currentKey = masterPassword;
-
-  for (let i = 0; i < rounds; i++) {
-    currentKey = deriveKey(
-      currentKey,
-      salt + i.toString(),
-      i * 17,
-      64,
-      100 + i * 50
-    );
+function getDeviceIdentifier(): string {
+  if (Platform.OS === "web") {
+    return "web-device-" + (navigator.userAgent || "unknown");
   }
 
-  return currentKey;
+  const parts: string[] = [];
+  if (Device.osBuildId) parts.push(Device.osBuildId);
+  if (Device.osInternalBuildId) parts.push(Device.osInternalBuildId);
+  if (Device.modelName) parts.push(Device.modelName);
+  if (Device.brand) parts.push(Device.brand);
+
+  return parts.length > 0 ? parts.join("-") : "unknown-device";
+}
+
+function serializeOrbits(grid: GridPoint[]): string {
+  const orbits = grid.map((point) => ({
+    r: point.row,
+    c: point.col,
+    cr: point.cReal,
+    ci: point.cImag,
+    iter: point.result.iterations,
+    esc: point.result.escaped,
+    orbit: point.result.orbit.map((z) => [
+      Math.round(z.re * 1e12) / 1e12,
+      Math.round(z.im * 1e12) / 1e12,
+    ]),
+  }));
+  return JSON.stringify(orbits);
+}
+
+export async function deriveClusterKey(userPiSeed: number): Promise<string> {
+  const piString = await loadPiDigits();
+
+  const digits30 = extractPiDigits(piString, userPiSeed, 30);
+
+  const coords = mapDigitsToCoordinates(digits30);
+
+  const grid = computeFullPipeline(
+    coords.x,
+    coords.y,
+    coords.zoomFactor,
+    coords.jitterDigits
+  );
+
+  const orbitData = serializeOrbits(grid);
+  const deviceId = getDeviceIdentifier();
+  const seedStr = userPiSeed.toString();
+
+  const hashInput = orbitData + deviceId + seedStr;
+  const clusterKey = CryptoJS.SHA256(hashInput).toString(CryptoJS.enc.Hex);
+
+  return clusterKey;
+}
+
+export function deriveClusterKeySync(
+  piString: string,
+  userPiSeed: number
+): string {
+  const digits30 = extractPiDigits(piString, userPiSeed, 30);
+
+  const coords = mapDigitsToCoordinates(digits30);
+
+  const grid = computeFullPipeline(
+    coords.x,
+    coords.y,
+    coords.zoomFactor,
+    coords.jitterDigits
+  );
+
+  const orbitData = serializeOrbits(grid);
+  const deviceId = getDeviceIdentifier();
+  const seedStr = userPiSeed.toString();
+
+  const hashInput = orbitData + deviceId + seedStr;
+  const clusterKey = CryptoJS.SHA256(hashInput).toString(CryptoJS.enc.Hex);
+
+  return clusterKey;
 }
