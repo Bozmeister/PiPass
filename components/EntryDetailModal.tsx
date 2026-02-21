@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { View, Text, Pressable, Modal, ScrollView, Platform } from "react-native";
+import { View, Text, Pressable, Modal, ScrollView, Platform, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { VaultEntry, DecryptedVaultEntry } from "../workers/vaultWorker";
@@ -8,6 +8,7 @@ interface EntryDetailModalProps {
   visible: boolean;
   entry: VaultEntry;
   decryptedEntry: DecryptedVaultEntry | null;
+  decrypting: boolean;
   onClose: () => void;
   onDelete: () => void;
 }
@@ -16,13 +17,14 @@ export default function EntryDetailModal({
   visible,
   entry,
   decryptedEntry,
+  decrypting,
   onClose,
   onDelete,
 }: EntryDetailModalProps) {
   const insets = useSafeAreaInsets();
   const [showPassword, setShowPassword] = useState(false);
 
-  const password = decryptedEntry?.password || "Decryption failed";
+  const password = decryptedEntry?.password || "";
   const notes = decryptedEntry?.notes;
 
   return (
@@ -52,14 +54,23 @@ export default function EntryDetailModal({
 
             <View style={{ marginBottom: 20 }}>
               <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 4 }}>Password</Text>
-              <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: "#fff", fontSize: 16, flex: 1 }}>
-                  {showPassword ? password : "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"}
-                </Text>
-                <Pressable onPress={() => setShowPassword(!showPassword)} style={{ padding: 4 }}>
-                  <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#888" />
-                </Pressable>
-              </View>
+              {decrypting ? (
+                <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 4 }}>
+                  <ActivityIndicator size="small" color="#fff" />
+                  <Text style={{ color: "#888", fontSize: 14, marginLeft: 8 }}>Authenticating...</Text>
+                </View>
+              ) : !decryptedEntry ? (
+                <Text style={{ color: "#ff6b6b", fontSize: 14 }}>Authentication required to view password</Text>
+              ) : (
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <Text style={{ color: "#fff", fontSize: 16, flex: 1 }}>
+                    {showPassword ? password : "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"}
+                  </Text>
+                  <Pressable onPress={() => setShowPassword(!showPassword)} style={{ padding: 4 }}>
+                    <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#888" />
+                  </Pressable>
+                </View>
+              )}
             </View>
 
             {entry.url && (

@@ -10,3 +10,23 @@ export {
 export type { OrbitResult, GridPoint } from "./mandelbrot";
 export { deriveClusterKey } from "./keyDerivation";
 export { encryptData, decryptData } from "./encryption";
+export {
+  wipeBuffer,
+  stringToBytes,
+  bytesToString,
+  hexToBytes,
+  bytesToHex,
+  generateRandomBytes,
+  xorBytes,
+  splitKeyIntoShares,
+  combineShares,
+  wipeShares,
+  useKeyBriefly,
+} from "./secureMemory";
+export type { KeyShares } from "./secureMemory";
+export {
+  requireFreshBiometric,
+  isBiometricFresh,
+  invalidateBiometric,
+  biometricDecryptGuard,
+} from "./biometricGate";

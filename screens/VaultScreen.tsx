@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { View, Text, FlatList, Pressable, Alert, Platform, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -6,9 +6,11 @@ import { VaultEntry } from "../workers/vaultWorker";
 import {
   encryptVaultEntry,
   decryptVaultEntry,
-  deriveMasterKey,
+  deriveMasterKeyShares,
   DecryptedVaultEntry,
 } from "../workers/vaultWorker";
+import { KeyShares, wipeShares } from "../crypto/secureMemory";
+import { requireFreshBiometric } from "../crypto/biometricGate";
 import {
   getAllEntries,
   saveEntry,
@@ -22,21 +24,29 @@ const DEFAULT_PI_SEED = 42;
 export default function VaultScreen() {
   const insets = useSafeAreaInsets();
   const [entries, setEntries] = useState<VaultEntry[]>([]);
-  const [masterKey, setMasterKey] = useState<string>("");
+  const keySharesRef = useRef<KeyShares | null>(null);
   const [loading, setLoading] = useState(true);
   const [derivingKey, setDerivingKey] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<VaultEntry | null>(null);
+  const [decryptedEntry, setDecryptedEntry] = useState<DecryptedVaultEntry | null>(null);
+  const [decrypting, setDecrypting] = useState(false);
 
   useEffect(() => {
     initializeVault();
+    return () => {
+      if (keySharesRef.current) {
+        wipeShares(keySharesRef.current);
+        keySharesRef.current = null;
+      }
+    };
   }, []);
 
   function initializeVault() {
     setDerivingKey(true);
     try {
-      const key = deriveMasterKey(DEFAULT_PI_SEED);
-      setMasterKey(key);
+      const shares = deriveMasterKeyShares(DEFAULT_PI_SEED);
+      keySharesRef.current = shares;
     } catch (err) {
       console.error("Failed to derive master key:", err);
     }
@@ -62,13 +72,12 @@ export default function VaultScreen() {
     url?: string;
     notes?: string;
   }) {
-    if (!masterKey) {
-      console.error("handleAddEntry: masterKey is not set");
+    if (!keySharesRef.current) {
       throw new Error("Vault key not ready. Please restart the app.");
     }
 
     try {
-      const encrypted = encryptVaultEntry(entry, masterKey);
+      const encrypted = encryptVaultEntry(entry, keySharesRef.current);
       await saveEntry(encrypted);
       await loadEntries();
       setShowAddModal(false);
@@ -84,6 +93,7 @@ export default function VaultScreen() {
       await deleteStoredEntry(id);
       await loadEntries();
       setSelectedEntry(null);
+      setDecryptedEntry(null);
     };
 
     if (Platform.OS === "web") {
@@ -98,13 +108,38 @@ export default function VaultScreen() {
     }
   }
 
-  function getDecryptedEntry(entry: VaultEntry): DecryptedVaultEntry | null {
-    if (!masterKey) return null;
+  async function handleSelectEntry(entry: VaultEntry) {
+    if (!keySharesRef.current) return;
+
+    setSelectedEntry(entry);
+    setDecryptedEntry(null);
+    setDecrypting(true);
+
     try {
-      return decryptVaultEntry(entry, masterKey);
-    } catch {
-      return null;
+      const bioResult = await requireFreshBiometric();
+      if (!bioResult) {
+        setSelectedEntry(null);
+        setDecrypting(false);
+        if (Platform.OS === "web") {
+          alert("Authentication required to view passwords.");
+        } else {
+          Alert.alert("Authentication Required", "Biometric verification failed. Cannot decrypt entry.");
+        }
+        return;
+      }
+
+      const decrypted = decryptVaultEntry(entry, keySharesRef.current);
+      setDecryptedEntry(decrypted);
+    } catch (err) {
+      console.error("Decryption failed:", err);
+      setDecryptedEntry(null);
     }
+    setDecrypting(false);
+  }
+
+  function handleCloseDetail() {
+    setSelectedEntry(null);
+    setDecryptedEntry(null);
   }
 
   const webTopInset = Platform.OS === "web" ? 67 : 0;
@@ -112,7 +147,7 @@ export default function VaultScreen() {
   const renderItem = useCallback(
     ({ item }: { item: VaultEntry }) => (
       <Pressable
-        onPress={() => setSelectedEntry(item)}
+        onPress={() => handleSelectEntry(item)}
         style={{
           paddingVertical: 14,
           paddingHorizontal: 16,
@@ -200,8 +235,9 @@ export default function VaultScreen() {
         <EntryDetailModal
           visible={!!selectedEntry}
           entry={selectedEntry}
-          decryptedEntry={getDecryptedEntry(selectedEntry)}
-          onClose={() => setSelectedEntry(null)}
+          decryptedEntry={decryptedEntry}
+          decrypting={decrypting}
+          onClose={handleCloseDetail}
           onDelete={() => handleDeleteEntry(selectedEntry.id)}
         />
       )}
