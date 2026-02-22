@@ -1,6 +1,8 @@
 let piDigitsCache: string | null = null;
 let cachedDigitCount = 0;
 
+const MAX_PI_DIGITS = 1000;
+
 function computePiChudnovsky(numDigits: number): string {
   const EXTRA = 20;
   const N = numDigits + EXTRA;
@@ -55,23 +57,24 @@ function computePiChudnovsky(numDigits: number): string {
 }
 
 export function getPiDigits(minDigits: number): string {
-  if (piDigitsCache && cachedDigitCount >= minDigits) {
+  const capped = Math.min(minDigits, MAX_PI_DIGITS);
+  if (piDigitsCache && cachedDigitCount >= capped) {
     return piDigitsCache;
   }
 
-  const target = Math.max(minDigits, 1000);
+  const target = Math.max(capped, MAX_PI_DIGITS);
   piDigitsCache = computePiChudnovsky(target);
   cachedDigitCount = target;
   return piDigitsCache;
 }
 
 export function extractPiDigits(startIndex: number, count: number): number[] {
-  const needed = startIndex + count;
-  const piString = getPiDigits(needed);
+  const piString = getPiDigits(MAX_PI_DIGITS);
+  const len = piString.length;
 
   const digits: number[] = [];
   for (let i = 0; i < count; i++) {
-    const idx = (startIndex + i) % piString.length;
+    const idx = (startIndex + i) % len;
     digits.push(parseInt(piString[idx], 10));
   }
   return digits;
