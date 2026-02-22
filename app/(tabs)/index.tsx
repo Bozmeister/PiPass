@@ -37,6 +37,12 @@ export default function HomeScreen() {
     setAuthenticated(false);
   }
 
+  function handleReset() {
+    setPiSeed(null);
+    setIterations(100000);
+    setAuthenticated(false);
+  }
+
   if (checkingSeed) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
@@ -59,6 +65,7 @@ export default function HomeScreen() {
       iterations={iterations}
       onLock={handleLock}
       onIterationsChange={handleIterationsChange}
+      onReset={handleReset}
     />
   );
 }

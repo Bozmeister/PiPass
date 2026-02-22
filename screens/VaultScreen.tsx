@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, FlatList, Pressable, Alert, Platform, ActivityIndicator, AppState, Modal, ScrollView } from "react-native";
+import { View, Text, FlatList, Pressable, Alert, Platform, ActivityIndicator, AppState, Modal, ScrollView, TextInput } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
 import { VaultEntry } from "../workers/vaultWorker";
 import {
   encryptVaultEntry,
@@ -18,6 +20,7 @@ import {
   saveEntry,
   deleteEntry as deleteStoredEntry,
   clearVault,
+  destroyAllData,
 } from "../workers/storageWorker";
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
@@ -36,9 +39,10 @@ interface VaultScreenProps {
   iterations: number;
   onLock: () => void;
   onIterationsChange: (iterations: number) => void;
+  onReset: () => void;
 }
 
-export default function VaultScreen({ piSeed, iterations, onLock, onIterationsChange }: VaultScreenProps) {
+export default function VaultScreen({ piSeed, iterations, onLock, onIterationsChange, onReset }: VaultScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [entries, setEntries] = useState<VaultEntry[]>([]);
@@ -52,6 +56,8 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
   const [showSettings, setShowSettings] = useState(false);
   const [migrating, setMigrating] = useState(false);
   const [migrationProgress, setMigrationProgress] = useState("");
+  const [showNukeConfirm, setShowNukeConfirm] = useState(false);
+  const [nukeInput, setNukeInput] = useState("");
 
   const lastActivityRef = useRef<number>(Date.now());
   const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -562,50 +568,196 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
                 <Text style={{ color: "#ef4444", fontSize: 15, fontWeight: "600" }}>Lock Vault</Text>
               </Pressable>
 
+              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginTop: 24, marginBottom: 10 }}>
+                Backup & Recovery
+              </Text>
+
               <Pressable
-                onPress={() => {
-                  const doWipe = async () => {
-                    await clearVault();
-                    setEntries([]);
-                    setShowSettings(false);
+                onPress={async () => {
+                  resetActivity();
+                  if (entries.length === 0) {
                     if (Platform.OS === "web") {
-                      alert("All vault entries have been cleared.");
+                      alert("No entries to export.");
                     } else {
-                      Alert.alert("Vault Cleared", "All entries have been removed.");
+                      Alert.alert("Empty Vault", "There are no entries to export.");
                     }
-                  };
-                  if (Platform.OS === "web") {
-                    if (confirm("This will permanently delete ALL vault entries. Are you sure?")) {
-                      doWipe();
+                    return;
+                  }
+                  try {
+                    const backup = {
+                      version: 1,
+                      exportedAt: new Date().toISOString(),
+                      entries: entries,
+                    };
+                    const json = JSON.stringify(backup, null, 2);
+                    const date = new Date().toISOString().split("T")[0];
+                    const filename = `pipass_backup_${date}.vault`;
+
+                    if (Platform.OS === "web") {
+                      const blob = new Blob([json], { type: "application/json" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = filename;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                      alert("Backup downloaded.");
+                    } else {
+                      const path = FileSystem.documentDirectory + filename;
+                      await FileSystem.writeAsStringAsync(path, json, { encoding: FileSystem.EncodingType.UTF8 });
+                      const canShare = await Sharing.isAvailableAsync();
+                      if (canShare) {
+                        await Sharing.shareAsync(path, { mimeType: "application/json", dialogTitle: "Export Encrypted Backup" });
+                      } else {
+                        Alert.alert("Exported", `Backup saved to ${filename}`);
+                      }
                     }
-                  } else {
-                    Alert.alert(
-                      "Clear All Entries",
-                      "This will permanently delete ALL vault entries. This cannot be undone.",
-                      [
-                        { text: "Cancel", style: "cancel" },
-                        { text: "Delete All", style: "destructive", onPress: doWipe },
-                      ]
-                    );
+                  } catch (err) {
+                    console.error("Export failed:", err);
+                    if (Platform.OS === "web") {
+                      alert("Export failed.");
+                    } else {
+                      Alert.alert("Export Failed", "Could not create backup file.");
+                    }
                   }
                 }}
                 style={{
                   flexDirection: "row",
                   alignItems: "center",
                   justifyContent: "center",
-                  backgroundColor: "#1a0a0a",
+                  backgroundColor: "#0a1a1a",
                   borderRadius: 10,
                   padding: 14,
-                  marginTop: 10,
                   borderWidth: 1,
-                  borderColor: "#4a1111",
+                  borderColor: "#114a4a",
                 }}
-                testID="clear-vault-button"
+                testID="export-backup-button"
               >
-                <Ionicons name="trash-outline" size={18} color="#ef4444" style={{ marginRight: 8 }} />
-                <Text style={{ color: "#ef4444", fontSize: 15, fontWeight: "600" }}>Clear All Entries</Text>
+                <Ionicons name="download-outline" size={18} color="#4CAF50" style={{ marginRight: 8 }} />
+                <Text style={{ color: "#4CAF50", fontSize: 15, fontWeight: "600" }}>Export Encrypted Backup</Text>
+              </Pressable>
+
+              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginTop: 24, marginBottom: 10 }}>
+                Danger Zone
+              </Text>
+
+              <Pressable
+                onPress={async () => {
+                  resetActivity();
+                  const bioResult = await requireFreshBiometric();
+                  if (!bioResult) {
+                    if (Platform.OS === "web") {
+                      alert("Authentication required.");
+                    } else {
+                      Alert.alert("Authentication Required", "Biometric verification failed.");
+                    }
+                    return;
+                  }
+                  setShowSettings(false);
+                  setNukeInput("");
+                  setShowNukeConfirm(true);
+                }}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: "#2a0a0a",
+                  borderRadius: 10,
+                  padding: 14,
+                  marginTop: 4,
+                  borderWidth: 2,
+                  borderColor: "#8b0000",
+                }}
+                testID="nuke-vault-button"
+              >
+                <Ionicons name="nuclear-outline" size={20} color="#ff3333" style={{ marginRight: 8 }} />
+                <Text style={{ color: "#ff3333", fontSize: 15, fontWeight: "800" }}>Destroy All Vault Data</Text>
               </Pressable>
             </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showNukeConfirm} animationType="fade" transparent>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.9)", justifyContent: "center", alignItems: "center", paddingHorizontal: 24 }}>
+          <View style={{
+            backgroundColor: "#1a0a0a",
+            borderRadius: 16,
+            padding: 24,
+            width: "100%",
+            maxWidth: 360,
+            borderWidth: 2,
+            borderColor: "#8b0000",
+          }}>
+            <View style={{ alignItems: "center", marginBottom: 16 }}>
+              <Ionicons name="warning" size={48} color="#ff3333" />
+              <Text style={{ color: "#ff3333", fontSize: 20, fontWeight: "800", marginTop: 12, textAlign: "center" }}>
+                PERMANENT DESTRUCTION
+              </Text>
+            </View>
+            <Text style={{ color: "#ccc", fontSize: 14, lineHeight: 20, textAlign: "center", marginBottom: 20 }}>
+              This will permanently erase ALL vault entries, your Pi Seed, and all settings. This action cannot be undone. The app will restart from scratch.
+            </Text>
+            <Text style={{ color: "#888", fontSize: 12, marginBottom: 8 }}>
+              Type DELETE to confirm:
+            </Text>
+            <TextInput
+              value={nukeInput}
+              onChangeText={setNukeInput}
+              placeholder="Type DELETE"
+              placeholderTextColor="#555"
+              autoCapitalize="characters"
+              style={{
+                color: "#ff3333",
+                fontSize: 18,
+                fontWeight: "700",
+                backgroundColor: "#0a0a0a",
+                borderRadius: 8,
+                padding: 14,
+                textAlign: "center",
+                letterSpacing: 6,
+                borderWidth: 1,
+                borderColor: nukeInput === "DELETE" ? "#ff3333" : "#333",
+                marginBottom: 20,
+              }}
+              testID="nuke-confirm-input"
+            />
+            <Pressable
+              onPress={async () => {
+                if (nukeInput !== "DELETE") return;
+                try {
+                  if (keySharesRef.current) {
+                    wipeShares(keySharesRef.current);
+                    keySharesRef.current = null;
+                  }
+                  await destroyAllData();
+                  setShowNukeConfirm(false);
+                  onReset();
+                } catch (err) {
+                  console.error("Nuclear wipe failed:", err);
+                }
+              }}
+              disabled={nukeInput !== "DELETE"}
+              style={{
+                backgroundColor: nukeInput === "DELETE" ? "#8b0000" : "#333",
+                paddingVertical: 14,
+                borderRadius: 8,
+                alignItems: "center",
+                marginBottom: 10,
+              }}
+              testID="nuke-final-confirm"
+            >
+              <Text style={{ color: "#fff", fontSize: 16, fontWeight: "800" }}>
+                DESTROY EVERYTHING
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => { setShowNukeConfirm(false); setNukeInput(""); }}
+              style={{ paddingVertical: 10, alignItems: "center" }}
+              testID="nuke-cancel"
+            >
+              <Text style={{ color: "#888", fontSize: 14 }}>Cancel</Text>
+            </Pressable>
           </View>
         </View>
       </Modal>
