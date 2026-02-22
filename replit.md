@@ -131,12 +131,12 @@ scripts/          # Build scripts
 - `metro.config.js` — default Expo config (no custom asset extensions needed)
 
 ## Recent Changes
+- 2026-02-22: **v1.0.0 Seal** — Debug UI stripped (Audit Raw Data, Run Tests, Reveal Seed buttons removed; screen kept as empty "v1.0.0 — All systems nominal" placeholder). All console.log statements removed from production code. Loading screens polished with consistent typography (fontSize 18, fontWeight 600, letterSpacing 1, centered text with subtitles). Test data wiped for clean slate.
+- 2026-02-22: Secure Notes — SecureNotesModal (question mark icon in VaultScreen header) for storing non-password secrets. Full CRUD, same AES-256-CBC encryption, biometric-gated decrypt, clipboard auto-clear. Included in backup export/import, nuclear wipe, and security profile migration.
 - 2026-02-22: Watchman Security Layer — input sanitization (strips <>{}[]\/ chars, 64-char limit on title/username), heuristic lockout on Pi Seed input (>5 changes/sec or >20 char paste triggers 30s freeze), expo-screen-capture screenshot prevention on native, secureTextEntry + autoCorrect=false on all sensitive inputs
-- 2026-02-22: utils/watchman.ts — sanitizeInput(), createHeuristicState(), checkHeuristicLockout(), getLockoutRemaining() utility functions
-- 2026-02-22: Ghost Backup — export encrypted vault entries as .vault JSON file (web: Blob download, native: expo-file-system + expo-sharing)
+- 2026-02-22: Ghost Backup — export encrypted vault entries + secure notes as .vault JSON file (web: Blob download, native: expo-file-system + expo-sharing)
 - 2026-02-22: Recovery Protocol — import .vault backup on SeedSetupScreen via expo-document-picker (web: FileReader, native: DocumentPicker)
-- 2026-02-22: Nuclear Option — biometric-gated complete data wipe (entries, Pi seed, security profile) with DELETE text confirmation, resets app to seed setup
-- 2026-02-22: destroyAllData() in storageWorker — wipes vault, Pi seed, and security profile keys
+- 2026-02-22: Nuclear Option — biometric-gated complete data wipe (entries, notes, Pi seed, security profile) with DELETE text confirmation, resets app to seed setup
 - 2026-02-22: User-configurable Pi seed — SeedSetupScreen prompts on first launch (0-999999), stored in SecureStore, replaces hardcoded 42
 - 2026-02-22: User-configurable security profiles — Balanced (25k), Fortress (100k default), Deep Vault (250k) PBKDF2 iterations; stored in SecureStore; selectable on Seed Setup screen and via Settings modal in VaultScreen
 - 2026-02-22: Multi-round key derivation — PBKDF2 with configurable iterations on top of SHA-256 orbit hash for brute-force resistance
@@ -148,9 +148,6 @@ scripts/          # Build scripts
 - 2026-02-21: Added secure memory management — wipeBuffer() zeroes Uint8Array after use, all sensitive data in byte arrays
 - 2026-02-21: Implemented XOR key splitting — master key stored as ShareA ⊕ ShareB, never as single string in memory
 - 2026-02-21: Added biometric gate — requireFreshBiometric() forces new check per decryption, 2-second staleness window, no cached auth
-- 2026-02-21: Removed static pi_digits.txt — Pi digits now computed on-the-fly using Chudnovsky algorithm with binary splitting. Key derivation is fully synchronous, no file I/O needed
+- 2026-02-21: Removed static pi_digits.txt — Pi digits now computed on-the-fly using Chudnovsky algorithm with binary splitting
 - 2026-02-21: Implemented full Entropy Engine — Pi-based 3x3 Mandelbrot grid with orbit capture, deterministic jitter, device-tied SHA-256 hashing for AES key derivation
-- 2026-02-21: Added double-entry password validation, success alerts, and try/catch error handling in AddEntryModal
-- 2026-02-21: Updated biometric auth to use empty fallbackLabel and check hasHardwareAsync() before prompting
-- 2026-02-21: Added web fallback (localStorage) for SecureStore operations
-- 2026-02-21: Created hidden Debug screen (long-press "Vault" title) for testing determinism/sensitivity of key derivation with orbit logging
+- 2026-02-21: Hidden Debug screen (long-press "Vault" title) — now empty v1.0.0 placeholder, all test tools removed
