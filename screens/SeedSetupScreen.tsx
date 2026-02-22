@@ -1,8 +1,11 @@
 import React, { useState, useRef } from "react";
-import { View, Text, TextInput, Pressable, Platform, ScrollView, Keyboard, KeyboardAvoidingView } from "react-native";
+import { View, Text, TextInput, Pressable, Platform, ScrollView, Keyboard, KeyboardAvoidingView, Alert, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as ExpoCrypto from "expo-crypto";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import { saveEntry } from "../workers/storageWorker";
 
 const PROFILES = [
   { label: "Balanced", iterations: 25000, time: "~3s", desc: "Fast unlock", color: "#4CAF50", icon: "flash-outline" as const },
@@ -18,8 +21,65 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
   const insets = useSafeAreaInsets();
   const [seedInput, setSeedInput] = useState("");
   const [selectedProfile, setSelectedProfile] = useState(1);
+  const [importing, setImporting] = useState(false);
+  const [importedCount, setImportedCount] = useState<number | null>(null);
   const inputRef = useRef<TextInput>(null);
   const webTopInset = Platform.OS === "web" ? 67 : 0;
+
+  async function handleImport() {
+    try {
+      let json: string | null = null;
+
+      if (Platform.OS === "web") {
+        json = await new Promise<string | null>((resolve) => {
+          const input = document.createElement("input");
+          input.type = "file";
+          input.accept = ".vault,.json";
+          input.onchange = (e: any) => {
+            const file = e.target.files?.[0];
+            if (!file) { resolve(null); return; }
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => resolve(null);
+            reader.readAsText(file);
+          };
+          input.click();
+        });
+      } else {
+        const result = await DocumentPicker.getDocumentAsync({ type: "*/*", copyToCacheDirectory: true });
+        if (result.canceled || !result.assets?.[0]) return;
+        json = await FileSystem.readAsStringAsync(result.assets[0].uri, { encoding: FileSystem.EncodingType.UTF8 });
+      }
+
+      if (!json) return;
+
+      const backup = JSON.parse(json);
+      if (!backup.version || !Array.isArray(backup.entries)) {
+        const msg = "This file doesn't appear to be a valid PiPass backup.";
+        if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Invalid File", msg); }
+        return;
+      }
+
+      setImporting(true);
+      let count = 0;
+      for (const entry of backup.entries) {
+        if (entry.id && entry.title) {
+          await saveEntry(entry);
+          count++;
+        }
+      }
+      setImportedCount(count);
+      setImporting(false);
+
+      const msg = `Successfully imported ${count} entries. Set your Pi Seed and security profile to unlock the vault.`;
+      if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Import Complete", msg); }
+    } catch (err) {
+      setImporting(false);
+      console.error("Import failed:", err);
+      const msg = "Could not read the backup file. Make sure it's a valid .vault file.";
+      if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Import Failed", msg); }
+    }
+  }
 
   function handleRandomSeed() {
     const bytes = ExpoCrypto.getRandomBytes(4);
@@ -210,9 +270,44 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
             testID="confirm-seed-button"
           >
             <Text style={{ color: "#fff", fontSize: 16, fontWeight: "700" }}>
-              Set Seed & Create Vault
+              {importedCount !== null ? `Set Seed & Restore ${importedCount} Entries` : "Set Seed & Create Vault"}
             </Text>
           </Pressable>
+
+          <View style={{ marginTop: 32, borderTopWidth: 1, borderTopColor: "#222", paddingTop: 24 }}>
+            <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 10 }}>
+              Restore From Backup
+            </Text>
+            <Pressable
+              onPress={handleImport}
+              disabled={importing}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: "#0a1a1a",
+                borderRadius: 10,
+                padding: 14,
+                borderWidth: 1,
+                borderColor: "#114a4a",
+              }}
+              testID="import-backup-button"
+            >
+              {importing ? (
+                <ActivityIndicator size="small" color="#4CAF50" />
+              ) : (
+                <>
+                  <Ionicons name="cloud-upload-outline" size={18} color="#4CAF50" style={{ marginRight: 8 }} />
+                  <Text style={{ color: "#4CAF50", fontSize: 15, fontWeight: "600" }}>
+                    {importedCount !== null ? `${importedCount} Entries Loaded` : "Import .vault Backup"}
+                  </Text>
+                </>
+              )}
+            </Pressable>
+            <Text style={{ color: "#666", fontSize: 11, textAlign: "center", marginTop: 8, lineHeight: 16 }}>
+              Import a previously exported PiPass backup file. You must use the same Pi Seed and security profile that created the original vault.
+            </Text>
+          </View>
         </ScrollView>
       </Pressable>
     </KeyboardAvoidingView>
