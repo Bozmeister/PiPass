@@ -51,7 +51,14 @@ export function deriveClusterKey(userPiSeed: number): string {
   const seedStr = userPiSeed.toString();
 
   const hashInput = orbitData + deviceId + seedStr;
-  const clusterKey = CryptoJS.SHA256(hashInput).toString(CryptoJS.enc.Hex);
+  const initialHash = CryptoJS.SHA256(hashInput).toString(CryptoJS.enc.Hex);
 
-  return clusterKey;
+  const salt = CryptoJS.SHA256(deviceId + seedStr).toString(CryptoJS.enc.Hex);
+  const stretched = CryptoJS.PBKDF2(initialHash, salt, {
+    keySize: 256 / 32,
+    iterations: 100000,
+    hasher: CryptoJS.algo.SHA256,
+  });
+
+  return stretched.toString(CryptoJS.enc.Hex);
 }
