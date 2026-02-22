@@ -7,6 +7,7 @@ import {
   ScrollView,
   Platform,
   ActivityIndicator,
+  Alert,
 } from "react-native";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -14,6 +15,8 @@ import { Ionicons } from "@expo/vector-icons";
 import { extractPiDigits, mapDigitsToCoordinates } from "../crypto/pi";
 import { computeFullPipeline } from "../crypto/mandelbrot";
 import { deriveClusterKey } from "../crypto/keyDerivation";
+import { requireFreshBiometric } from "../crypto/biometricGate";
+import { getPiSeed } from "../workers/storageWorker";
 
 interface TestResult {
   piIndex: number;
@@ -79,8 +82,40 @@ export default function DebugScreen() {
   const [sensitivityResult, setSensitivityResult] = useState<TestResult | null>(null);
   const [determinismPass, setDeterminismPass] = useState<boolean | null>(null);
   const [sensitivityPass, setSensitivityPass] = useState<boolean | null>(null);
+  const [revealedSeed, setRevealedSeed] = useState<string | null>(null);
+  const [revealingSeeed, setRevealingSeed] = useState(false);
 
   const webTopInset = Platform.OS === "web" ? 67 : 0;
+
+  async function handleRevealSeed() {
+    setRevealingSeed(true);
+    try {
+      const bioResult = await requireFreshBiometric();
+      if (!bioResult) {
+        if (Platform.OS === "web") {
+          alert("Authentication required to reveal your seed.");
+        } else {
+          Alert.alert("Authentication Required", "Biometric verification failed.");
+        }
+        setRevealingSeed(false);
+        return;
+      }
+      const seed = await getPiSeed();
+      if (seed !== null) {
+        setRevealedSeed(seed.toString());
+        setTimeout(() => setRevealedSeed(null), 10000);
+      } else {
+        if (Platform.OS === "web") {
+          alert("No seed found. Set up your vault first.");
+        } else {
+          Alert.alert("No Seed", "No Pi seed has been configured yet.");
+        }
+      }
+    } catch (err) {
+      console.error("Failed to reveal seed:", err);
+    }
+    setRevealingSeed(false);
+  }
 
   function handleRunTests() {
     const idx = parseInt(piIndex, 10);
@@ -172,6 +207,67 @@ export default function DebugScreen() {
           paddingBottom: insets.bottom + (Platform.OS === "web" ? 34 : 0) + 24,
         }}
       >
+        <View style={{
+          backgroundColor: "#111",
+          borderRadius: 8,
+          padding: 12,
+          marginBottom: 20,
+          borderWidth: 1,
+          borderColor: "#333",
+        }}>
+          <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 8 }}>
+            <Ionicons name="eye-outline" size={18} color="#fbbf24" />
+            <Text style={{ color: "#fff", fontSize: 15, fontWeight: "700", marginLeft: 8 }}>
+              Your Pi Seed
+            </Text>
+          </View>
+          {revealedSeed !== null ? (
+            <View style={{
+              backgroundColor: "#1a1a0a",
+              borderWidth: 1,
+              borderColor: "#444400",
+              borderRadius: 8,
+              padding: 12,
+              alignItems: "center",
+            }}>
+              <Text style={{ color: "#fbbf24", fontSize: 28, fontWeight: "bold", letterSpacing: 4, fontFamily: Platform.OS === "web" ? "monospace" : undefined }}>
+                {revealedSeed}
+              </Text>
+              <Text style={{ color: "#888", fontSize: 11, marginTop: 6 }}>
+                Auto-hides in 10 seconds
+              </Text>
+            </View>
+          ) : (
+            <Pressable
+              onPress={handleRevealSeed}
+              disabled={revealingSeeed}
+              style={{
+                backgroundColor: revealingSeeed ? "#333" : "#1a1a2e",
+                paddingVertical: 12,
+                borderRadius: 8,
+                alignItems: "center",
+                borderWidth: 1,
+                borderColor: "#334",
+              }}
+              testID="reveal-seed-button"
+            >
+              {revealingSeeed ? (
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <ActivityIndicator size="small" color="#fff" />
+                  <Text style={{ color: "#fff", fontSize: 14, marginLeft: 8 }}>Authenticating...</Text>
+                </View>
+              ) : (
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <Ionicons name="finger-print-outline" size={18} color="#fbbf24" />
+                  <Text style={{ color: "#fbbf24", fontSize: 14, fontWeight: "600", marginLeft: 8 }}>
+                    Reveal Seed (Biometric Required)
+                  </Text>
+                </View>
+              )}
+            </Pressable>
+          )}
+        </View>
+
         <Text style={{ color: "#888", fontSize: 13, marginBottom: 12 }}>
           Tests determinism (same input = same hash) and sensitivity (different
           input = different hash) of the Entropy Engine key derivation.

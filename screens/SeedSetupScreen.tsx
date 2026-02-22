@@ -118,7 +118,7 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
               </Text>
             </View>
             <Text style={{ color: "#aaa", fontSize: 12, lineHeight: 18 }}>
-              Your Pi seed cannot be recovered. If you forget it, your encrypted passwords will be permanently inaccessible.
+              This number is the heart of your vault. If you lose it, your passwords cannot be recovered.
             </Text>
           </View>
 
