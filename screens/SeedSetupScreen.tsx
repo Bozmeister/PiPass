@@ -4,13 +4,20 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as ExpoCrypto from "expo-crypto";
 
+const PROFILES = [
+  { label: "Balanced", iterations: 25000, time: "~3s", desc: "Fast unlock", color: "#4CAF50", icon: "flash-outline" as const },
+  { label: "Fortress", iterations: 100000, time: "~8s", desc: "Recommended", color: "#fbbf24", icon: "shield-checkmark-outline" as const },
+  { label: "Deep Vault", iterations: 250000, time: "~20s", desc: "Maximum protection", color: "#ef4444", icon: "lock-closed-outline" as const },
+];
+
 interface SeedSetupScreenProps {
-  onSeedSet: (seed: number) => void;
+  onSeedSet: (seed: number, iterations: number) => void;
 }
 
 export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
   const insets = useSafeAreaInsets();
   const [seedInput, setSeedInput] = useState("");
+  const [selectedProfile, setSelectedProfile] = useState(1);
   const inputRef = useRef<TextInput>(null);
   const webTopInset = Platform.OS === "web" ? 67 : 0;
 
@@ -26,7 +33,7 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
     const seed = parseInt(seedInput, 10);
     if (isNaN(seed) || seed < 0 || seed > 999999) return;
     Keyboard.dismiss();
-    onSeedSet(seed);
+    onSeedSet(seed, PROFILES[selectedProfile].iterations);
   }
 
   const seedValue = parseInt(seedInput, 10);
@@ -103,12 +110,81 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
             </Text>
           </Pressable>
 
+          <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 10 }}>
+            Security Profile
+          </Text>
+          {PROFILES.map((profile, idx) => {
+            const selected = idx === selectedProfile;
+            return (
+              <Pressable
+                key={profile.label}
+                onPress={() => setSelectedProfile(idx)}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  backgroundColor: selected ? "#1a1a2e" : "#111",
+                  borderRadius: 10,
+                  padding: 14,
+                  marginBottom: 10,
+                  borderWidth: 2,
+                  borderColor: selected ? profile.color : "#222",
+                }}
+                testID={`profile-${profile.label.toLowerCase().replace(" ", "-")}`}
+              >
+                <View style={{
+                  width: 22,
+                  height: 22,
+                  borderRadius: 11,
+                  borderWidth: 2,
+                  borderColor: selected ? profile.color : "#555",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  marginRight: 12,
+                }}>
+                  {selected && (
+                    <View style={{
+                      width: 12,
+                      height: 12,
+                      borderRadius: 6,
+                      backgroundColor: profile.color,
+                    }} />
+                  )}
+                </View>
+                <Ionicons name={profile.icon} size={20} color={selected ? profile.color : "#666"} style={{ marginRight: 10 }} />
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center" }}>
+                    <Text style={{ color: selected ? "#fff" : "#aaa", fontSize: 15, fontWeight: "700" }}>
+                      {profile.label}
+                    </Text>
+                    {profile.label === "Fortress" && (
+                      <View style={{ backgroundColor: "#fbbf2433", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1, marginLeft: 8 }}>
+                        <Text style={{ color: "#fbbf24", fontSize: 10, fontWeight: "700" }}>DEFAULT</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={{ color: "#888", fontSize: 12, marginTop: 2 }}>
+                    {profile.desc}
+                  </Text>
+                </View>
+                <View style={{ alignItems: "flex-end" }}>
+                  <Text style={{ color: selected ? profile.color : "#666", fontSize: 13, fontWeight: "600" }}>
+                    {profile.time}
+                  </Text>
+                  <Text style={{ color: "#555", fontSize: 10 }}>
+                    {(profile.iterations / 1000).toFixed(0)}k rounds
+                  </Text>
+                </View>
+              </Pressable>
+            );
+          })}
+
           <View style={{
             backgroundColor: "#1a1a0a",
             borderWidth: 1,
             borderColor: "#444400",
             borderRadius: 8,
             padding: 12,
+            marginTop: 14,
             marginBottom: 24,
           }}>
             <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 4 }}>

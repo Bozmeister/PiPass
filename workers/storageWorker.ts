@@ -133,3 +133,16 @@ export async function getPiSeed(): Promise<number | null> {
   const num = parseInt(val, 10);
   return isNaN(num) ? null : num;
 }
+
+const SECURITY_PROFILE_KEY = "pipass_security_profile";
+
+export async function saveSecurityProfile(iterations: number): Promise<void> {
+  await setItem(SECURITY_PROFILE_KEY, iterations.toString());
+}
+
+export async function getSecurityProfile(): Promise<number> {
+  const val = await getItem(SECURITY_PROFILE_KEY);
+  if (val === null) return 100000;
+  const num = parseInt(val, 10);
+  return isNaN(num) ? 100000 : num;
+}

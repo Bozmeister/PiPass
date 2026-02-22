@@ -35,8 +35,8 @@ export interface DecryptedVaultEntry {
   updatedAt: number;
 }
 
-export function deriveMasterKeyShares(userPiSeed: number): KeyShares {
-  const rawKey = deriveClusterKey(userPiSeed);
+export function deriveMasterKeyShares(userPiSeed: number, iterations: number = 100000): KeyShares {
+  const rawKey = deriveClusterKey(userPiSeed, iterations);
   const shares = splitKeyIntoShares(rawKey);
   const rawBytes = hexToBytes(rawKey);
   wipeBuffer(rawBytes);

@@ -34,7 +34,7 @@ function serializeOrbits(grid: GridPoint[]): string {
   return JSON.stringify(orbits);
 }
 
-export function deriveClusterKey(userPiSeed: number): string {
+export function deriveClusterKey(userPiSeed: number, iterations: number = 100000): string {
   const digits30 = extractPiDigits(userPiSeed, 30);
 
   const coords = mapDigitsToCoordinates(digits30);
@@ -56,7 +56,7 @@ export function deriveClusterKey(userPiSeed: number): string {
   const salt = CryptoJS.SHA256(deviceId + seedStr).toString(CryptoJS.enc.Hex);
   const stretched = CryptoJS.PBKDF2(initialHash, salt, {
     keySize: 256 / 32,
-    iterations: 100000,
+    iterations: iterations,
     hasher: CryptoJS.algo.SHA256,
   });
 

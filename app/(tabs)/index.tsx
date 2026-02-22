@@ -3,26 +3,34 @@ import { View, ActivityIndicator } from "react-native";
 import AuthScreen from "../../screens/AuthScreen";
 import SeedSetupScreen from "../../screens/SeedSetupScreen";
 import VaultScreen from "../../screens/VaultScreen";
-import { getPiSeed, savePiSeed } from "../../workers/storageWorker";
+import { getPiSeed, savePiSeed, getSecurityProfile, saveSecurityProfile } from "../../workers/storageWorker";
 
 export default function HomeScreen() {
   const [authenticated, setAuthenticated] = useState(false);
   const [piSeed, setPiSeed] = useState<number | null>(null);
+  const [iterations, setIterations] = useState<number>(100000);
   const [checkingSeed, setCheckingSeed] = useState(true);
 
   useEffect(() => {
-    loadSeed();
+    loadSettings();
   }, []);
 
-  async function loadSeed() {
-    const saved = await getPiSeed();
+  async function loadSettings() {
+    const [saved, profile] = await Promise.all([getPiSeed(), getSecurityProfile()]);
     setPiSeed(saved);
+    setIterations(profile);
     setCheckingSeed(false);
   }
 
-  async function handleSeedSet(seed: number) {
-    await savePiSeed(seed);
+  async function handleSeedSet(seed: number, iters: number) {
+    await Promise.all([savePiSeed(seed), saveSecurityProfile(iters)]);
     setPiSeed(seed);
+    setIterations(iters);
+  }
+
+  async function handleIterationsChange(iters: number) {
+    await saveSecurityProfile(iters);
+    setIterations(iters);
   }
 
   function handleLock() {
@@ -45,5 +53,12 @@ export default function HomeScreen() {
     return <SeedSetupScreen onSeedSet={handleSeedSet} />;
   }
 
-  return <VaultScreen piSeed={piSeed} onLock={handleLock} />;
+  return (
+    <VaultScreen
+      piSeed={piSeed}
+      iterations={iterations}
+      onLock={handleLock}
+      onIterationsChange={handleIterationsChange}
+    />
+  );
 }

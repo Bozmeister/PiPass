@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, FlatList, Pressable, Alert, Platform, ActivityIndicator, AppState } from "react-native";
+import { View, Text, FlatList, Pressable, Alert, Platform, ActivityIndicator, AppState, Modal, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -23,12 +23,20 @@ import FaviconImage from "../components/FaviconImage";
 
 const AUTO_LOCK_MS = 60000;
 
+const PROFILES = [
+  { label: "Balanced", iterations: 25000, time: "~3s", desc: "Fast unlock", color: "#4CAF50", icon: "flash-outline" as const },
+  { label: "Fortress", iterations: 100000, time: "~8s", desc: "Recommended", color: "#fbbf24", icon: "shield-checkmark-outline" as const },
+  { label: "Deep Vault", iterations: 250000, time: "~20s", desc: "Maximum protection", color: "#ef4444", icon: "lock-closed-outline" as const },
+];
+
 interface VaultScreenProps {
   piSeed: number;
+  iterations: number;
   onLock: () => void;
+  onIterationsChange: (iterations: number) => void;
 }
 
-export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
+export default function VaultScreen({ piSeed, iterations, onLock, onIterationsChange }: VaultScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [entries, setEntries] = useState<VaultEntry[]>([]);
@@ -39,6 +47,7 @@ export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
   const [selectedEntry, setSelectedEntry] = useState<VaultEntry | null>(null);
   const [decryptedEntry, setDecryptedEntry] = useState<DecryptedVaultEntry | null>(null);
   const [decrypting, setDecrypting] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   const lastActivityRef = useRef<number>(Date.now());
   const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -84,7 +93,7 @@ export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
     setDerivingKey(true);
     setTimeout(() => {
       try {
-        const shares = deriveMasterKeyShares(piSeed);
+        const shares = deriveMasterKeyShares(piSeed, iterations);
         keySharesRef.current = shares;
       } catch (err) {
         console.error("Failed to derive master key:", err);
@@ -274,9 +283,14 @@ export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
         >
           <Text style={{ color: "#fff", fontSize: 28, fontWeight: "bold" }}>Vault</Text>
         </Pressable>
-        <Pressable onPress={() => setShowAddModal(true)} testID="add-entry-button">
-          <Ionicons name="add-circle-outline" size={28} color="#fff" />
-        </Pressable>
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <Pressable onPress={() => setShowSettings(true)} testID="settings-button" style={{ marginRight: 16 }}>
+            <Ionicons name="settings-outline" size={24} color="#fff" />
+          </Pressable>
+          <Pressable onPress={() => setShowAddModal(true)} testID="add-entry-button">
+            <Ionicons name="add-circle-outline" size={28} color="#fff" />
+          </Pressable>
+        </View>
       </View>
 
       {entries.length === 0 ? (
@@ -315,6 +329,127 @@ export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
           onDelete={() => handleDeleteEntry(selectedEntry.id)}
         />
       )}
+
+      <Modal visible={showSettings} animationType="slide" transparent>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.85)", justifyContent: "flex-end" }}>
+          <View style={{
+            backgroundColor: "#111",
+            borderTopLeftRadius: 20,
+            borderTopRightRadius: 20,
+            paddingTop: 16,
+            paddingBottom: insets.bottom + (Platform.OS === "web" ? 34 : 16),
+            paddingHorizontal: 20,
+            maxHeight: "80%",
+          }}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <Text style={{ color: "#fff", fontSize: 20, fontWeight: "bold" }}>Settings</Text>
+              <Pressable onPress={() => setShowSettings(false)} testID="close-settings">
+                <Ionicons name="close-circle" size={28} color="#555" />
+              </Pressable>
+            </View>
+
+            <ScrollView>
+              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 10 }}>
+                Security Profile
+              </Text>
+              <Text style={{ color: "#666", fontSize: 12, marginBottom: 14, lineHeight: 18 }}>
+                Controls the number of key-stretching rounds. Higher = slower unlock but harder to brute-force. Changes take effect on next unlock.
+              </Text>
+
+              {PROFILES.map((profile) => {
+                const selected = iterations === profile.iterations;
+                return (
+                  <Pressable
+                    key={profile.label}
+                    onPress={() => {
+                      onIterationsChange(profile.iterations);
+                      if (Platform.OS === "web") {
+                        alert(`Security profile changed to ${profile.label}. Will take effect on next unlock.`);
+                      } else {
+                        Alert.alert("Profile Updated", `Security set to ${profile.label}. Will take effect on next unlock.`);
+                      }
+                    }}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      backgroundColor: selected ? "#1a1a2e" : "#181818",
+                      borderRadius: 10,
+                      padding: 14,
+                      marginBottom: 10,
+                      borderWidth: 2,
+                      borderColor: selected ? profile.color : "#222",
+                    }}
+                    testID={`settings-profile-${profile.label.toLowerCase().replace(" ", "-")}`}
+                  >
+                    <View style={{
+                      width: 22,
+                      height: 22,
+                      borderRadius: 11,
+                      borderWidth: 2,
+                      borderColor: selected ? profile.color : "#555",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      marginRight: 12,
+                    }}>
+                      {selected && (
+                        <View style={{
+                          width: 12,
+                          height: 12,
+                          borderRadius: 6,
+                          backgroundColor: profile.color,
+                        }} />
+                      )}
+                    </View>
+                    <Ionicons name={profile.icon} size={20} color={selected ? profile.color : "#666"} style={{ marginRight: 10 }} />
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center" }}>
+                        <Text style={{ color: selected ? "#fff" : "#aaa", fontSize: 15, fontWeight: "700" }}>
+                          {profile.label}
+                        </Text>
+                        {profile.label === "Fortress" && (
+                          <View style={{ backgroundColor: "#fbbf2433", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1, marginLeft: 8 }}>
+                            <Text style={{ color: "#fbbf24", fontSize: 10, fontWeight: "700" }}>DEFAULT</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={{ color: "#888", fontSize: 12, marginTop: 2 }}>
+                        {profile.desc}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: "flex-end" }}>
+                      <Text style={{ color: selected ? profile.color : "#666", fontSize: 13, fontWeight: "600" }}>
+                        {profile.time}
+                      </Text>
+                      <Text style={{ color: "#555", fontSize: 10 }}>
+                        {(profile.iterations / 1000).toFixed(0)}k rounds
+                      </Text>
+                    </View>
+                  </Pressable>
+                );
+              })}
+
+              <Pressable
+                onPress={onLock}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: "#1a1a1a",
+                  borderRadius: 10,
+                  padding: 14,
+                  marginTop: 16,
+                  borderWidth: 1,
+                  borderColor: "#333",
+                }}
+                testID="lock-vault-button"
+              >
+                <Ionicons name="lock-closed-outline" size={18} color="#ef4444" style={{ marginRight: 8 }} />
+                <Text style={{ color: "#ef4444", fontSize: 15, fontWeight: "600" }}>Lock Vault</Text>
+              </Pressable>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
