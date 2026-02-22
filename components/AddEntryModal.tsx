@@ -2,6 +2,34 @@ import React, { useState } from "react";
 import { View, Text, TextInput, Pressable, Modal, ScrollView, Platform, KeyboardAvoidingView, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import * as ExpoCrypto from "expo-crypto";
+
+function generateStrongPassword(length: number = 20): string {
+  const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const lower = "abcdefghijklmnopqrstuvwxyz";
+  const digits = "0123456789";
+  const symbols = "!@#$%^&*_+-=?";
+  const all = upper + lower + digits + symbols;
+
+  const bytes = ExpoCrypto.getRandomBytes(length);
+  const chars: string[] = [
+    upper[bytes[0] % upper.length],
+    lower[bytes[1] % lower.length],
+    digits[bytes[2] % digits.length],
+    symbols[bytes[3] % symbols.length],
+  ];
+
+  for (let i = 4; i < length; i++) {
+    chars.push(all[bytes[i] % all.length]);
+  }
+
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = bytes[i] % (i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+
+  return chars.join("");
+}
 
 interface AddEntryModalProps {
   visible: boolean;
@@ -24,6 +52,14 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
   const [url, setUrl] = useState("");
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
+  const [showGenerated, setShowGenerated] = useState(false);
+
+  function handleGeneratePassword() {
+    const strong = generateStrongPassword(20);
+    setPassword(strong);
+    setConfirmPassword(strong);
+    setShowGenerated(true);
+  }
 
   const passwordsMatch = password === confirmPassword;
   const showMismatch = confirmPassword.length > 0 && !passwordsMatch;
@@ -48,6 +84,7 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
       setConfirmPassword("");
       setUrl("");
       setNotes("");
+      setShowGenerated(false);
 
       if (Platform.OS === "web") {
         alert("Entry Saved");
@@ -110,26 +147,43 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
                 testID="username-input"
               />
 
-              <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Password *</Text>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" }}>Password *</Text>
+                <Pressable onPress={handleGeneratePassword} testID="generate-password-button">
+                  <View style={{ flexDirection: "row", alignItems: "center" }}>
+                    <Ionicons name="key-outline" size={14} color="#4CAF50" />
+                    <Text style={{ color: "#4CAF50", fontSize: 12, fontWeight: "600", marginLeft: 4 }}>Generate</Text>
+                  </View>
+                </Pressable>
+              </View>
               <TextInput
                 value={password}
-                onChangeText={setPassword}
+                onChangeText={(t) => { setPassword(t); setShowGenerated(false); }}
                 placeholder="Enter password"
                 placeholderTextColor="#555"
-                secureTextEntry
+                secureTextEntry={!showGenerated}
                 autoCapitalize="none"
-                style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16 }}
+                textContentType="none"
+                autoComplete="off"
+                style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: showGenerated ? 4 : 16 }}
                 testID="password-input"
               />
+              {showGenerated && (
+                <Text style={{ color: "#4CAF50", fontSize: 11, marginBottom: 16 }}>
+                  Strong password generated and auto-filled
+                </Text>
+              )}
 
               <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Confirm Password *</Text>
               <TextInput
                 value={confirmPassword}
-                onChangeText={setConfirmPassword}
+                onChangeText={(t) => { setConfirmPassword(t); setShowGenerated(false); }}
                 placeholder="Re-enter password"
                 placeholderTextColor="#555"
-                secureTextEntry
+                secureTextEntry={!showGenerated}
                 autoCapitalize="none"
+                textContentType="none"
+                autoComplete="off"
                 style={{
                   color: "#fff",
                   fontSize: 16,
