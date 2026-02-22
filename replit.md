@@ -131,6 +131,10 @@ scripts/          # Build scripts
 - `metro.config.js` — default Expo config (no custom asset extensions needed)
 
 ## Recent Changes
+- 2026-02-22: Ghost Backup — export encrypted vault entries as .vault JSON file (web: Blob download, native: expo-file-system + expo-sharing)
+- 2026-02-22: Recovery Protocol — import .vault backup on SeedSetupScreen via expo-document-picker (web: FileReader, native: DocumentPicker)
+- 2026-02-22: Nuclear Option — biometric-gated complete data wipe (entries, Pi seed, security profile) with DELETE text confirmation, resets app to seed setup
+- 2026-02-22: destroyAllData() in storageWorker — wipes vault, Pi seed, and security profile keys
 - 2026-02-22: User-configurable Pi seed — SeedSetupScreen prompts on first launch (0-999999), stored in SecureStore, replaces hardcoded 42
 - 2026-02-22: User-configurable security profiles — Balanced (25k), Fortress (100k default), Deep Vault (250k) PBKDF2 iterations; stored in SecureStore; selectable on Seed Setup screen and via Settings modal in VaultScreen
 - 2026-02-22: Multi-round key derivation — PBKDF2 with configurable iterations on top of SHA-256 orbit hash for brute-force resistance
