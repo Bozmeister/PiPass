@@ -82,14 +82,16 @@ export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
 
   function initializeVault() {
     setDerivingKey(true);
-    try {
-      const shares = deriveMasterKeyShares(piSeed);
-      keySharesRef.current = shares;
-    } catch (err) {
-      console.error("Failed to derive master key:", err);
-    }
-    setDerivingKey(false);
-    loadEntries();
+    setTimeout(() => {
+      try {
+        const shares = deriveMasterKeyShares(piSeed);
+        keySharesRef.current = shares;
+      } catch (err) {
+        console.error("Failed to derive master key:", err);
+      }
+      setDerivingKey(false);
+      loadEntries();
+    }, 100);
   }
 
   async function loadEntries() {
