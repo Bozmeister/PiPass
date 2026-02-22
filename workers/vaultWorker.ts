@@ -102,6 +102,33 @@ export function decryptVaultEntry(
   }
 }
 
+export function reEncryptEntry(
+  entry: VaultEntry,
+  oldShares: KeyShares,
+  newShares: KeyShares
+): VaultEntry {
+  const decrypted = decryptVaultEntry(entry, oldShares);
+  const newKeyHex = combineShares(newShares);
+  try {
+    return {
+      id: entry.id,
+      title: decrypted.title,
+      username: decrypted.username,
+      encryptedPassword: encryptData(decrypted.password, newKeyHex),
+      encryptedTitle: encryptData(decrypted.title, newKeyHex),
+      encryptedUsername: encryptData(decrypted.username, newKeyHex),
+      encryptedUrl: decrypted.url ? encryptData(decrypted.url, newKeyHex) : undefined,
+      url: decrypted.url,
+      notes: decrypted.notes ? encryptData(decrypted.notes, newKeyHex) : undefined,
+      createdAt: entry.createdAt,
+      updatedAt: Date.now(),
+    };
+  } finally {
+    const wipeBuf = hexToBytes(newKeyHex);
+    wipeBuffer(wipeBuf);
+  }
+}
+
 function generateId(): string {
   const bytes = ExpoCrypto.getRandomBytes(15);
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";

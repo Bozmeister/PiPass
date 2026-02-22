@@ -8,6 +8,7 @@ import {
   encryptVaultEntry,
   decryptVaultEntry,
   deriveMasterKeyShares,
+  reEncryptEntry,
   DecryptedVaultEntry,
 } from "../workers/vaultWorker";
 import { KeyShares, wipeShares } from "../crypto/secureMemory";
@@ -48,6 +49,8 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
   const [decryptedEntry, setDecryptedEntry] = useState<DecryptedVaultEntry | null>(null);
   const [decrypting, setDecrypting] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [migrating, setMigrating] = useState(false);
+  const [migrationProgress, setMigrationProgress] = useState("");
 
   const lastActivityRef = useRef<number>(Date.now());
   const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -136,6 +139,81 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
       console.error("handleAddEntry failed:", message);
       throw err;
     }
+  }
+
+  async function handleProfileChange(newIterations: number) {
+    resetActivity();
+    if (newIterations === iterations) return;
+    if (!keySharesRef.current) return;
+
+    const entryCount = entries.length;
+    if (entryCount === 0) {
+      onIterationsChange(newIterations);
+      const label = PROFILES.find(p => p.iterations === newIterations)?.label || "Updated";
+      if (Platform.OS === "web") {
+        alert(`Security profile changed to ${label}. Will take effect on next unlock.`);
+      } else {
+        Alert.alert("Profile Updated", `Security set to ${label}. Will take effect on next unlock.`);
+      }
+      return;
+    }
+
+    setMigrating(true);
+    setMigrationProgress(`Deriving new key (0/${entryCount})...`);
+
+    setTimeout(() => {
+      try {
+        const newShares = deriveMasterKeyShares(piSeed, newIterations);
+        const oldShares = keySharesRef.current!;
+        const updatedEntries: VaultEntry[] = [];
+
+        for (let i = 0; i < entries.length; i++) {
+          setMigrationProgress(`Re-encrypting ${i + 1} of ${entryCount}...`);
+          const reEncrypted = reEncryptEntry(entries[i], oldShares, newShares);
+          updatedEntries.push(reEncrypted);
+        }
+
+        setMigrationProgress("Saving entries...");
+
+        (async () => {
+          try {
+            for (const entry of updatedEntries) {
+              await saveEntry(entry);
+            }
+            wipeShares(oldShares);
+            keySharesRef.current = newShares;
+            await onIterationsChange(newIterations);
+            await loadEntries();
+            setMigrating(false);
+            setMigrationProgress("");
+            const label = PROFILES.find(p => p.iterations === newIterations)?.label || "Updated";
+            if (Platform.OS === "web") {
+              alert(`Migrated ${entryCount} entries to ${label} profile.`);
+            } else {
+              Alert.alert("Migration Complete", `${entryCount} entries re-encrypted with ${label} profile.`);
+            }
+          } catch (err) {
+            console.error("Migration save failed:", err);
+            setMigrating(false);
+            setMigrationProgress("");
+            if (Platform.OS === "web") {
+              alert("Migration failed while saving. Your entries are unchanged.");
+            } else {
+              Alert.alert("Migration Failed", "Could not save re-encrypted entries. Your vault is unchanged.");
+            }
+          }
+        })();
+      } catch (err) {
+        console.error("Migration failed:", err);
+        setMigrating(false);
+        setMigrationProgress("");
+        if (Platform.OS === "web") {
+          alert("Migration failed during key derivation. Your entries are unchanged.");
+        } else {
+          Alert.alert("Migration Failed", "Could not derive new key. Your vault is unchanged.");
+        }
+      }
+    }, 100);
   }
 
   async function handleDeleteEntry(id: string) {
@@ -254,6 +332,21 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
     );
   }
 
+  if (migrating) {
+    return (
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
+        <ActivityIndicator size="large" color="#fbbf24" />
+        <Text style={{ color: "#fff", fontSize: 16, marginTop: 16 }}>Migrating Vault...</Text>
+        <Text style={{ color: "#888", fontSize: 13, marginTop: 8, textAlign: "center", paddingHorizontal: 32 }}>
+          {migrationProgress}
+        </Text>
+        <Text style={{ color: "#666", fontSize: 11, marginTop: 12, textAlign: "center", paddingHorizontal: 40 }}>
+          Do not close the app. Your entries are being re-encrypted with the new security profile.
+        </Text>
+      </View>
+    );
+  }
+
   if (loading) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
@@ -362,12 +455,8 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
                   <Pressable
                     key={profile.label}
                     onPress={() => {
-                      onIterationsChange(profile.iterations);
-                      if (Platform.OS === "web") {
-                        alert(`Security profile changed to ${profile.label}. Will take effect on next unlock.`);
-                      } else {
-                        Alert.alert("Profile Updated", `Security set to ${profile.label}. Will take effect on next unlock.`);
-                      }
+                      setShowSettings(false);
+                      handleProfileChange(profile.iterations);
                     }}
                     style={{
                       flexDirection: "row",
