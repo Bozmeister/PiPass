@@ -214,6 +214,20 @@ export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
     []
   );
 
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!derivingKey) {
+      setElapsedSeconds(0);
+      return;
+    }
+    setElapsedSeconds(0);
+    const timer = setInterval(() => {
+      setElapsedSeconds((s) => s + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [derivingKey]);
+
   if (derivingKey) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
@@ -221,6 +235,9 @@ export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
         <Text style={{ color: "#fff", fontSize: 16, marginTop: 16 }}>Synchronizing Vault Geometry...</Text>
         <Text style={{ color: "#888", fontSize: 12, marginTop: 8, textAlign: "center", paddingHorizontal: 32 }}>
           Initializing entropy shards
+        </Text>
+        <Text style={{ color: "#fff", fontSize: 14, marginTop: 12 }}>
+          {elapsedSeconds}s
         </Text>
       </View>
     );
