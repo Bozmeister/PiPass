@@ -102,16 +102,6 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
   useEffect(() => {
     initializeVault();
 
-    autoLockTimerRef.current = setInterval(() => {
-      if (Date.now() - lastActivityRef.current > AUTO_LOCK_MS) {
-        if (keySharesRef.current) {
-          wipeShares(keySharesRef.current);
-          keySharesRef.current = null;
-        }
-        onLock();
-      }
-    }, 5000);
-
     const appStateSub = AppState.addEventListener("change", (state) => {
       if (state === "background" || state === "inactive") {
         if (keySharesRef.current) {
@@ -177,6 +167,16 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
         console.error("Failed to derive master key:", err);
       }
       setDerivingKey(false);
+      resetActivity();
+      autoLockTimerRef.current = setInterval(() => {
+        if (Date.now() - lastActivityRef.current > AUTO_LOCK_MS) {
+          if (keySharesRef.current) {
+            wipeShares(keySharesRef.current);
+            keySharesRef.current = null;
+          }
+          onLock();
+        }
+      }, 5000);
     }, 100);
   }
 
