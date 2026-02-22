@@ -131,6 +131,13 @@ scripts/          # Build scripts
 - `metro.config.js` — default Expo config (no custom asset extensions needed)
 
 ## Recent Changes
+- 2026-02-22: User-configurable Pi seed — SeedSetupScreen prompts on first launch (0-999999), stored in SecureStore, replaces hardcoded 42
+- 2026-02-22: Multi-round key derivation — PBKDF2 with 100,000 iterations on top of SHA-256 orbit hash for brute-force resistance
+- 2026-02-22: Encrypted metadata — titles, usernames, and URLs now encrypted alongside passwords in vault entries (backward-compatible with unencrypted entries)
+- 2026-02-22: Auto-lock — vault locks after 60 seconds of inactivity or when app enters background, wiping key shares from memory
+- 2026-02-22: Clipboard auto-clear — clipboard wiped 30 seconds after copying any field via expo-clipboard
+- 2026-02-22: Copy buttons — username, password, and URL fields now have copy-to-clipboard buttons in EntryDetailModal
+- 2026-02-22: Cryptographic ID generation — vault entry IDs now use expo-crypto.getRandomBytes() instead of Math.random()
 - 2026-02-21: Added secure memory management — wipeBuffer() zeroes Uint8Array after use, all sensitive data in byte arrays
 - 2026-02-21: Implemented XOR key splitting — master key stored as ShareA ⊕ ShareB, never as single string in memory
 - 2026-02-21: Added biometric gate — requireFreshBiometric() forces new check per decryption, 2-second staleness window, no cached auth
