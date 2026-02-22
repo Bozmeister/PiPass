@@ -1,3 +1,4 @@
+import * as ExpoCrypto from "expo-crypto";
 import { deriveClusterKey } from "../crypto/keyDerivation";
 import { encryptData, decryptData } from "../crypto/encryption";
 import {
@@ -14,6 +15,9 @@ export interface VaultEntry {
   title: string;
   username: string;
   encryptedPassword: string;
+  encryptedTitle?: string;
+  encryptedUsername?: string;
+  encryptedUrl?: string;
   url?: string;
   notes?: string;
   createdAt: number;
@@ -52,6 +56,9 @@ export function encryptVaultEntry(
       title: entry.title,
       username: entry.username,
       encryptedPassword: encryptData(entry.password, keyHex),
+      encryptedTitle: encryptData(entry.title, keyHex),
+      encryptedUsername: encryptData(entry.username, keyHex),
+      encryptedUrl: entry.url ? encryptData(entry.url, keyHex) : undefined,
       url: entry.url,
       notes: entry.notes ? encryptData(entry.notes, keyHex) : undefined,
       createdAt: now,
@@ -69,12 +76,22 @@ export function decryptVaultEntry(
 ): DecryptedVaultEntry {
   const keyHex = combineShares(shares);
   try {
+    const title = entry.encryptedTitle
+      ? decryptData(entry.encryptedTitle, keyHex)
+      : entry.title;
+    const username = entry.encryptedUsername
+      ? decryptData(entry.encryptedUsername, keyHex)
+      : entry.username;
+    const url = entry.encryptedUrl
+      ? decryptData(entry.encryptedUrl, keyHex)
+      : entry.url;
+
     return {
       id: entry.id,
-      title: entry.title,
-      username: entry.username,
+      title,
+      username,
       password: decryptData(entry.encryptedPassword, keyHex),
-      url: entry.url,
+      url,
       notes: entry.notes ? decryptData(entry.notes, keyHex) : undefined,
       createdAt: entry.createdAt,
       updatedAt: entry.updatedAt,
@@ -86,10 +103,11 @@ export function decryptVaultEntry(
 }
 
 function generateId(): string {
+  const bytes = ExpoCrypto.getRandomBytes(15);
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let result = "";
-  for (let i = 0; i < 20; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  for (let i = 0; i < 15; i++) {
+    result += chars.charAt(bytes[i] % chars.length);
   }
   return result;
 }
