@@ -132,7 +132,8 @@ scripts/          # Build scripts
 
 ## Recent Changes
 - 2026-02-22: User-configurable Pi seed — SeedSetupScreen prompts on first launch (0-999999), stored in SecureStore, replaces hardcoded 42
-- 2026-02-22: Multi-round key derivation — PBKDF2 with 100,000 iterations on top of SHA-256 orbit hash for brute-force resistance
+- 2026-02-22: User-configurable security profiles — Balanced (25k), Fortress (100k default), Deep Vault (250k) PBKDF2 iterations; stored in SecureStore; selectable on Seed Setup screen and via Settings modal in VaultScreen
+- 2026-02-22: Multi-round key derivation — PBKDF2 with configurable iterations on top of SHA-256 orbit hash for brute-force resistance
 - 2026-02-22: Encrypted metadata — titles, usernames, and URLs now encrypted alongside passwords in vault entries (backward-compatible with unencrypted entries)
 - 2026-02-22: Auto-lock — vault locks after 60 seconds of inactivity or when app enters background, wiping key shares from memory
 - 2026-02-22: Clipboard auto-clear — clipboard wiped 30 seconds after copying any field via expo-clipboard
