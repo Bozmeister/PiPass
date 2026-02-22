@@ -143,7 +143,6 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
           try {
             decryptVaultEntry(stored[0], shares);
           } catch {
-            console.log("Key mismatch with stored profile, trying fallback iterations...");
             const allIterations = [25000, 100000, 250000].filter(i => i !== iterations);
             let found = false;
             for (const fallbackIter of allIterations) {
@@ -154,7 +153,6 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
                 keySharesRef.current = fallbackShares;
                 await onIterationsChange(fallbackIter);
                 found = true;
-                console.log("Recovered with iteration count:", fallbackIter);
                 break;
               } catch {
                 continue;
@@ -346,7 +344,6 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
 
     try {
       const bioResult = await requireFreshBiometric();
-      console.log("[VaultScreen] biometric result:", bioResult);
       if (!bioResult) {
         setDecrypting(false);
         if (Platform.OS === "web") {
@@ -407,7 +404,7 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
         <ActivityIndicator size="large" color="#fff" />
-        <Text style={{ color: "#fff", fontSize: 16, marginTop: 16 }}>Synchronizing Vault Geometry...</Text>
+        <Text style={{ color: "#fff", fontSize: 18, fontWeight: "600", letterSpacing: 1, marginTop: 16, textAlign: "center" }}>Synchronizing Vault Geometry...</Text>
         <Text style={{ color: "#888", fontSize: 12, marginTop: 8, textAlign: "center", paddingHorizontal: 32 }}>
           Initializing entropy shards
         </Text>
@@ -419,7 +416,7 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
         <ActivityIndicator size="large" color="#fbbf24" />
-        <Text style={{ color: "#fff", fontSize: 16, marginTop: 16 }}>Migrating Vault...</Text>
+        <Text style={{ color: "#fff", fontSize: 16, marginTop: 16, textAlign: "center" }}>Migrating Vault...</Text>
         <Text style={{ color: "#888", fontSize: 13, marginTop: 8, textAlign: "center", paddingHorizontal: 32 }}>
           {migrationProgress}
         </Text>
@@ -433,7 +430,9 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
   if (loading) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
-        <Text style={{ color: "#fff", fontSize: 16 }}>Loading vault...</Text>
+        <ActivityIndicator size="large" color="#fff" />
+        <Text style={{ color: "#fff", fontSize: 18, fontWeight: "600", letterSpacing: 1, marginTop: 16, textAlign: "center" }}>Loading vault...</Text>
+        <Text style={{ color: "#888", fontSize: 12, marginTop: 8, textAlign: "center" }}>Decrypting entries...</Text>
       </View>
     );
   }
