@@ -79,8 +79,9 @@ The key derivation pipeline ("Cluster Key") works as follows:
 app/              # Expo Router pages (file-based routing)
   (tabs)/         # Tab navigator group
 assets/           # Images and pi_digits.txt (1M digits)
-components/       # Reusable UI components (AddEntryModal, EntryDetailModal)
+components/       # Reusable UI components (AddEntryModal, EntryDetailModal, FractalKeyprint, KeyprintViewer)
 screens/          # Full-screen components (AuthScreen, VaultScreen)
+utils/            # Utility modules (fractalKeyprint.ts — Mandelbrot grid → SVG renderer)
 crypto/           # Entropy Engine (Pi extraction, Mandelbrot orbits, key derivation, AES)
   pi.ts           # Load Pi digits, extract 30, map to X/Y/zoom coordinates
   mandelbrot.ts   # 3x3 grid, 2000-iter orbit capture, deterministic jitter
@@ -131,6 +132,7 @@ scripts/          # Build scripts
 - `metro.config.js` — default Expo config (no custom asset extensions needed)
 
 ## Recent Changes
+- 2026-02-22: **Fractal Keyprint v2.1** — Visual proof of unique cryptographic key. Mandelbrot escape-time grid rendered as neon green/black SVG thumbnails (48x48 @ 300 iterations). FractalKeyprint component on entry cards (toggleable via Settings > Show Fractal Keyprints, persisted in SecureStore). KeyprintViewer full-screen modal shows high-res 3x3 grid (96x96 @ 500 iterations) with coordinate data — biometric-gated. 7-tap secret gesture on settings icon replaces long-press for debug access. fractalKeyprint.ts utility generates Mandelbrot grids and SVG data URIs.
 - 2026-02-22: **v1.0.0 Seal** — Debug UI stripped (Audit Raw Data, Run Tests, Reveal Seed buttons removed; screen kept as empty "v1.0.0 — All systems nominal" placeholder). All console.log statements removed from production code. Loading screens polished with consistent typography (fontSize 18, fontWeight 600, letterSpacing 1, centered text with subtitles). Test data wiped for clean slate.
 - 2026-02-22: Secure Notes — SecureNotesModal (question mark icon in VaultScreen header) for storing non-password secrets. Full CRUD, same AES-256-CBC encryption, biometric-gated decrypt, clipboard auto-clear. Included in backup export/import, nuclear wipe, and security profile migration.
 - 2026-02-22: Watchman Security Layer — input sanitization (strips <>{}[]\/ chars, 64-char limit on title/username), heuristic lockout on Pi Seed input (>5 changes/sec or >20 char paste triggers 30s freeze), expo-screen-capture screenshot prevention on native, secureTextEntry + autoCorrect=false on all sensitive inputs
