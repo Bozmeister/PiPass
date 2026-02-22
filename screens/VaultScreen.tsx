@@ -94,15 +94,44 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
 
   function initializeVault() {
     setDerivingKey(true);
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
         const shares = deriveMasterKeyShares(piSeed, iterations);
         keySharesRef.current = shares;
+
+        const stored = await getAllEntries();
+        setEntries(stored);
+
+        if (stored.length > 0) {
+          try {
+            decryptVaultEntry(stored[0], shares);
+          } catch {
+            console.log("Key mismatch with stored profile, trying fallback iterations...");
+            const allIterations = [25000, 100000, 250000].filter(i => i !== iterations);
+            let found = false;
+            for (const fallbackIter of allIterations) {
+              try {
+                const fallbackShares = deriveMasterKeyShares(piSeed, fallbackIter);
+                decryptVaultEntry(stored[0], fallbackShares);
+                wipeShares(shares);
+                keySharesRef.current = fallbackShares;
+                await onIterationsChange(fallbackIter);
+                found = true;
+                console.log("Recovered with iteration count:", fallbackIter);
+                break;
+              } catch {
+                continue;
+              }
+            }
+            if (!found) {
+              console.error("Could not find matching key for stored entries");
+            }
+          }
+        }
       } catch (err) {
         console.error("Failed to derive master key:", err);
       }
       setDerivingKey(false);
-      loadEntries();
     }, 100);
   }
 
@@ -158,13 +187,25 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
       return;
     }
 
+    const oldShares = keySharesRef.current!;
+    try {
+      decryptVaultEntry(entries[0], oldShares);
+    } catch {
+      const msg = "Current key cannot decrypt your entries. Please lock and re-unlock the vault before changing profiles.";
+      if (Platform.OS === "web") {
+        alert(msg);
+      } else {
+        Alert.alert("Key Mismatch", msg);
+      }
+      return;
+    }
+
     setMigrating(true);
-    setMigrationProgress(`Deriving new key (0/${entryCount})...`);
+    setMigrationProgress("Deriving new key...");
 
     setTimeout(() => {
       try {
         const newShares = deriveMasterKeyShares(piSeed, newIterations);
-        const oldShares = keySharesRef.current!;
         const updatedEntries: VaultEntry[] = [];
 
         for (let i = 0; i < entries.length; i++) {
@@ -207,10 +248,11 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
         console.error("Migration failed:", err);
         setMigrating(false);
         setMigrationProgress("");
+        const errMsg = err instanceof Error ? err.message : "Unknown error";
         if (Platform.OS === "web") {
-          alert("Migration failed during key derivation. Your entries are unchanged.");
+          alert("Migration failed: " + errMsg);
         } else {
-          Alert.alert("Migration Failed", "Could not derive new key. Your vault is unchanged.");
+          Alert.alert("Migration Failed", errMsg);
         }
       }
     }, 100);
