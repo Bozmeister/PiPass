@@ -263,7 +263,13 @@ export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
           alignItems: "center",
         }}
       >
-        <Pressable onLongPress={() => router.push("/debug")} testID="vault-title">
+        <Pressable
+          onLongPress={() => router.push("/debug")}
+          delayLongPress={600}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          testID="vault-title"
+          style={{ paddingVertical: 4, paddingRight: 16 }}
+        >
           <Text style={{ color: "#fff", fontSize: 28, fontWeight: "bold" }}>Vault</Text>
         </Pressable>
         <Pressable onPress={() => setShowAddModal(true)} testID="add-entry-button">
