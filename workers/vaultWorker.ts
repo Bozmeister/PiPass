@@ -129,6 +129,86 @@ export function reEncryptEntry(
   }
 }
 
+export interface SecureNote {
+  id: string;
+  encryptedLabel: string;
+  encryptedContent: string;
+  label: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DecryptedSecureNote {
+  id: string;
+  label: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export function encryptSecureNote(
+  note: { label: string; content: string },
+  shares: KeyShares,
+  id?: string
+): SecureNote {
+  const keyHex = combineShares(shares);
+  try {
+    const now = Date.now();
+    return {
+      id: id || generateId(),
+      label: note.label,
+      encryptedLabel: encryptData(note.label, keyHex),
+      encryptedContent: encryptData(note.content, keyHex),
+      createdAt: now,
+      updatedAt: now,
+    };
+  } finally {
+    const wipeBuf = hexToBytes(keyHex);
+    wipeBuffer(wipeBuf);
+  }
+}
+
+export function decryptSecureNote(
+  note: SecureNote,
+  shares: KeyShares
+): DecryptedSecureNote {
+  const keyHex = combineShares(shares);
+  try {
+    return {
+      id: note.id,
+      label: note.encryptedLabel ? decryptData(note.encryptedLabel, keyHex) : note.label,
+      content: decryptData(note.encryptedContent, keyHex),
+      createdAt: note.createdAt,
+      updatedAt: note.updatedAt,
+    };
+  } finally {
+    const wipeBuf = hexToBytes(keyHex);
+    wipeBuffer(wipeBuf);
+  }
+}
+
+export function reEncryptSecureNote(
+  note: SecureNote,
+  oldShares: KeyShares,
+  newShares: KeyShares
+): SecureNote {
+  const decrypted = decryptSecureNote(note, oldShares);
+  const newKeyHex = combineShares(newShares);
+  try {
+    return {
+      id: note.id,
+      label: decrypted.label,
+      encryptedLabel: encryptData(decrypted.label, newKeyHex),
+      encryptedContent: encryptData(decrypted.content, newKeyHex),
+      createdAt: note.createdAt,
+      updatedAt: Date.now(),
+    };
+  } finally {
+    const wipeBuf = hexToBytes(newKeyHex);
+    wipeBuffer(wipeBuf);
+  }
+}
+
 function generateId(): string {
   const bytes = ExpoCrypto.getRandomBytes(15);
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";

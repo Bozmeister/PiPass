@@ -6,12 +6,13 @@ import { useRouter } from "expo-router";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import * as ScreenCapture from "expo-screen-capture";
-import { VaultEntry } from "../workers/vaultWorker";
+import { VaultEntry, SecureNote } from "../workers/vaultWorker";
 import {
   encryptVaultEntry,
   decryptVaultEntry,
   deriveMasterKeyShares,
   reEncryptEntry,
+  reEncryptSecureNote,
   DecryptedVaultEntry,
 } from "../workers/vaultWorker";
 import { KeyShares, wipeShares } from "../crypto/secureMemory";
@@ -22,9 +23,12 @@ import {
   deleteEntry as deleteStoredEntry,
   clearVault,
   destroyAllData,
+  getAllSecureNotes,
+  saveSecureNote,
 } from "../workers/storageWorker";
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
+import SecureNotesModal from "../components/SecureNotesModal";
 import FaviconImage from "../components/FaviconImage";
 
 const AUTO_LOCK_MS = 60000;
@@ -59,6 +63,8 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
   const [migrationProgress, setMigrationProgress] = useState("");
   const [showNukeConfirm, setShowNukeConfirm] = useState(false);
   const [nukeInput, setNukeInput] = useState("");
+  const [secureNotes, setSecureNotes] = useState<SecureNote[]>([]);
+  const [showSecureNotes, setShowSecureNotes] = useState(false);
 
   const lastActivityRef = useRef<number>(Date.now());
   const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -166,11 +172,21 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
     }, 100);
   }
 
+  async function loadSecureNotes() {
+    try {
+      const stored = await getAllSecureNotes();
+      setSecureNotes(stored);
+    } catch (err) {
+      console.error("Failed to load secure notes:", err);
+    }
+  }
+
   async function loadEntries() {
     setLoading(true);
     try {
       const stored = await getAllEntries();
       setEntries(stored);
+      await loadSecureNotes();
     } catch (err) {
       console.error("Failed to load entries:", err);
     }
@@ -237,12 +253,20 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
     setTimeout(() => {
       try {
         const newShares = deriveMasterKeyShares(piSeed, newIterations);
+        const totalItems = entryCount + secureNotes.length;
         const updatedEntries: VaultEntry[] = [];
+        const updatedNotes: SecureNote[] = [];
 
         for (let i = 0; i < entries.length; i++) {
-          setMigrationProgress(`Re-encrypting ${i + 1} of ${entryCount}...`);
+          setMigrationProgress(`Re-encrypting ${i + 1} of ${totalItems}...`);
           const reEncrypted = reEncryptEntry(entries[i], oldShares, newShares);
           updatedEntries.push(reEncrypted);
+        }
+
+        for (let i = 0; i < secureNotes.length; i++) {
+          setMigrationProgress(`Re-encrypting ${entries.length + i + 1} of ${totalItems}...`);
+          const reEncrypted = reEncryptSecureNote(secureNotes[i], oldShares, newShares);
+          updatedNotes.push(reEncrypted);
         }
 
         setMigrationProgress("Saving entries...");
@@ -252,6 +276,9 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
             for (const entry of updatedEntries) {
               await saveEntry(entry);
             }
+            for (const note of updatedNotes) {
+              await saveSecureNote(note);
+            }
             wipeShares(oldShares);
             keySharesRef.current = newShares;
             await onIterationsChange(newIterations);
@@ -260,9 +287,9 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
             setMigrationProgress("");
             const label = PROFILES.find(p => p.iterations === newIterations)?.label || "Updated";
             if (Platform.OS === "web") {
-              alert(`Migrated ${entryCount} entries to ${label} profile.`);
+              alert(`Migrated ${totalItems} items to ${label} profile.`);
             } else {
-              Alert.alert("Migration Complete", `${entryCount} entries re-encrypted with ${label} profile.`);
+              Alert.alert("Migration Complete", `${totalItems} items re-encrypted with ${label} profile.`);
             }
           } catch (err) {
             console.error("Migration save failed:", err);
@@ -433,7 +460,10 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
           <Text style={{ color: "#fff", fontSize: 28, fontWeight: "bold" }}>Vault</Text>
         </Pressable>
         <View style={{ flexDirection: "row", alignItems: "center" }}>
-          <Pressable onPress={() => setShowSettings(true)} testID="settings-button" style={{ marginRight: 16 }}>
+          <Pressable onPress={() => { resetActivity(); setShowSecureNotes(true); }} testID="secure-notes-button" style={{ marginRight: 14 }}>
+            <Ionicons name="help-circle-outline" size={26} color="#4CAF50" />
+          </Pressable>
+          <Pressable onPress={() => setShowSettings(true)} testID="settings-button" style={{ marginRight: 14 }}>
             <Ionicons name="settings-outline" size={24} color="#fff" />
           </Pressable>
           <Pressable onPress={() => setShowAddModal(true)} testID="add-entry-button">
@@ -478,6 +508,15 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
           onDelete={() => handleDeleteEntry(selectedEntry.id)}
         />
       )}
+
+      <SecureNotesModal
+        visible={showSecureNotes}
+        notes={secureNotes}
+        keyShares={keySharesRef.current}
+        onClose={() => setShowSecureNotes(false)}
+        onNotesChanged={loadSecureNotes}
+        onActivity={resetActivity}
+      />
 
       <Modal visible={showSettings} animationType="slide" transparent>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.85)", justifyContent: "flex-end" }}>
@@ -599,7 +638,7 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
               <Pressable
                 onPress={async () => {
                   resetActivity();
-                  if (entries.length === 0) {
+                  if (entries.length === 0 && secureNotes.length === 0) {
                     if (Platform.OS === "web") {
                       alert("No entries to export.");
                     } else {
@@ -612,6 +651,7 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
                       version: 1,
                       exportedAt: new Date().toISOString(),
                       entries: entries,
+                      secureNotes: secureNotes,
                     };
                     const json = JSON.stringify(backup, null, 2);
                     const date = new Date().toISOString().split("T")[0];

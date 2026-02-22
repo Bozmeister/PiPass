@@ -1,11 +1,13 @@
 import { Platform } from "react-native";
 import * as SecureStore from "expo-secure-store";
-import { VaultEntry } from "./vaultWorker";
+import { VaultEntry, SecureNote } from "./vaultWorker";
 
 const VAULT_KEY_PREFIX = "pipass_vault_";
 const VAULT_INDEX_KEY = "pipass_vault_index";
 const MASTER_KEY_HASH_KEY = "pipass_master_hash";
 const PI_SEED_KEY = "pipass_pi_seed";
+const NOTES_KEY_PREFIX = "pipass_note_";
+const NOTES_INDEX_KEY = "pipass_notes_index";
 
 async function getItem(key: string): Promise<string | null> {
   if (Platform.OS === "web") {
@@ -117,8 +119,66 @@ export async function clearVault(): Promise<void> {
 
 export async function destroyAllData(): Promise<void> {
   await clearVault();
+  await clearAllNotes();
   await deleteItem(PI_SEED_KEY);
   await deleteItem(SECURITY_PROFILE_KEY);
+}
+
+async function getNotesIndex(): Promise<string[]> {
+  const indexStr = await getItem(NOTES_INDEX_KEY);
+  if (!indexStr) return [];
+  try {
+    return JSON.parse(indexStr);
+  } catch {
+    return [];
+  }
+}
+
+async function setNotesIndex(ids: string[]): Promise<void> {
+  await setItem(NOTES_INDEX_KEY, JSON.stringify(ids));
+}
+
+export async function saveSecureNote(note: SecureNote): Promise<void> {
+  await setItem(NOTES_KEY_PREFIX + note.id, JSON.stringify(note));
+  const index = await getNotesIndex();
+  if (!index.includes(note.id)) {
+    index.push(note.id);
+    await setNotesIndex(index);
+  }
+}
+
+export async function getSecureNote(id: string): Promise<SecureNote | null> {
+  const str = await getItem(NOTES_KEY_PREFIX + id);
+  if (!str) return null;
+  try {
+    return JSON.parse(str);
+  } catch {
+    return null;
+  }
+}
+
+export async function getAllSecureNotes(): Promise<SecureNote[]> {
+  const index = await getNotesIndex();
+  const notes: SecureNote[] = [];
+  for (const id of index) {
+    const note = await getSecureNote(id);
+    if (note) notes.push(note);
+  }
+  return notes;
+}
+
+export async function deleteSecureNote(id: string): Promise<void> {
+  await deleteItem(NOTES_KEY_PREFIX + id);
+  const index = await getNotesIndex();
+  await setNotesIndex(index.filter((i) => i !== id));
+}
+
+export async function clearAllNotes(): Promise<void> {
+  const index = await getNotesIndex();
+  for (const id of index) {
+    await deleteItem(NOTES_KEY_PREFIX + id);
+  }
+  await deleteItem(NOTES_INDEX_KEY);
 }
 
 export async function getRawEntryString(id: string): Promise<string | null> {

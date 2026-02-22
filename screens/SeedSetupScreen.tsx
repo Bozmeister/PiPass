@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as ExpoCrypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
-import { saveEntry } from "../workers/storageWorker";
+import { saveEntry, saveSecureNote } from "../workers/storageWorker";
 import { createHeuristicState, checkHeuristicLockout, getLockoutRemaining, HeuristicState } from "../utils/watchman";
 
 const PROFILES = [
@@ -115,10 +115,18 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
           count++;
         }
       }
+      if (Array.isArray(backup.secureNotes)) {
+        for (const note of backup.secureNotes) {
+          if (note.id && note.encryptedContent) {
+            await saveSecureNote(note);
+            count++;
+          }
+        }
+      }
       setImportedCount(count);
       setImporting(false);
 
-      const msg = `Successfully imported ${count} entries. Set your Pi Seed and security profile to unlock the vault.`;
+      const msg = `Successfully imported ${count} items. Set your Pi Seed and security profile to unlock the vault.`;
       if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Import Complete", msg); }
     } catch (err) {
       setImporting(false);
