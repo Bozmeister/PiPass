@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, FlatList, Pressable, Alert, Platform, ActivityIndicator } from "react-native";
+import { View, Text, FlatList, Pressable, Alert, Platform, ActivityIndicator, AppState } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -21,9 +21,14 @@ import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
 import FaviconImage from "../components/FaviconImage";
 
-const DEFAULT_PI_SEED = 42;
+const AUTO_LOCK_MS = 60000;
 
-export default function VaultScreen() {
+interface VaultScreenProps {
+  piSeed: number;
+  onLock: () => void;
+}
+
+export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [entries, setEntries] = useState<VaultEntry[]>([]);
@@ -35,9 +40,35 @@ export default function VaultScreen() {
   const [decryptedEntry, setDecryptedEntry] = useState<DecryptedVaultEntry | null>(null);
   const [decrypting, setDecrypting] = useState(false);
 
+  const lastActivityRef = useRef<number>(Date.now());
+  const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   useEffect(() => {
     initializeVault();
+
+    autoLockTimerRef.current = setInterval(() => {
+      if (Date.now() - lastActivityRef.current > AUTO_LOCK_MS) {
+        if (keySharesRef.current) {
+          wipeShares(keySharesRef.current);
+          keySharesRef.current = null;
+        }
+        onLock();
+      }
+    }, 5000);
+
+    const appStateSub = AppState.addEventListener("change", (state) => {
+      if (state === "background" || state === "inactive") {
+        if (keySharesRef.current) {
+          wipeShares(keySharesRef.current);
+          keySharesRef.current = null;
+        }
+        onLock();
+      }
+    });
+
     return () => {
+      if (autoLockTimerRef.current) clearInterval(autoLockTimerRef.current);
+      appStateSub.remove();
       if (keySharesRef.current) {
         wipeShares(keySharesRef.current);
         keySharesRef.current = null;
@@ -45,10 +76,14 @@ export default function VaultScreen() {
     };
   }, []);
 
+  function resetActivity() {
+    lastActivityRef.current = Date.now();
+  }
+
   function initializeVault() {
     setDerivingKey(true);
     try {
-      const shares = deriveMasterKeyShares(DEFAULT_PI_SEED);
+      const shares = deriveMasterKeyShares(piSeed);
       keySharesRef.current = shares;
     } catch (err) {
       console.error("Failed to derive master key:", err);
@@ -75,6 +110,7 @@ export default function VaultScreen() {
     url?: string;
     notes?: string;
   }) {
+    resetActivity();
     if (!keySharesRef.current) {
       throw new Error("Vault key not ready. Please restart the app.");
     }
@@ -112,6 +148,7 @@ export default function VaultScreen() {
   }
 
   async function handleSelectEntry(entry: VaultEntry) {
+    resetActivity();
     if (!keySharesRef.current) return;
 
     setSelectedEntry(entry);
@@ -248,7 +285,7 @@ export default function VaultScreen() {
           entry={selectedEntry}
           decryptedEntry={decryptedEntry}
           decrypting={decrypting}
-          piIndex={DEFAULT_PI_SEED}
+          piIndex={piSeed}
           onClose={handleCloseDetail}
           onDelete={() => handleDeleteEntry(selectedEntry.id)}
         />

@@ -5,6 +5,7 @@ import { VaultEntry } from "./vaultWorker";
 const VAULT_KEY_PREFIX = "pipass_vault_";
 const VAULT_INDEX_KEY = "pipass_vault_index";
 const MASTER_KEY_HASH_KEY = "pipass_master_hash";
+const PI_SEED_KEY = "pipass_pi_seed";
 
 async function getItem(key: string): Promise<string | null> {
   if (Platform.OS === "web") {
@@ -112,4 +113,15 @@ export async function clearVault(): Promise<void> {
   }
   await deleteItem(VAULT_INDEX_KEY);
   await deleteItem(MASTER_KEY_HASH_KEY);
+}
+
+export async function savePiSeed(seed: number): Promise<void> {
+  await setItem(PI_SEED_KEY, seed.toString());
+}
+
+export async function getPiSeed(): Promise<number | null> {
+  const val = await getItem(PI_SEED_KEY);
+  if (val === null) return null;
+  const num = parseInt(val, 10);
+  return isNaN(num) ? null : num;
 }
