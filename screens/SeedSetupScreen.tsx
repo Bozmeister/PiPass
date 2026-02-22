@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { View, Text, TextInput, Pressable, Platform, ScrollView, Keyboard, KeyboardAvoidingView, Alert, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -6,6 +6,7 @@ import * as ExpoCrypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { saveEntry } from "../workers/storageWorker";
+import { createHeuristicState, checkHeuristicLockout, getLockoutRemaining, HeuristicState } from "../utils/watchman";
 
 const PROFILES = [
   { label: "Balanced", iterations: 25000, time: "~3s", desc: "Fast unlock", color: "#4CAF50", icon: "flash-outline" as const },
@@ -23,8 +24,54 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
   const [selectedProfile, setSelectedProfile] = useState(1);
   const [importing, setImporting] = useState(false);
   const [importedCount, setImportedCount] = useState<number | null>(null);
+  const [locked, setLocked] = useState(false);
+  const [lockCountdown, setLockCountdown] = useState(0);
   const inputRef = useRef<TextInput>(null);
+  const heuristicRef = useRef<HeuristicState>(createHeuristicState());
+  const lockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const webTopInset = Platform.OS === "web" ? 67 : 0;
+
+  useEffect(() => {
+    return () => {
+      if (lockTimerRef.current) clearInterval(lockTimerRef.current);
+    };
+  }, []);
+
+  function startLockoutTimer() {
+    setLocked(true);
+    if (lockTimerRef.current) clearInterval(lockTimerRef.current);
+    lockTimerRef.current = setInterval(() => {
+      const remaining = getLockoutRemaining(heuristicRef.current);
+      if (remaining <= 0) {
+        setLocked(false);
+        setLockCountdown(0);
+        if (lockTimerRef.current) {
+          clearInterval(lockTimerRef.current);
+          lockTimerRef.current = null;
+        }
+      } else {
+        setLockCountdown(Math.ceil(remaining / 1000));
+      }
+    }, 500);
+    setLockCountdown(30);
+  }
+
+  function handleSeedChange(text: string) {
+    const numericOnly = text.replace(/[^0-9]/g, "");
+    const result = checkHeuristicLockout(heuristicRef.current, numericOnly, seedInput);
+    heuristicRef.current = result.state;
+
+    if (result.lockTriggered) {
+      startLockoutTimer();
+      const msg = "Suspicious input detected. The seed input is locked for 30 seconds.";
+      if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Security Lockout", msg); }
+      return;
+    }
+
+    if (result.blocked) return;
+
+    setSeedInput(numericOnly);
+  }
 
   async function handleImport() {
     try {
@@ -82,6 +129,7 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
   }
 
   function handleRandomSeed() {
+    if (locked) return;
     const bytes = ExpoCrypto.getRandomBytes(4);
     const val = ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
     const seed = val % 999000 + 1000;
@@ -90,6 +138,7 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
   }
 
   function handleConfirm() {
+    if (locked) return;
     const seed = parseInt(seedInput, 10);
     if (isNaN(seed) || seed < 0 || seed > 999999) return;
     Keyboard.dismiss();
@@ -131,36 +180,62 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
           <TextInput
             ref={inputRef}
             value={seedInput}
-            onChangeText={setSeedInput}
+            onChangeText={handleSeedChange}
             onSubmitEditing={handleConfirm}
             returnKeyType="done"
             keyboardType="number-pad"
-            placeholder="Enter a number (0-999999)"
-            placeholderTextColor="#555"
+            placeholder={locked ? "LOCKED" : "Enter a number (0-999999)"}
+            placeholderTextColor={locked ? "#ff3333" : "#555"}
             maxLength={6}
+            editable={!locked}
+            secureTextEntry={true}
+            autoCorrect={false}
             style={{
-              color: "#fff",
+              color: locked ? "#ff3333" : "#fff",
               fontSize: 24,
-              backgroundColor: "#1a1a1a",
+              backgroundColor: locked ? "#1a0a0a" : "#1a1a1a",
               borderRadius: 8,
               padding: 16,
-              marginBottom: 12,
+              marginBottom: locked ? 4 : 12,
               textAlign: "center",
               letterSpacing: 4,
-              borderWidth: 1,
-              borderColor: isValid ? "#4CAF50" : "#333",
+              borderWidth: locked ? 2 : 1,
+              borderColor: locked ? "#8b0000" : isValid ? "#4CAF50" : "#333",
             }}
             testID="seed-input"
           />
 
+          {locked && (
+            <View style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: "#2a0a0a",
+              borderRadius: 8,
+              padding: 10,
+              marginBottom: 12,
+              borderWidth: 1,
+              borderColor: "#8b0000",
+            }}
+            testID="lockout-banner"
+            >
+              <Ionicons name="warning" size={16} color="#ff3333" />
+              <Text style={{ color: "#ff3333", fontSize: 13, fontWeight: "700", marginLeft: 8 }}>
+                Security Lockout: {lockCountdown}s remaining
+              </Text>
+            </View>
+          )}
+
           <Pressable
             onPress={handleRandomSeed}
+            disabled={locked}
             style={{
               flexDirection: "row",
               alignItems: "center",
               justifyContent: "center",
               paddingVertical: 12,
               marginBottom: 24,
+              opacity: locked ? 0.4 : 1,
             }}
             testID="random-seed-button"
           >
@@ -260,9 +335,9 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
 
           <Pressable
             onPress={handleConfirm}
-            disabled={!isValid}
+            disabled={!isValid || locked}
             style={{
-              backgroundColor: isValid ? "#4CAF50" : "#333",
+              backgroundColor: isValid && !locked ? "#4CAF50" : "#333",
               paddingVertical: 16,
               borderRadius: 8,
               alignItems: "center",

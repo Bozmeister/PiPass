@@ -3,6 +3,7 @@ import { View, Text, TextInput, Pressable, Modal, ScrollView, Platform, Keyboard
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { generateSecurePassword } from "../crypto/generateSecurePassword";
+import { sanitizeInput } from "../utils/watchman";
 
 interface AddEntryModalProps {
   visible: boolean;
@@ -102,9 +103,10 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
               <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Title *</Text>
               <TextInput
                 value={title}
-                onChangeText={setTitle}
+                onChangeText={(t) => setTitle(sanitizeInput(t, "title"))}
                 placeholder="e.g. Gmail"
                 placeholderTextColor="#555"
+                autoCorrect={false}
                 style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16 }}
                 testID="title-input"
               />
@@ -112,10 +114,11 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
               <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Username *</Text>
               <TextInput
                 value={username}
-                onChangeText={setUsername}
+                onChangeText={(t) => setUsername(sanitizeInput(t, "username"))}
                 placeholder="e.g. user@email.com"
                 placeholderTextColor="#555"
                 autoCapitalize="none"
+                autoCorrect={false}
                 style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16 }}
                 testID="username-input"
               />
@@ -131,11 +134,12 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
               </View>
               <TextInput
                 value={password}
-                onChangeText={(t) => { setPassword(t); setShowGenerated(false); }}
+                onChangeText={(t) => { setPassword(sanitizeInput(t, "password")); setShowGenerated(false); }}
                 placeholder="Enter password"
                 placeholderTextColor="#555"
                 secureTextEntry={!showGenerated}
                 autoCapitalize="none"
+                autoCorrect={false}
                 textContentType="none"
                 autoComplete="off"
                 style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: showGenerated ? 4 : 16 }}
@@ -150,11 +154,12 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
               <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Confirm Password *</Text>
               <TextInput
                 value={confirmPassword}
-                onChangeText={(t) => { setConfirmPassword(t); setShowGenerated(false); }}
+                onChangeText={(t) => { setConfirmPassword(sanitizeInput(t, "password")); setShowGenerated(false); }}
                 placeholder="Re-enter password"
                 placeholderTextColor="#555"
                 secureTextEntry={!showGenerated}
                 autoCapitalize="none"
+                autoCorrect={false}
                 textContentType="none"
                 autoComplete="off"
                 style={{
@@ -178,10 +183,11 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
               <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>URL</Text>
               <TextInput
                 value={url}
-                onChangeText={setUrl}
+                onChangeText={(t) => setUrl(sanitizeInput(t, "url"))}
                 placeholder="e.g. https://gmail.com"
                 placeholderTextColor="#555"
                 autoCapitalize="none"
+                autoCorrect={false}
                 keyboardType="url"
                 style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16 }}
               />
@@ -189,9 +195,10 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
               <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Notes</Text>
               <TextInput
                 value={notes}
-                onChangeText={setNotes}
+                onChangeText={(t) => setNotes(sanitizeInput(t, "notes"))}
                 placeholder="Optional notes"
                 placeholderTextColor="#555"
+                autoCorrect={false}
                 multiline
                 numberOfLines={3}
                 style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16, minHeight: 80, textAlignVertical: "top" }}

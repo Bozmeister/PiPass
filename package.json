@@ -44,6 +44,7 @@
     "expo-local-authentication": "^17.0.8",
     "expo-location": "~19.0.8",
     "expo-router": "~6.0.17",
+    "expo-screen-capture": "^8.0.9",
     "expo-secure-store": "^15.0.8",
     "expo-sharing": "^14.0.8",
     "expo-splash-screen": "~31.0.12",

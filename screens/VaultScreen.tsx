@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
+import * as ScreenCapture from "expo-screen-capture";
 import { VaultEntry } from "../workers/vaultWorker";
 import {
   encryptVaultEntry,
@@ -61,6 +62,29 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
 
   const lastActivityRef = useRef<number>(Date.now());
   const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (Platform.OS !== "web") {
+      ScreenCapture.preventScreenCaptureAsync();
+    }
+
+    return () => {
+      if (Platform.OS !== "web") {
+        ScreenCapture.allowScreenCaptureAsync();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+    const subscription = ScreenCapture.addScreenshotListener(() => {
+      Alert.alert(
+        "Screenshot Detected",
+        "A screenshot was taken while your vault is open. Be careful — your data may be visible in photos."
+      );
+    });
+    return () => subscription.remove();
+  }, []);
 
   useEffect(() => {
     initializeVault();
