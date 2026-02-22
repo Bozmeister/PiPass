@@ -218,9 +218,9 @@ export default function VaultScreen({ piSeed, onLock }: VaultScreenProps) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
         <ActivityIndicator size="large" color="#fff" />
-        <Text style={{ color: "#fff", fontSize: 16, marginTop: 16 }}>Deriving Cluster Key...</Text>
+        <Text style={{ color: "#fff", fontSize: 16, marginTop: 16 }}>Synchronizing Vault Geometry...</Text>
         <Text style={{ color: "#888", fontSize: 12, marginTop: 8, textAlign: "center", paddingHorizontal: 32 }}>
-          Computing Mandelbrot orbits from Pi coordinates
+          Initializing entropy shards
         </Text>
       </View>
     );
