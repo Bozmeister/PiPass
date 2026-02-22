@@ -17,6 +17,7 @@ import {
   getAllEntries,
   saveEntry,
   deleteEntry as deleteStoredEntry,
+  clearVault,
 } from "../workers/storageWorker";
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
@@ -559,6 +560,50 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
               >
                 <Ionicons name="lock-closed-outline" size={18} color="#ef4444" style={{ marginRight: 8 }} />
                 <Text style={{ color: "#ef4444", fontSize: 15, fontWeight: "600" }}>Lock Vault</Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  const doWipe = async () => {
+                    await clearVault();
+                    setEntries([]);
+                    setShowSettings(false);
+                    if (Platform.OS === "web") {
+                      alert("All vault entries have been cleared.");
+                    } else {
+                      Alert.alert("Vault Cleared", "All entries have been removed.");
+                    }
+                  };
+                  if (Platform.OS === "web") {
+                    if (confirm("This will permanently delete ALL vault entries. Are you sure?")) {
+                      doWipe();
+                    }
+                  } else {
+                    Alert.alert(
+                      "Clear All Entries",
+                      "This will permanently delete ALL vault entries. This cannot be undone.",
+                      [
+                        { text: "Cancel", style: "cancel" },
+                        { text: "Delete All", style: "destructive", onPress: doWipe },
+                      ]
+                    );
+                  }
+                }}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: "#1a0a0a",
+                  borderRadius: 10,
+                  padding: 14,
+                  marginTop: 10,
+                  borderWidth: 1,
+                  borderColor: "#4a1111",
+                }}
+                testID="clear-vault-button"
+              >
+                <Ionicons name="trash-outline" size={18} color="#ef4444" style={{ marginRight: 8 }} />
+                <Text style={{ color: "#ef4444", fontSize: 15, fontWeight: "600" }}>Clear All Entries</Text>
               </Pressable>
             </ScrollView>
           </View>
