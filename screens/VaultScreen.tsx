@@ -25,6 +25,8 @@ import {
   destroyAllData,
   getAllSecureNotes,
   saveSecureNote,
+  savePiSeed,
+  saveSecurityProfile,
 } from "../workers/storageWorker";
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
@@ -159,7 +161,28 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
               }
             }
             if (!found) {
-              console.error("Could not find matching key for stored entries");
+              Alert.alert(
+                "Key Mismatch",
+                "Your stored entries were encrypted with a different key (possibly from another device or a different Pi seed). These entries cannot be decrypted.\n\nWould you like to clear the incompatible entries and start fresh?",
+                [
+                  { text: "Keep Entries", style: "cancel" },
+                  {
+                    text: "Clear & Start Fresh",
+                    style: "destructive",
+                    onPress: async () => {
+                      try {
+                        await destroyAllData();
+                        await savePiSeed(piSeed);
+                        await saveSecurityProfile(iterations);
+                        setEntries([]);
+                        setSecureNotes([]);
+                      } catch (e) {
+                        // silent
+                      }
+                    },
+                  },
+                ]
+              );
             }
           }
         }
