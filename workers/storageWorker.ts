@@ -115,6 +115,14 @@ export async function clearVault(): Promise<void> {
   await deleteItem(MASTER_KEY_HASH_KEY);
 }
 
+export async function getRawEntryString(id: string): Promise<string | null> {
+  return await getItem(VAULT_KEY_PREFIX + id);
+}
+
+export async function getVaultIndexIds(): Promise<string[]> {
+  return await getVaultIndex();
+}
+
 export async function savePiSeed(seed: number): Promise<void> {
   await setItem(PI_SEED_KEY, seed.toString());
 }

@@ -16,7 +16,7 @@ import { extractPiDigits, mapDigitsToCoordinates } from "../crypto/pi";
 import { computeFullPipeline } from "../crypto/mandelbrot";
 import { deriveClusterKey } from "../crypto/keyDerivation";
 import { requireFreshBiometric } from "../crypto/biometricGate";
-import { getPiSeed } from "../workers/storageWorker";
+import { getPiSeed, getVaultIndexIds, getRawEntryString } from "../workers/storageWorker";
 
 interface TestResult {
   piIndex: number;
@@ -86,6 +86,39 @@ export default function DebugScreen() {
   const [revealingSeeed, setRevealingSeed] = useState(false);
 
   const webTopInset = Platform.OS === "web" ? 67 : 0;
+
+  const [auditing, setAuditing] = useState(false);
+
+  async function handleAuditRawData() {
+    setAuditing(true);
+    try {
+      const ids = await getVaultIndexIds();
+      if (ids.length === 0) {
+        console.log("=== AUDIT RAW DATA ===");
+        console.log("No vault entries found.");
+        if (Platform.OS === "web") {
+          alert("No vault entries found.");
+        } else {
+          Alert.alert("Audit", "No vault entries found.");
+        }
+        setAuditing(false);
+        return;
+      }
+      const firstId = ids[0];
+      const raw = await getRawEntryString(firstId);
+      console.log("=== AUDIT RAW DATA ===");
+      console.log("Entry ID:", firstId);
+      console.log("Raw SecureStore string:", raw);
+      if (Platform.OS === "web") {
+        alert("Raw data for first entry logged to console. Check your browser/device console.");
+      } else {
+        Alert.alert("Audit Complete", "Raw data for entry \"" + firstId + "\" has been logged to the console.");
+      }
+    } catch (err) {
+      console.error("Audit failed:", err);
+    }
+    setAuditing(false);
+  }
 
   async function handleRevealSeed() {
     setRevealingSeed(true);
@@ -267,6 +300,35 @@ export default function DebugScreen() {
             </Pressable>
           )}
         </View>
+
+        <Pressable
+          onPress={handleAuditRawData}
+          disabled={auditing}
+          style={{
+            backgroundColor: auditing ? "#333" : "#2e1a1a",
+            paddingVertical: 12,
+            borderRadius: 8,
+            alignItems: "center",
+            marginBottom: 20,
+            borderWidth: 1,
+            borderColor: "#443",
+          }}
+          testID="audit-raw-data-button"
+        >
+          {auditing ? (
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <ActivityIndicator size="small" color="#fff" />
+              <Text style={{ color: "#fff", fontSize: 14, marginLeft: 8 }}>Reading...</Text>
+            </View>
+          ) : (
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <Ionicons name="document-text-outline" size={18} color="#ef4444" />
+              <Text style={{ color: "#ef4444", fontSize: 14, fontWeight: "600", marginLeft: 8 }}>
+                Audit Raw Data
+              </Text>
+            </View>
+          )}
+        </Pressable>
 
         <Text style={{ color: "#888", fontSize: 13, marginBottom: 12 }}>
           Tests determinism (same input = same hash) and sensitivity (different
