@@ -131,6 +131,8 @@ scripts/          # Build scripts
 - `metro.config.js` — default Expo config (no custom asset extensions needed)
 
 ## Recent Changes
+- 2026-02-22: Watchman Security Layer — input sanitization (strips <>{}[]\/ chars, 64-char limit on title/username), heuristic lockout on Pi Seed input (>5 changes/sec or >20 char paste triggers 30s freeze), expo-screen-capture screenshot prevention on native, secureTextEntry + autoCorrect=false on all sensitive inputs
+- 2026-02-22: utils/watchman.ts — sanitizeInput(), createHeuristicState(), checkHeuristicLockout(), getLockoutRemaining() utility functions
 - 2026-02-22: Ghost Backup — export encrypted vault entries as .vault JSON file (web: Blob download, native: expo-file-system + expo-sharing)
 - 2026-02-22: Recovery Protocol — import .vault backup on SeedSetupScreen via expo-document-picker (web: FileReader, native: DocumentPicker)
 - 2026-02-22: Nuclear Option — biometric-gated complete data wipe (entries, Pi seed, security profile) with DELETE text confirmation, resets app to seed setup
