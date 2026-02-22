@@ -212,3 +212,14 @@ export async function getSecurityProfile(): Promise<number> {
   const num = parseInt(val, 10);
   return isNaN(num) ? 100000 : num;
 }
+
+const SHOW_KEYPRINTS_KEY = "pipass_show_keyprints";
+
+export async function saveShowKeyprints(show: boolean): Promise<void> {
+  await setItem(SHOW_KEYPRINTS_KEY, show ? "1" : "0");
+}
+
+export async function getShowKeyprints(): Promise<boolean> {
+  const val = await getItem(SHOW_KEYPRINTS_KEY);
+  return val !== "0";
+}

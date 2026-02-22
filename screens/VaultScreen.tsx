@@ -30,6 +30,9 @@ import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
 import SecureNotesModal from "../components/SecureNotesModal";
 import FaviconImage from "../components/FaviconImage";
+import FractalKeyprint from "../components/FractalKeyprint";
+import KeyprintViewer from "../components/KeyprintViewer";
+import { getShowKeyprints, saveShowKeyprints } from "../workers/storageWorker";
 
 const AUTO_LOCK_MS = 60000;
 
@@ -65,6 +68,10 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
   const [nukeInput, setNukeInput] = useState("");
   const [secureNotes, setSecureNotes] = useState<SecureNote[]>([]);
   const [showSecureNotes, setShowSecureNotes] = useState(false);
+  const [showKeyprints, setShowKeyprints] = useState(true);
+  const [showKeyprintViewer, setShowKeyprintViewer] = useState(false);
+  const settingsTapCountRef = useRef(0);
+  const settingsTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const lastActivityRef = useRef<number>(Date.now());
   const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -135,6 +142,9 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
       try {
         const shares = deriveMasterKeyShares(piSeed, iterations);
         keySharesRef.current = shares;
+
+        const keyprintPref = await getShowKeyprints();
+        setShowKeyprints(keyprintPref);
 
         const stored = await getAllEntries();
         setEntries(stored);
@@ -376,6 +386,32 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
 
   const webTopInset = Platform.OS === "web" ? 67 : 0;
 
+  async function handleKeyprintTap() {
+    resetActivity();
+    const bioResult = await requireFreshBiometric();
+    if (bioResult) {
+      setShowKeyprintViewer(true);
+    }
+  }
+
+  function handleCloseKeyprintViewer() {
+    setShowKeyprintViewer(false);
+  }
+
+  function handleSettingsIconTap() {
+    settingsTapCountRef.current += 1;
+    if (settingsTapTimerRef.current) clearTimeout(settingsTapTimerRef.current);
+    if (settingsTapCountRef.current >= 7) {
+      settingsTapCountRef.current = 0;
+      router.push("/debug");
+      return;
+    }
+    settingsTapTimerRef.current = setTimeout(() => {
+      settingsTapCountRef.current = 0;
+      setShowSettings(true);
+    }, 400);
+  }
+
   const renderItem = useCallback(
     ({ item }: { item: VaultEntry }) => (
       <Pressable
@@ -389,15 +425,25 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
           alignItems: "center",
         }}
       >
-        <FaviconImage url={item.url} size={28} />
-        <View style={{ marginLeft: 12, flex: 1 }}>
+        {showKeyprints && (
+          <FractalKeyprint
+            piSeed={piSeed}
+            size={44}
+            onPress={handleKeyprintTap}
+            animate={false}
+          />
+        )}
+        <View style={{ marginLeft: showKeyprints ? 12 : 0, marginRight: 8, flex: 0 }}>
+          <FaviconImage url={item.url} size={28} />
+        </View>
+        <View style={{ flex: 1 }}>
           <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" }}>{item.title}</Text>
           <Text style={{ color: "#888", fontSize: 13, marginTop: 2 }}>{item.username}</Text>
         </View>
         <Ionicons name="chevron-forward" size={18} color="#555" />
       </Pressable>
     ),
-    []
+    [showKeyprints, piSeed]
   );
 
   if (derivingKey) {
@@ -449,20 +495,12 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
           alignItems: "center",
         }}
       >
-        <Pressable
-          onLongPress={() => router.push("/debug")}
-          delayLongPress={600}
-          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-          testID="vault-title"
-          style={{ paddingVertical: 4, paddingRight: 16 }}
-        >
-          <Text style={{ color: "#fff", fontSize: 28, fontWeight: "bold" }}>Vault</Text>
-        </Pressable>
+        <Text style={{ color: "#fff", fontSize: 28, fontWeight: "bold" }} testID="vault-title">Vault</Text>
         <View style={{ flexDirection: "row", alignItems: "center" }}>
           <Pressable onPress={() => { resetActivity(); setShowSecureNotes(true); }} testID="secure-notes-button" style={{ marginRight: 14 }}>
             <Ionicons name="help-circle-outline" size={26} color="#4CAF50" />
           </Pressable>
-          <Pressable onPress={() => setShowSettings(true)} testID="settings-button" style={{ marginRight: 14 }}>
+          <Pressable onPress={handleSettingsIconTap} testID="settings-button" style={{ marginRight: 14 }}>
             <Ionicons name="settings-outline" size={24} color="#fff" />
           </Pressable>
           <Pressable onPress={() => setShowAddModal(true)} testID="add-entry-button">
@@ -473,7 +511,12 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
 
       {entries.length === 0 ? (
         <View style={{ flex: 1, justifyContent: "center", alignItems: "center", padding: 32 }}>
-          <Ionicons name="shield-checkmark-outline" size={48} color="#555" />
+          {showKeyprints && (
+            <Pressable onPress={handleKeyprintTap} style={{ marginBottom: 20 }}>
+              <FractalKeyprint piSeed={piSeed} size={120} animate={true} />
+            </Pressable>
+          )}
+          {!showKeyprints && <Ionicons name="shield-checkmark-outline" size={48} color="#555" />}
           <Text style={{ color: "#888", fontSize: 16, marginTop: 16, textAlign: "center" }}>
             No entries yet. Tap + to add your first password.
           </Text>
@@ -515,6 +558,12 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
         onClose={() => setShowSecureNotes(false)}
         onNotesChanged={loadSecureNotes}
         onActivity={resetActivity}
+      />
+
+      <KeyprintViewer
+        visible={showKeyprintViewer}
+        piSeed={piSeed}
+        onClose={handleCloseKeyprintViewer}
       />
 
       <Modal visible={showSettings} animationType="slide" transparent>
@@ -610,6 +659,54 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
                   </Pressable>
                 );
               })}
+
+              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginTop: 24, marginBottom: 10 }}>
+                Display
+              </Text>
+
+              <Pressable
+                onPress={async () => {
+                  const next = !showKeyprints;
+                  setShowKeyprints(next);
+                  await saveShowKeyprints(next);
+                }}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  backgroundColor: "#181818",
+                  borderRadius: 10,
+                  padding: 14,
+                  borderWidth: 1,
+                  borderColor: showKeyprints ? "#1a3a1a" : "#222",
+                }}
+                testID="toggle-keyprints"
+              >
+                <Ionicons name="finger-print-outline" size={20} color={showKeyprints ? "#4CAF50" : "#666"} style={{ marginRight: 12 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: showKeyprints ? "#fff" : "#aaa", fontSize: 15, fontWeight: "600" }}>
+                    Show Fractal Keyprints
+                  </Text>
+                  <Text style={{ color: "#666", fontSize: 11, marginTop: 3, lineHeight: 16 }}>
+                    Purely visual proof of your unique key. Does not weaken encryption.
+                  </Text>
+                </View>
+                <View style={{
+                  width: 44,
+                  height: 24,
+                  borderRadius: 12,
+                  backgroundColor: showKeyprints ? "#4CAF50" : "#333",
+                  justifyContent: "center",
+                  paddingHorizontal: 2,
+                }}>
+                  <View style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: 10,
+                    backgroundColor: "#fff",
+                    alignSelf: showKeyprints ? "flex-end" : "flex-start",
+                  }} />
+                </View>
+              </Pressable>
 
               <Pressable
                 onPress={onLock}
