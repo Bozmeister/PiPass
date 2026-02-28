@@ -22,13 +22,13 @@ export default function FractalKeyprint({
     const animation = Animated.loop(
       Animated.sequence([
         Animated.timing(pulseAnim, {
-          toValue: 1.03,
-          duration: 2000,
+          toValue: 1.04,
+          duration: 1800,
           useNativeDriver: true,
         }),
         Animated.timing(pulseAnim, {
           toValue: 1.0,
-          duration: 2000,
+          duration: 1800,
           useNativeDriver: true,
         }),
       ])
@@ -47,8 +47,13 @@ export default function FractalKeyprint({
         borderRadius: size / 2,
         overflow: "hidden",
         transform: [{ scale: pulseAnim }],
-        borderWidth: 1.5,
-        borderColor: "#1a3a1a",
+        borderWidth: 3,                    // thicker brighter border
+        borderColor: "#00ff9f",            // bright neon green
+        shadowColor: "#00ff9f",
+        shadowOffset: { width: 0, height: 0 },
+        shadowOpacity: 0.8,
+        shadowRadius: 12,
+        elevation: 10,                     // Android glow
       }}
     >
       <Image
@@ -56,6 +61,8 @@ export default function FractalKeyprint({
         style={{ width: size, height: size }}
         resizeMode="cover"
       />
+
+      {/* Bright inner glow ring */}
       <View
         style={{
           position: "absolute",
@@ -64,8 +71,8 @@ export default function FractalKeyprint({
           right: 0,
           bottom: 0,
           borderRadius: size / 2,
-          borderWidth: 1,
-          borderColor: "rgba(76, 175, 80, 0.3)",
+          borderWidth: 2,
+          borderColor: "rgba(0, 255, 159, 0.65)",
         }}
       />
     </Animated.View>

@@ -1,3 +1,4 @@
+
 {
   "expo": {
     "name": "PiPass",
@@ -14,6 +15,7 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
+       "jsEngine": "jsc",
       "supportsTablet": false,
       "bundleIdentifier": "com.myapp"
     },

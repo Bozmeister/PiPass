@@ -9,6 +9,8 @@ import {
   hexToBytes,
   KeyShares,
 } from "../crypto/secureMemory";
+import { argon2id } from "hash-wasm";
+import * as SecureStore from "expo-secure-store";
 
 export interface VaultEntry {
   id: string;
@@ -35,14 +37,64 @@ export interface DecryptedVaultEntry {
   updatedAt: number;
 }
 
-export function deriveMasterKeyShares(userPiSeed: number, iterations: number = 100000): KeyShares {
-  const rawKey = deriveClusterKey(userPiSeed, iterations);
-  const shares = splitKeyIntoShares(rawKey);
-  const rawBytes = hexToBytes(rawKey);
+export async function deriveMasterKeyShares(
+  userPiSeed: number,
+  iterations: number = 100000
+): Promise<KeyShares> {
+  // Guard: force positive
+  let safeIterations = iterations;
+  if (!safeIterations || safeIterations <= 0) {
+    safeIterations = 25000;
+    console.log("Forced iterations to 25000");
+  }
+
+  const rawKey = deriveClusterKey(userPiSeed, safeIterations);
+  const deviceUUID = await getDeviceUUID();
+  const rawMaterial = rawKey + deviceUUID + userPiSeed.toString();
+
+  const salt = new TextEncoder().encode(deviceUUID + userPiSeed.toString().slice(0, 16));
+
+  // Guard: force positive params
+  let timeCost = safeIterations === 25000 ? 3 : safeIterations === 100000 ? 4 : 6;
+  let memorySize = safeIterations === 25000 ? 65536 : safeIterations === 100000 ? 131072 : 262144;
+  if (timeCost <= 0) timeCost = 3;
+  if (memorySize <= 0) memorySize = 65536;
+
+  console.log("Argon2id params:", { iterations: timeCost, memorySize });
+
+  const argonKeyBytes = await argon2id({
+    password: new TextEncoder().encode(rawMaterial),
+    salt,
+    iterations: timeCost,  // FIXED PARAM NAME
+    memorySize,            // FIXED PARAM NAME
+    parallelism: 4,
+    hashLength: 32,
+    outputType: "binary" as const,
+  });
+
+  const masterKeyHex = Array.from(argonKeyBytes)
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  const shares = splitKeyIntoShares(masterKeyHex);
+
+  const rawBytes = hexToBytes(masterKeyHex);
   wipeBuffer(rawBytes);
+
   return shares;
 }
 
+// DEVICE UUID HELPER
+async function getDeviceUUID(): Promise<string> {
+  let uuid = await SecureStore.getItemAsync("deviceUUID");
+  if (!uuid) {
+    uuid = ExpoCrypto.randomUUID();
+    await SecureStore.setItemAsync("deviceUUID", uuid);
+  }
+  return uuid;
+}
+
+// REST OF THE FILE UNCHANGED
 export function encryptVaultEntry(
   entry: Omit<DecryptedVaultEntry, "id" | "createdAt" | "updatedAt">,
   shares: KeyShares,

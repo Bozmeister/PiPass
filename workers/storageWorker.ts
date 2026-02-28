@@ -8,6 +8,8 @@ const MASTER_KEY_HASH_KEY = "pipass_master_hash";
 const PI_SEED_KEY = "pipass_pi_seed";
 const NOTES_KEY_PREFIX = "pipass_note_";
 const NOTES_INDEX_KEY = "pipass_notes_index";
+const SECURITY_PROFILE_KEY = "pipass_security_profile";
+const SHOW_KEYPRINTS_KEY = "pipass_show_keyprints";
 
 async function getItem(key: string): Promise<string | null> {
   if (Platform.OS === "web") {
@@ -75,21 +77,16 @@ export async function getEntry(id: string): Promise<VaultEntry | null> {
 export async function getAllEntries(): Promise<VaultEntry[]> {
   const index = await getVaultIndex();
   const entries: VaultEntry[] = [];
-
   for (const id of index) {
     const entry = await getEntry(id);
-    if (entry) {
-      entries.push(entry);
-    }
+    if (entry) entries.push(entry);
   }
-
   return entries;
 }
 
 export async function deleteEntry(id: string): Promise<void> {
   const entryKey = VAULT_KEY_PREFIX + id;
   await deleteItem(entryKey);
-
   const index = await getVaultIndex();
   const newIndex = index.filter((i) => i !== id);
   await setVaultIndex(newIndex);
@@ -108,6 +105,9 @@ export async function getMasterKeyHash(): Promise<string | null> {
   return await getItem(MASTER_KEY_HASH_KEY);
 }
 
+/**
+ * CLEARS VAULT ENTRIES ONLY
+ */
 export async function clearVault(): Promise<void> {
   const index = await getVaultIndex();
   for (const id of index) {
@@ -117,11 +117,22 @@ export async function clearVault(): Promise<void> {
   await deleteItem(MASTER_KEY_HASH_KEY);
 }
 
+/**
+ * THE NUCLEAR OPTION
+ * Purges every single trace of data from the device.
+ */
 export async function destroyAllData(): Promise<void> {
-  await clearVault();
-  await clearAllNotes();
-  await deleteItem(PI_SEED_KEY);
-  await deleteItem(SECURITY_PROFILE_KEY);
+  console.log("STORAGE_WORKER: Executing Total Purge...");
+  try {
+    await clearVault();
+    await clearAllNotes();
+    await deleteItem(PI_SEED_KEY);
+    await deleteItem(SECURITY_PROFILE_KEY);
+    await deleteItem(SHOW_KEYPRINTS_KEY);
+    console.log("STORAGE_WORKER: Purge Successful.");
+  } catch (err) {
+    console.error("STORAGE_WORKER: Purge failed", err);
+  }
 }
 
 async function getNotesIndex(): Promise<string[]> {
@@ -181,14 +192,6 @@ export async function clearAllNotes(): Promise<void> {
   await deleteItem(NOTES_INDEX_KEY);
 }
 
-export async function getRawEntryString(id: string): Promise<string | null> {
-  return await getItem(VAULT_KEY_PREFIX + id);
-}
-
-export async function getVaultIndexIds(): Promise<string[]> {
-  return await getVaultIndex();
-}
-
 export async function savePiSeed(seed: number): Promise<void> {
   await setItem(PI_SEED_KEY, seed.toString());
 }
@@ -200,8 +203,6 @@ export async function getPiSeed(): Promise<number | null> {
   return isNaN(num) ? null : num;
 }
 
-const SECURITY_PROFILE_KEY = "pipass_security_profile";
-
 export async function saveSecurityProfile(iterations: number): Promise<void> {
   await setItem(SECURITY_PROFILE_KEY, iterations.toString());
 }
@@ -210,10 +211,9 @@ export async function getSecurityProfile(): Promise<number> {
   const val = await getItem(SECURITY_PROFILE_KEY);
   if (val === null) return 100000;
   const num = parseInt(val, 10);
-  return isNaN(num) ? 100000 : num;
+  // Double safety: if parsing fails or it's non-positive, return default
+  return isNaN(num) || num <= 0 ? 100000 : num;
 }
-
-const SHOW_KEYPRINTS_KEY = "pipass_show_keyprints";
 
 export async function saveShowKeyprints(show: boolean): Promise<void> {
   await setItem(SHOW_KEYPRINTS_KEY, show ? "1" : "0");
