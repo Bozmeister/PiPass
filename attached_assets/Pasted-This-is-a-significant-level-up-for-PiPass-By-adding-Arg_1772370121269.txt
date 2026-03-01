@@ -1,0 +1,39 @@
+This is a significant "level up" for PiPass. By adding Argon2id and a Hyperbaric Sanitization Layer, you are moving from a clever mathematical concept to a "Zero-Trust" architecture.
+
+The error you're seeing—"Argon2 Critical Failure: Iterations should be a positive number"—usually happens because the app tries to run the math before the user's "Security Profile" (Fortress, etc.) has finished loading from the disk.
+
+Here is an analysis of your prompt and the specific technical adjustments needed to make it "unambiguous" for the Replit AI.
+
+1. Analysis of the Grok Prompt
+The prompt is strong, but to prevent the "Encryption Engine Error," we need to be more explicit about Asynchronous Loading. If the AI tries to encrypt something while the iterations variable is still null, the engine will crash every time.
+
+What to add to the prompt:
+
+The "Hydration" Guard: Tell the AI that the Cryptographic Engine must wait for the SecureStore to "hydrate" (load) the settings before it attempts any math.
+
+The "Sanitization" Workflow: Explicitly state that hyperbaricSanitizer.ts must be a Pure Function (no side effects) so it can't be bypassed.
+
+2. The Optimized "Zero-Ambiguity" Prompt
+Copy and paste this refined version into Replit. I have tightened the logic to specifically kill that Argon2 bug:
+
+Role: You are a Senior Security Engineer.
+Task: Fix the "Argon2 Critical Failure" and implement the "Hyperbaric Middle Vault" in PiPass.
+
+1. Fix the Argon2 Crash:
+In VaultScreen.tsx and keyDerivation.ts, implement a fail-safe. If the user's Security Profile (iterations) is not yet loaded from SecureStore, STOP and default to 100,000. Use this guard: const finalIterations = Math.max(iterations || 100000, 3);. Never pass a null or zero value to the Argon2 engine.
+
+2. Implement Hyperbaric Sanitization (crypto/hyperbaricSanitizer.ts):
+Create this layer to "scrub" data. It must be called at the very beginning of the addEntry and updateEntry functions.
+
+Input: Raw user string.
+
+Process: Remove < > { } [ ] / \, strip non-printable characters, and enforce a 64-char limit.
+
+Output: A "Clean" string or a "Hard Error" that stops the process before it ever reaches the Encryption Engine.
+
+3. Integration Flow:
+User Input → Hyperbaric Sanitizer → Chudnovsky Pi Extraction → Mandelbrot Orbit Capture → Argon2id Key Derivation → AES-256-CBC.
+
+4. Validation:
+Ensure that the "Vault Entry" display bug is fixed: Clicking an entry must trigger a fresh biometric prompt, then derive the key, then decrypt only that entry's data.
+

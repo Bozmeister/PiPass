@@ -41,12 +41,8 @@ export async function deriveMasterKeyShares(
   userPiSeed: number,
   iterations: number = 100000
 ): Promise<KeyShares> {
-  // Guard: force positive
-  let safeIterations = iterations;
-  if (!safeIterations || safeIterations <= 0) {
-    safeIterations = 25000;
-    console.log("Forced iterations to 25000");
-  }
+  const safeIterations = Math.max(iterations || 100000, 3);
+  console.log("Argon2id hydration guard: iterations resolved to", safeIterations);
 
   const rawKey = deriveClusterKey(userPiSeed, safeIterations);
   const deviceUUID = await getDeviceUUID();

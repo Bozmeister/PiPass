@@ -131,6 +131,18 @@ scripts/          # Build scripts
 ### Metro Configuration
 - `metro.config.js` — default Expo config (no custom asset extensions needed)
 
+### Hyperbaric Sanitization Layer (`crypto/hyperbaricSanitizer.ts`)
+- Pure function sanitizer that "scrubs" data before it reaches the Encryption Engine
+- Strips forbidden characters (`< > { } [ ] \ /`), non-printable characters, and enforces per-field length limits (title: 64, username: 64, password: 256, url: 2048, notes: 5000)
+- `hyperbaricSanitize(raw, field)` → returns `{ clean, ok, error }` — a Hard Error stops the process before encryption
+- `sanitizeEntryFields(entry)` → validates all fields at once, used at the top of `handleAddEntry` and `handleProfileChange` (re-encryption) flows
+- Integration flow: User Input → Hyperbaric Sanitizer → Chudnovsky Pi Extraction → Mandelbrot Orbit Capture → Argon2id Key Derivation → AES-256-CBC
+
+### Argon2id Hydration Guard
+- All iteration parameters use `Math.max(iterations || 100000, 3)` to prevent null/zero/undefined from reaching the Argon2 engine
+- Applied in: `keyDerivation.ts` (PBKDF2), `vaultWorker.ts` (Argon2id timeCost), `VaultScreen.tsx` (initializeVault, handleProfileChange), `index.tsx` (HomeScreen hydration)
+- Eliminates "Argon2 Critical Failure: Iterations should be a positive number" crash
+
 ## Recent Changes
 - 2026-02-22: **Fractal Keyprint v2.1** — Visual proof of unique cryptographic key. Mandelbrot escape-time grid rendered as neon green/black SVG thumbnails (48x48 @ 300 iterations). FractalKeyprint component on entry cards (toggleable via Settings > Show Fractal Keyprints, persisted in SecureStore). KeyprintViewer full-screen modal shows high-res 3x3 grid (96x96 @ 500 iterations) with coordinate data — biometric-gated. 7-tap secret gesture on settings icon replaces long-press for debug access. fractalKeyprint.ts utility generates Mandelbrot grids and SVG data URIs.
 - 2026-02-22: **v1.0.0 Seal** — Debug UI stripped (Audit Raw Data, Run Tests, Reveal Seed buttons removed; screen kept as empty "v1.0.0 — All systems nominal" placeholder). All console.log statements removed from production code. Loading screens polished with consistent typography (fontSize 18, fontWeight 600, letterSpacing 1, centered text with subtitles). Test data wiped for clean slate.

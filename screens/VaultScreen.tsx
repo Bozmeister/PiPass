@@ -32,6 +32,7 @@ import {
 
 import { KeyShares, wipeShares } from "../crypto/secureMemory";
 import { requireFreshBiometric } from "../crypto/biometricGate";
+import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
 
 // UI Components
 import AddEntryModal from "../components/AddEntryModal";
@@ -81,6 +82,7 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
 
   const lastActivityRef = useRef<number>(Date.now());
   const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const selectTokenRef = useRef<number>(0);
 
   useEffect(() => {
     if (Platform.OS !== "web") ScreenCapture.preventScreenCaptureAsync();
@@ -108,10 +110,8 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
   async function initializeVault() {
     setDerivingKey(true);
     try {
-      // Force positive iterations
-      let safeIterations = iterations;
-      if (!safeIterations || safeIterations <= 0) {
-        safeIterations = 25000;
+      const safeIterations = Math.max(iterations || 100000, 3);
+      if (safeIterations !== iterations) {
         onIterationsChange(safeIterations);
       }
 
@@ -149,7 +149,14 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
 
   async function handleAddEntry(entry: any) {
     if (!keySharesRef.current) return;
-    const encrypted = encryptVaultEntry(entry, keySharesRef.current);
+
+    const { sanitized, ok, error } = sanitizeEntryFields(entry);
+    if (!ok) {
+      Alert.alert("Sanitization Error", error || "Input rejected by Hyperbaric Sanitizer.");
+      return;
+    }
+
+    const encrypted = encryptVaultEntry(sanitized, keySharesRef.current);
     await saveEntry(encrypted);
     const stored = await getAllEntries();
     setEntries(stored);
@@ -158,15 +165,41 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
 
   async function handleSelectEntry(entry: VaultEntry) {
     if (!keySharesRef.current) return;
+    const token = ++selectTokenRef.current;
     setDecrypting(true);
+    setSelectedEntry(entry);
+    setDecryptedEntry(null);
     try {
+      isBiometricActive.current = true;
+      const authenticated = await requireFreshBiometric();
+      isBiometricActive.current = false;
+
+      if (selectTokenRef.current !== token) return;
+
+      if (!authenticated) {
+        setSelectedEntry(null);
+        setDecrypting(false);
+        return;
+      }
+
+      if (!keySharesRef.current) {
+        Alert.alert("Vault Locked", "Vault was locked during authentication.");
+        setSelectedEntry(null);
+        setDecrypting(false);
+        return;
+      }
+
       const decrypted = decryptVaultEntry(entry, keySharesRef.current);
+      if (selectTokenRef.current !== token) return;
       setDecryptedEntry(decrypted);
-      setSelectedEntry(entry);
     } catch (err) {
-      Alert.alert("Decryption Error", "Something went wrong.");
+      if (selectTokenRef.current === token) {
+        Alert.alert("Decryption Error", "Something went wrong.");
+        setSelectedEntry(null);
+      }
     } finally {
-      setDecrypting(false);
+      isBiometricActive.current = false;
+      if (selectTokenRef.current === token) setDecrypting(false);
     }
   }
 
@@ -186,9 +219,7 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
   async function handleProfileChange(newIterations: number) {
     if (newIterations === iterations || !keySharesRef.current) return;
 
-    // Force positive
-    let safeNew = newIterations;
-    if (!safeNew || safeNew <= 0) safeNew = 25000;
+    const safeNew = Math.max(newIterations || 100000, 3);
 
     if (entries.length === 0) {
       await onIterationsChange(safeNew);
