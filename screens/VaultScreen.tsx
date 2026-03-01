@@ -121,7 +121,7 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
       keySharesRef.current = shares;
 
       const keyprintPref = await getShowKeyprints();
-      setShowKeyprints(keyprintPref || true);
+      setShowKeyprints(keyprintPref);
 
       const stored = await getAllEntries();
       setEntries(stored);
@@ -137,7 +137,10 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
       }
     } catch (err) {
       console.error("Initialization error:", err);
-      Alert.alert("Engine Error", "Failed to initialize vault. Try again or wipe data.");
+      Alert.alert("Engine Error", "Failed to initialize vault.", [
+        { text: "Try Again", onPress: () => initializeVault() },
+        { text: "Wipe Data", style: "destructive", onPress: async () => { await destroyAllData(); onReset(); } },
+      ]);
     }
     setDerivingKey(false);
     resetActivity();

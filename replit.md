@@ -138,10 +138,11 @@ scripts/          # Build scripts
 - `sanitizeEntryFields(entry)` → validates all fields at once, used at the top of `handleAddEntry` and `handleProfileChange` (re-encryption) flows
 - Integration flow: User Input → Hyperbaric Sanitizer → Chudnovsky Pi Extraction → Mandelbrot Orbit Capture → Argon2id Key Derivation → AES-256-CBC
 
-### Argon2id Hydration Guard
-- All iteration parameters use `Math.max(iterations || 100000, 3)` to prevent null/zero/undefined from reaching the Argon2 engine
+### Argon2id Hydration Guard + PBKDF2 Fallback
+- All iteration parameters use `Math.max(iterations || 100000, 3)` to prevent null/zero/undefined from reaching the crypto engine
 - Applied in: `keyDerivation.ts` (PBKDF2), `vaultWorker.ts` (Argon2id timeCost), `VaultScreen.tsx` (initializeVault, handleProfileChange), `index.tsx` (HomeScreen hydration)
 - Eliminates "Argon2 Critical Failure: Iterations should be a positive number" crash
+- **PBKDF2 Fallback**: `hash-wasm` Argon2id requires WebAssembly, which is unavailable in some environments (Expo Go on iOS). `vaultWorker.ts` dynamically loads `hash-wasm` via `import()` and catches failures — if Argon2id is unavailable or crashes at runtime, key derivation falls back to PBKDF2-SHA256 via `crypto-js` with the full iteration count. This ensures the vault initializes on all platforms.
 
 ## Recent Changes
 - 2026-02-22: **Fractal Keyprint v2.1** — Visual proof of unique cryptographic key. Mandelbrot escape-time grid rendered as neon green/black SVG thumbnails (48x48 @ 300 iterations). FractalKeyprint component on entry cards (toggleable via Settings > Show Fractal Keyprints, persisted in SecureStore). KeyprintViewer full-screen modal shows high-res 3x3 grid (96x96 @ 500 iterations) with coordinate data — biometric-gated. 7-tap secret gesture on settings icon replaces long-press for debug access. fractalKeyprint.ts utility generates Mandelbrot grids and SVG data URIs.

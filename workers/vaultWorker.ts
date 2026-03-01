@@ -1,4 +1,5 @@
 import * as ExpoCrypto from "expo-crypto";
+import CryptoJS from "crypto-js";
 import { deriveClusterKey } from "../crypto/keyDerivation";
 import { encryptData, decryptData } from "../crypto/encryption";
 import {
@@ -9,8 +10,24 @@ import {
   hexToBytes,
   KeyShares,
 } from "../crypto/secureMemory";
-import { argon2id } from "hash-wasm";
 import * as SecureStore from "expo-secure-store";
+
+let argon2idFn: typeof import("hash-wasm").argon2id | null = null;
+let argon2LoadFailed = false;
+
+async function loadArgon2(): Promise<typeof import("hash-wasm").argon2id | null> {
+  if (argon2LoadFailed) return null;
+  if (argon2idFn) return argon2idFn;
+  try {
+    const mod = await import("hash-wasm");
+    argon2idFn = mod.argon2id;
+    return argon2idFn;
+  } catch {
+    argon2LoadFailed = true;
+    console.warn("Argon2id unavailable (no WebAssembly), using PBKDF2 fallback");
+    return null;
+  }
+}
 
 export interface VaultEntry {
   id: string;
@@ -58,19 +75,47 @@ export async function deriveMasterKeyShares(
 
   console.log("Argon2id params:", { iterations: timeCost, memorySize });
 
-  const argonKeyBytes = await argon2id({
-    password: new TextEncoder().encode(rawMaterial),
-    salt,
-    iterations: timeCost,  // FIXED PARAM NAME
-    memorySize,            // FIXED PARAM NAME
-    parallelism: 4,
-    hashLength: 32,
-    outputType: "binary" as const,
-  });
+  let masterKeyHex: string;
 
-  const masterKeyHex = Array.from(argonKeyBytes)
-    .map(b => b.toString(16).padStart(2, "0"))
-    .join("");
+  const argon2 = await loadArgon2();
+  if (argon2) {
+    try {
+      const argonKeyBytes = await argon2({
+        password: new TextEncoder().encode(rawMaterial),
+        salt,
+        iterations: timeCost,
+        memorySize,
+        parallelism: 4,
+        hashLength: 32,
+        outputType: "binary" as const,
+      });
+      masterKeyHex = Array.from(argonKeyBytes)
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+      console.log("Key derived via Argon2id");
+    } catch (argonErr) {
+      console.warn("Argon2id runtime error, falling back to PBKDF2:", argonErr);
+      const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, "0")).join("");
+      const pbkdf2Iterations = safeIterations;
+      const stretched = CryptoJS.PBKDF2(rawMaterial, saltHex, {
+        keySize: 256 / 32,
+        iterations: pbkdf2Iterations,
+        hasher: CryptoJS.algo.SHA256,
+      });
+      masterKeyHex = stretched.toString(CryptoJS.enc.Hex);
+      console.log("Key derived via PBKDF2 fallback");
+    }
+  } else {
+    const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, "0")).join("");
+    const pbkdf2Iterations = safeIterations;
+    const stretched = CryptoJS.PBKDF2(rawMaterial, saltHex, {
+      keySize: 256 / 32,
+      iterations: pbkdf2Iterations,
+      hasher: CryptoJS.algo.SHA256,
+    });
+    masterKeyHex = stretched.toString(CryptoJS.enc.Hex);
+    console.log("Key derived via PBKDF2 fallback (no WebAssembly)");
+  }
 
   const shares = splitKeyIntoShares(masterKeyHex);
 
