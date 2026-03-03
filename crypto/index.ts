@@ -1,3 +1,5 @@
+import { secureVaultAdd } from '../crypto/fractalRuntime';
+// replace old addEntry with secureVaultAdd – done!
 export { getPiDigits, extractPiDigits, mapDigitsToCoordinates } from "./pi";
 export type { PiCoordinates } from "./pi";
 export {
