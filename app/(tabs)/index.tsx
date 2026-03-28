@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { View, Text, TextInput, Pressable, Platform, Alert, ActivityIndicator } from "react-native";
+import { View, Text, TextInput, Pressable, Platform, Alert, ActivityIndicator, ScrollView } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AuthScreen from "../../screens/AuthScreen";
@@ -195,81 +196,90 @@ function UnlockScreen({ salt, iterations, onUnlocked, onReset }: {
   }
 
   return (
-    <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000", padding: 24, paddingTop: insets.top + webTopInset }}>
-      <Ionicons name="lock-closed" size={64} color="#4CAF50" />
-      <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold" as const, marginTop: 24 }}>
-        Unlock Vault
-      </Text>
-      <Text style={{ color: "#aaa", fontSize: 14, marginTop: 8, textAlign: "center" }}>
-        Enter your master password to access your vault
-      </Text>
-
-      <View style={{
-        flexDirection: "row", alignItems: "center",
-        backgroundColor: "#1a1a1a", borderRadius: 8, marginTop: 32, width: "100%",
-        borderWidth: 1, borderColor: error ? "#ff4444" : "#333",
-      }}>
-        <TextInput
-          value={password}
-          onChangeText={(t) => { setPassword(t); setError(null); }}
-          onSubmitEditing={handleUnlock}
-          placeholder="Master password"
-          placeholderTextColor="#555"
-          secureTextEntry={!showPassword}
-          autoCapitalize="none"
-          autoCorrect={false}
-          textContentType="none"
-          autoComplete="off"
-          returnKeyType="go"
-          style={{ color: "#fff", fontSize: 18, padding: 16, flex: 1 }}
-          testID="unlock-password-input"
-        />
-        <Pressable onPress={() => setShowPassword(!showPassword)} style={{ padding: 16 }}>
-          <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#888" />
-        </Pressable>
-      </View>
-
-      {error && (
-        <Text style={{ color: "#ff4444", fontSize: 14, marginTop: 8 }}>{error}</Text>
-      )}
-
-      <Pressable
-        onPress={handleUnlock}
-        disabled={!password.trim() || unlocking}
-        style={{
-          backgroundColor: password.trim() && !unlocking ? "#4CAF50" : "#333",
-          paddingVertical: 16, paddingHorizontal: 48, borderRadius: 8, marginTop: 24, width: "100%", alignItems: "center",
-        }}
-        testID="unlock-button"
+    <KeyboardAvoidingView
+      style={{ flex: 1, backgroundColor: "#000" }}
+      behavior="padding"
+      keyboardVerticalOffset={0}
+    >
+      <ScrollView
+        contentContainerStyle={{ flexGrow: 1, justifyContent: "center", alignItems: "center", padding: 24, paddingTop: insets.top + webTopInset }}
+        keyboardShouldPersistTaps="handled"
       >
-        {unlocking ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" as const }}>Unlock</Text>
+        <Ionicons name="lock-closed" size={64} color="#4CAF50" />
+        <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold" as const, marginTop: 24 }}>
+          Unlock Vault
+        </Text>
+        <Text style={{ color: "#aaa", fontSize: 14, marginTop: 8, textAlign: "center" }}>
+          Enter your master password to access your vault
+        </Text>
+
+        <View style={{
+          flexDirection: "row", alignItems: "center",
+          backgroundColor: "#e8e8e8", borderRadius: 8, marginTop: 32, width: "100%",
+          borderWidth: 1, borderColor: error ? "#ff4444" : "#ccc",
+        }}>
+          <TextInput
+            value={password}
+            onChangeText={(t) => { setPassword(t); setError(null); }}
+            onSubmitEditing={handleUnlock}
+            placeholder="Master password"
+            placeholderTextColor="#888"
+            secureTextEntry={!showPassword}
+            autoCapitalize="none"
+            autoCorrect={false}
+            textContentType="none"
+            autoComplete="off"
+            returnKeyType="go"
+            style={{ color: "#000", fontSize: 18, padding: 16, flex: 1 }}
+            testID="unlock-password-input"
+          />
+          <Pressable onPress={() => setShowPassword(!showPassword)} style={{ padding: 16 }}>
+            <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#555" />
+          </Pressable>
+        </View>
+
+        {error && (
+          <Text style={{ color: "#ff4444", fontSize: 14, marginTop: 8 }}>{error}</Text>
         )}
-      </Pressable>
 
-      <Pressable
-        onPress={async () => {
-          const msg = "This will erase all vault data. This cannot be undone.";
-          if (Platform.OS === "web") {
-            if (confirm(msg)) {
-              destroyAllData().then(() => onReset());
+        <Pressable
+          onPress={handleUnlock}
+          disabled={!password.trim() || unlocking}
+          style={{
+            backgroundColor: password.trim() && !unlocking ? "#4CAF50" : "#333",
+            paddingVertical: 16, paddingHorizontal: 48, borderRadius: 8, marginTop: 24, width: "100%", alignItems: "center",
+          }}
+          testID="unlock-button"
+        >
+          {unlocking ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" as const }}>Unlock</Text>
+          )}
+        </Pressable>
+
+        <Pressable
+          onPress={async () => {
+            const msg = "This will erase all vault data. This cannot be undone.";
+            if (Platform.OS === "web") {
+              if (confirm(msg)) {
+                destroyAllData().then(() => onReset());
+              }
+            } else {
+              Alert.alert("Reset Vault", msg, [
+                { text: "Cancel", style: "cancel" },
+                { text: "Reset", style: "destructive", onPress: async () => {
+                  await destroyAllData();
+                  onReset();
+                }},
+              ]);
             }
-          } else {
-            Alert.alert("Reset Vault", msg, [
-              { text: "Cancel", style: "cancel" },
-              { text: "Reset", style: "destructive", onPress: async () => {
-                await destroyAllData();
-                onReset();
-              }},
-            ]);
-          }
-        }}
-        style={{ marginTop: 32 }}
-      >
-        <Text style={{ color: "#666", fontSize: 14 }}>Forgot password? Reset vault</Text>
-      </Pressable>
-    </View>
+          }}
+          style={{ marginTop: 32 }}
+        >
+          <Text style={{ color: "#666", fontSize: 14 }}>Forgot password? Reset vault</Text>
+        </Pressable>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
