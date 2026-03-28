@@ -1,0 +1,189 @@
+Task: Add a full-screen fractal viewer that opens when a user taps a fractal in the vault.
+
+Rules:
+
+DO NOT modify cryptographic logic (HKDF, deriveFractalSeed, fractalParams)
+DO NOT introduce randomness that affects determinism of the base fractal
+DO NOT break existing navigation or vault functionality
+All changes must be additive and isolated
+Keep performance smooth (no heavy re-renders)
+
+---
+
+Feature Overview:
+
+User taps a fractal (e.g. in Vault entry list or FractalKeyprint)
+
+→ App opens a full-screen fractal viewer
+
+Viewer behavior:
+- Displays ONLY the fractal (no UI clutter)
+- Optional subtle pulsing animation (visual only, does NOT change fractal structure)
+- On ANY touch → immediately close and return to vault
+
+---
+
+Requirements:
+
+1. Add Full-Screen Fractal Viewer Component
+
+Create a new component:
+
+FractalFullscreenViewer
+
+Props:
+- visible: boolean
+- onClose: () => void
+- fractalParams: { cx, cy, zoom, maxIterations }
+- optional colorMode
+
+Behavior:
+
+- Render full-screen (absolute fill)
+- Black background
+- Center fractal
+- No headers, no buttons
+- Wrap entire screen in touch handler:
+
+onTouchStart → immediately call onClose()
+
+---
+
+2. Integrate with existing fractal components
+
+Locate:
+
+FractalKeyprint
+(or wherever fractal previews are rendered in vault list)
+
+Add:
+
+onPress / touch handler
+
+When pressed:
+
+- set selectedFractalParams in state
+- set showFullscreenViewer = true
+
+---
+
+3. Render viewer at screen level
+
+In VaultScreen (or top-level screen):
+
+Add state:
+
+const [showFullscreen, setShowFullscreen] = useState(false);
+const [selectedFractalParams, setSelectedFractalParams] = useState(null);
+
+Render:
+
+<FractalFullscreenViewer
+  visible={showFullscreen}
+  fractalParams={selectedFractalParams}
+  onClose={() => setShowFullscreen(false)}
+/>
+
+---
+
+4. Subtle pulsing animation (visual only)
+
+Apply a smooth scale animation:
+
+- Use a sine wave or animation loop
+- Scale range: 0.98 → 1.02
+- Duration: ~2–3 seconds loop
+
+IMPORTANT:
+
+- Animation must NOT affect fractalParams
+- Only affects render transform (scale)
+
+Example:
+
+transform: [{ scale: animatedValue }]
+
+---
+
+5. Add color modes (non-breaking)
+
+Introduce colorMode options:
+
+- "green" (default, existing)
+- "rainbow"
+- "custom"
+
+DO NOT change fractal math
+Only change color mapping
+
+---
+
+6. Rainbow mode
+
+Map iteration count → hue:
+
+Example:
+
+hue = (iteration / maxIterations) * 360
+
+Convert to HSL/HSV → RGB
+
+Ensure smooth gradient (no banding)
+
+---
+
+7. Custom color option
+
+Allow a base color:
+
+Example:
+
+colorMode: "custom"
+baseColor: string (hex)
+
+Apply:
+
+- Scale brightness based on iteration depth
+- Keep fractal structure unchanged
+
+---
+
+8. Ensure determinism
+
+- Fractal shape must remain identical for same fractalParams
+- Color mode must be deterministic
+- No randomness
+- Animation must NOT affect underlying data
+
+---
+
+9. Performance constraints
+
+- Avoid re-generating fractal every frame
+- Cache fractal render where possible
+- Animation must be GPU-friendly (transform only)
+
+---
+
+10. UX behavior
+
+- Tap fractal → open instantly
+- Tap anywhere → close instantly
+- No delay
+- No confirmation dialogs
+
+---
+
+DO NOT:
+
+Add navigation routes
+Introduce async delays
+Modify existing fractal generation logic
+Break existing vault interactions
+
+---
+
+Output:
+
+Only new component + modified integration code
+No explanations

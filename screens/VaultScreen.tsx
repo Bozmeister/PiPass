@@ -49,6 +49,7 @@ import FractalKeyprint from "../components/FractalKeyprint";
 import KeyprintViewer from "../components/KeyprintViewer";
 import FaviconImage from "../components/FaviconImage";
 import NuclearResetModal from "../components/NuclearResetModal";
+import FractalFullscreenViewer from "../components/FractalFullscreenViewer";
 
 const AUTO_LOCK_MS = 120000;
 
@@ -97,6 +98,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   const [profilePassword, setProfilePassword] = useState("");
   const [profilePasswordFocused, setProfilePasswordFocused] = useState(false);
   const [showNuclearReset, setShowNuclearReset] = useState(false);
+  const [showFullscreenFractal, setShowFullscreenFractal] = useState(false);
 
   const settingsTapCountRef = useRef(0);
   const settingsTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -125,6 +127,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       setShowSecureNotes(false);
       setShowKeyprintViewer(false);
       setShowNuclearReset(false);
+      setShowFullscreenFractal(false);
       setPendingProfileIterations(null);
       setProfilePassword("");
       selectTokenRef.current++;
@@ -425,7 +428,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   const renderItem = ({ item }: { item: VaultEntry }) => (
     <Pressable onPress={() => handleSelectEntry(item)} style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#222", flexDirection: "row", alignItems: "center" }}>
       {showKeyprints ? (
-        <FractalKeyprint seed={visualSeed} size={62} animate={false} fractalParams={fractalParams} />
+        <FractalKeyprint seed={visualSeed} size={62} animate={false} fractalParams={fractalParams} onPress={(e?: any) => { e?.stopPropagation?.(); resetActivity(); setShowFullscreenFractal(true); }} />
       ) : (
         <FaviconImage url={item.url} size={32} />
       )}
@@ -497,7 +500,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         renderItem={renderItem}
         ListEmptyComponent={
           <View style={{ flex: 1, justifyContent: "center", alignItems: "center", marginTop: 100 }}>
-            <FractalKeyprint seed={visualSeed} size={210} animate={true} fractalParams={fractalParams} />
+            <FractalKeyprint seed={visualSeed} size={210} animate={true} fractalParams={fractalParams} onPress={() => { resetActivity(); setShowFullscreenFractal(true); }} />
             <Text style={{ color: "#888", fontSize: 18, marginTop: 30 }}>Empty vault — add something!</Text>
           </View>
         }
@@ -650,6 +653,13 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         onConfirmReset={executeNuclearReset}
         verifyPassword={verifyPasswordForReset}
         requireBiometric={requireFreshBiometric}
+      />
+
+      <FractalFullscreenViewer
+        visible={showFullscreenFractal}
+        onClose={() => setShowFullscreenFractal(false)}
+        seed={visualSeed}
+        fractalParams={fractalParams}
       />
     </View>
   );

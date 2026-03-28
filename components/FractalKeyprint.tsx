@@ -6,7 +6,7 @@ import { FractalParams } from "../crypto/hkdf";
 interface FractalKeyprintProps {
   seed: number;
   size?: number;
-  onPress?: () => void;
+  onPress?: (e?: any) => void;
   animate?: boolean;
   fractalParams?: FractalParams;
 }
@@ -81,7 +81,7 @@ export default function FractalKeyprint({
 
   if (onPress) {
     return (
-      <Pressable onPress={onPress} testID="fractal-keyprint-thumb">
+      <Pressable onPress={(e) => onPress?.(e)} testID="fractal-keyprint-thumb">
         {imageContent}
       </Pressable>
     );
