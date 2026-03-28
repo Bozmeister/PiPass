@@ -47,13 +47,34 @@ export function generateMasterSalt(): string {
     .join("");
 }
 
+export type KdfVersion = "v1" | "v2";
+
+const KDF_CONFIGS = {
+  v1: {
+    getTimeCost: (safeIterations: number) =>
+      safeIterations <= 25000 ? 3 : safeIterations <= 100000 ? 4 : 6,
+    getMemorySize: (safeIterations: number) =>
+      safeIterations <= 25000 ? 65536 : safeIterations <= 100000 ? 131072 : 262144,
+    parallelism: 4,
+  },
+  v2: {
+    getTimeCost: (safeIterations: number) =>
+      Math.max(safeIterations <= 25000 ? 3 : safeIterations <= 100000 ? 4 : 6, 3),
+    getMemorySize: (safeIterations: number) =>
+      Math.max(safeIterations <= 25000 ? 65536 : safeIterations <= 100000 ? 131072 : 262144, 65536),
+    parallelism: 1,
+  },
+} as const;
+
 // Derives the master key from a user-provided password.
 // Uses Argon2id when available, PBKDF2-SHA256 as fallback.
 // The salt must be stored alongside the vault — it is NOT secret.
+// kdfVersion defaults to "v1" for backward compatibility with existing vaults.
 export async function deriveMasterKey(
   password: string,
   saltHex: string,
-  iterations: number = 100000
+  iterations: number = 100000,
+  kdfVersion: KdfVersion = "v1"
 ): Promise<string> {
   const safeIterations = Math.max(iterations || 100000, 3);
   const deviceUUID = await getDeviceUUID();
@@ -62,18 +83,22 @@ export async function deriveMasterKey(
   const material = password + ":" + deviceUUID;
   const salt = new TextEncoder().encode(saltHex);
 
+  const config = KDF_CONFIGS[kdfVersion];
+
   // Try Argon2id first (memory-hard, best protection)
   const argon2 = await loadArgon2();
   if (argon2) {
     try {
-      const timeCost = Math.max(safeIterations <= 25000 ? 3 : safeIterations <= 100000 ? 4 : 6, 3);
-      const memorySize = Math.max(safeIterations <= 25000 ? 65536 : safeIterations <= 100000 ? 131072 : 262144, 65536);
+      const timeCost = config.getTimeCost(safeIterations);
+      const memorySize = config.getMemorySize(safeIterations);
 
-      if (memorySize < 65536) {
-        throw new Error("Argon2id memoryCost must be at least 65536 (64MB)");
-      }
-      if (timeCost < 3) {
-        throw new Error("Argon2id timeCost must be at least 3");
+      if (kdfVersion === "v2") {
+        if (memorySize < 65536) {
+          throw new Error("Argon2id memoryCost must be at least 65536 (64MB)");
+        }
+        if (timeCost < 3) {
+          throw new Error("Argon2id timeCost must be at least 3");
+        }
       }
 
       const keyBytes = await argon2({
@@ -81,7 +106,7 @@ export async function deriveMasterKey(
         salt,
         iterations: timeCost,
         memorySize,
-        parallelism: 1,
+        parallelism: config.parallelism,
         hashLength: 32,
         outputType: "binary" as const,
       });
