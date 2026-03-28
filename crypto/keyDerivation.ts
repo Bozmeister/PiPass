@@ -66,15 +66,22 @@ export async function deriveMasterKey(
   const argon2 = await loadArgon2();
   if (argon2) {
     try {
-      const timeCost = safeIterations <= 25000 ? 3 : safeIterations <= 100000 ? 4 : 6;
-      const memorySize = safeIterations <= 25000 ? 65536 : safeIterations <= 100000 ? 131072 : 262144;
+      const timeCost = Math.max(safeIterations <= 25000 ? 3 : safeIterations <= 100000 ? 4 : 6, 3);
+      const memorySize = Math.max(safeIterations <= 25000 ? 65536 : safeIterations <= 100000 ? 131072 : 262144, 65536);
+
+      if (memorySize < 65536) {
+        throw new Error("Argon2id memoryCost must be at least 65536 (64MB)");
+      }
+      if (timeCost < 3) {
+        throw new Error("Argon2id timeCost must be at least 3");
+      }
 
       const keyBytes = await argon2({
         password: new TextEncoder().encode(material),
         salt,
         iterations: timeCost,
         memorySize,
-        parallelism: 4,
+        parallelism: 1,
         hashLength: 32,
         outputType: "binary" as const,
       });
