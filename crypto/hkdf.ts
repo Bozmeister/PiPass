@@ -4,6 +4,8 @@ import * as ExpoCrypto from "expo-crypto";
 // HKDF (HMAC-based Key Derivation Function) per RFC 5869
 // Used to derive per-entry subkeys from the master key
 
+const HKDF_SALT_V1 = CryptoJS.SHA256("pipass-hkdf-salt-v1").toString(CryptoJS.enc.Hex);
+
 function hkdfExtract(salt: string, ikm: string): string {
   return CryptoJS.HmacSHA256(
     CryptoJS.enc.Hex.parse(ikm),
@@ -50,8 +52,7 @@ export function deriveEntryKey(
 }
 
 export function deriveFractalSeed(masterKeyHex: string): { seedNumber: number; fingerprint: string } {
-  const fixedSalt = "00".repeat(16);
-  const prk = hkdfExtract(fixedSalt, masterKeyHex);
+  const prk = hkdfExtract(HKDF_SALT_V1, masterKeyHex);
   const seedHex = hkdfExpand(prk, "fractal", 32);
   const fingerprint = CryptoJS.SHA256(CryptoJS.enc.Hex.parse(seedHex)).toString(CryptoJS.enc.Hex);
   const seedNumber = parseInt(seedHex.slice(0, 8), 16) % 999999;
