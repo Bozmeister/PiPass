@@ -5,6 +5,11 @@ const THUMBNAIL_RESOLUTION = 48;
 const THUMBNAIL_MAX_ITER = 300;
 const VIEWER_RESOLUTION = 96;
 
+const ZOOM_MULTIPLIER = 2.5;
+const COORD_MULTIPLIER = 1.8;
+const ITERATION_MULTIPLIER = 1.5;
+const RESOLUTION_SCALE = 1.5;
+
 export interface FractalGridData {
   width: number;
   height: number;
@@ -60,10 +65,10 @@ export function computeFractalGrid(
 ): FractalGridData {
   let centerX: number, centerY: number, zoomFactor: number;
   if (fractalParams) {
-    centerX = fractalParams.cx;
-    centerY = fractalParams.cy;
-    zoomFactor = fractalParams.zoom;
-    maxIter = fractalParams.maxIterations;
+    centerX = fractalParams.cx * COORD_MULTIPLIER;
+    centerY = fractalParams.cy * COORD_MULTIPLIER;
+    zoomFactor = fractalParams.zoom * ZOOM_MULTIPLIER;
+    maxIter = Math.min(Math.floor(fractalParams.maxIterations * ITERATION_MULTIPLIER), 2000);
   } else {
     const digits30 = extractPiDigits(piSeed, 30);
     const coords = mapDigitsToCoordinates(digits30);
@@ -98,13 +103,14 @@ export function generateFractalSvg(
   maxIter: number = THUMBNAIL_MAX_ITER,
   fractalParams?: FractalParams
 ): string {
-  const grid = computeFractalGrid(piSeed, resolution, maxIter, fractalParams);
-  const cellSize = size / resolution;
+  const scaledResolution = fractalParams ? Math.floor(resolution * RESOLUTION_SCALE) : resolution;
+  const grid = computeFractalGrid(piSeed, scaledResolution, maxIter, fractalParams);
+  const cellSize = size / scaledResolution;
 
   let rects = "";
-  for (let row = 0; row < resolution; row++) {
-    for (let col = 0; col < resolution; col++) {
-      const color = escapeToColor(grid.escapeGrid[row][col], maxIter);
+  for (let row = 0; row < scaledResolution; row++) {
+    for (let col = 0; col < scaledResolution; col++) {
+      const color = escapeToColor(grid.escapeGrid[row][col], grid.maxIter);
       if (color !== "#0a0a0a") {
         rects += `<rect x="${(col * cellSize).toFixed(1)}" y="${(row * cellSize).toFixed(1)}" width="${(cellSize + 0.5).toFixed(1)}" height="${(cellSize + 0.5).toFixed(1)}" fill="${color}"/>`;
       }

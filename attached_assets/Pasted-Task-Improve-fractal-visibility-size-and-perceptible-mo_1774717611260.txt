@@ -1,0 +1,133 @@
+Task: Improve fractal visibility, size, and perceptible motion WITHOUT modifying cryptographic behavior.
+
+Rules:
+
+DO NOT modify HKDF or deriveFractalSeed logic
+DO NOT change fractalParams values at source
+DO NOT introduce randomness
+DO NOT change fingerprint generation
+All changes must be applied ONLY at rendering level
+Determinism must be preserved (same input → same visual output)
+
+---
+
+Context:
+
+fractalParams contains:
+- cx
+- cy
+- zoom
+- maxIterations
+
+These values are currently too subtle when rendered, resulting in minimal visible motion and low visual impact.
+
+---
+
+Requirements:
+
+1. Apply zoom amplification (rendering only)
+
+Where fractalParams.zoom is used in rendering:
+
+Introduce:
+
+const ZOOM_MULTIPLIER = 2.5;
+
+Replace usage with:
+
+const adjustedZoom = fractalParams.zoom * ZOOM_MULTIPLIER;
+
+Use adjustedZoom instead of raw zoom.
+
+---
+
+2. Apply coordinate amplification (rendering only)
+
+Introduce:
+
+const COORD_MULTIPLIER = 1.8;
+
+Replace:
+
+cx → fractalParams.cx * COORD_MULTIPLIER  
+cy → fractalParams.cy * COORD_MULTIPLIER  
+
+Example:
+
+const adjustedCx = fractalParams.cx * COORD_MULTIPLIER;
+const adjustedCy = fractalParams.cy * COORD_MULTIPLIER;
+
+Use adjustedCx / adjustedCy in rendering.
+
+---
+
+3. Increase iteration depth for better visual detail
+
+Introduce:
+
+const ITERATION_MULTIPLIER = 1.5;
+
+Apply:
+
+const adjustedIterations = Math.min(
+  Math.floor(fractalParams.maxIterations * ITERATION_MULTIPLIER),
+  2000
+);
+
+Use adjustedIterations instead of maxIterations.
+
+---
+
+4. Increase fractal size in UI components
+
+Locate small fractal instances (e.g. Vault screen, FractalKeyprint).
+
+Increase rendered size by ~40%.
+
+Example:
+
+width: currentWidth * 1.4  
+height: currentHeight * 1.4  
+
+Ensure proper centering after scaling.
+
+---
+
+5. Improve loading/initial fractal visibility
+
+Apply same multipliers (zoom, coord, iterations).
+
+Additionally increase render resolution if applicable:
+
+const RESOLUTION_SCALE = 1.5;
+
+Apply to canvas/SVG rendering dimensions only.
+
+---
+
+6. Maintain full determinism
+
+Ensure:
+
+- No randomness introduced
+- No time-based variation
+- All transformations are pure functions of fractalParams
+
+Same fractalParams must always produce identical visuals.
+
+---
+
+DO NOT:
+
+Modify deriveFractalSeed  
+Modify HKDF logic  
+Modify fractalParams structure  
+Introduce animation randomness  
+Break existing rendering pipeline  
+
+---
+
+Output:
+
+Only modified rendering logic and constants
+No explanations
