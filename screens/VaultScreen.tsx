@@ -28,6 +28,7 @@ import {
   getShowKeyprints, 
   saveShowKeyprints,
   getMasterSalt,
+  getMasterKeyHash,
   saveMasterKeyHash,
   saveFractalFingerprint,
   getFractalFingerprint,
@@ -47,6 +48,7 @@ import SecureNotesModal from "../components/SecureNotesModal";
 import FractalKeyprint from "../components/FractalKeyprint";
 import KeyprintViewer from "../components/KeyprintViewer";
 import FaviconImage from "../components/FaviconImage";
+import NuclearResetModal from "../components/NuclearResetModal";
 
 const AUTO_LOCK_MS = 60000;
 
@@ -93,6 +95,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   const [pendingProfileIterations, setPendingProfileIterations] = useState<number | null>(null);
   const [profilePassword, setProfilePassword] = useState("");
   const [profilePasswordFocused, setProfilePasswordFocused] = useState(false);
+  const [showNuclearReset, setShowNuclearReset] = useState(false);
 
   const settingsTapCountRef = useRef(0);
   const settingsTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -352,6 +355,24 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
     setMigrating(false);
   }
 
+  async function verifyPasswordForReset(pw: string): Promise<boolean> {
+    const salt = await getMasterSalt();
+    if (!salt) return false;
+    const shares = await deriveMasterKeyShares(pw, salt, iterations);
+    const keyHex = combineShares(shares);
+    const keyHash = hashMasterKey(keyHex);
+    const kb = hexToBytes(keyHex);
+    wipeBuffer(kb);
+    wipeShares(shares);
+    const storedHash = await getMasterKeyHash();
+    return !!storedHash && keyHash === storedHash;
+  }
+
+  async function executeNuclearReset() {
+    await destroyAllData();
+    onReset();
+  }
+
   async function toggleKeyprints(value: boolean) {
     setShowKeyprints(value);
     await saveShowKeyprints(value);
@@ -530,6 +551,14 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
               <Ionicons name="lock-closed-outline" size={20} color="#ef4444" style={{ marginBottom: 6 }} />
               <Text style={{ color: "#ef4444", fontWeight: "600" as const, fontSize: 16 }}>Lock Vault Now</Text>
             </Pressable>
+
+            <Pressable
+              onPress={() => { setShowSettings(false); setShowNuclearReset(true); }}
+              style={{ backgroundColor: "#1a0808", padding: 16, borderRadius: 12, alignItems: "center", marginTop: 12, borderWidth: 1, borderColor: "#3a1515" }}
+            >
+              <Ionicons name="nuclear-outline" size={20} color="#ef4444" style={{ marginBottom: 6 }} />
+              <Text style={{ color: "#ef4444", fontWeight: "600" as const, fontSize: 16 }}>Nuclear Reset</Text>
+            </Pressable>
           </View>
         </View>
       </Modal>
@@ -581,6 +610,14 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
           </View>
         </View>
       </Modal>
+
+      <NuclearResetModal
+        visible={showNuclearReset}
+        onClose={() => setShowNuclearReset(false)}
+        onConfirmReset={executeNuclearReset}
+        verifyPassword={verifyPasswordForReset}
+        requireBiometric={requireFreshBiometric}
+      />
     </View>
   );
 }
