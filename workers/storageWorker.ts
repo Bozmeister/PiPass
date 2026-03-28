@@ -224,10 +224,25 @@ export async function getShowKeyprints(): Promise<boolean> {
   return val !== "0";
 }
 
-export async function saveFractalFingerprint(fingerprint: string): Promise<void> {
-  await setItem(FRACTAL_FINGERPRINT_KEY, fingerprint);
+export interface FractalFingerprintRecord {
+  fingerprint: string;
+  iterations: number;
+  kdf: "argon2id";
+  version: 1;
 }
 
-export async function getFractalFingerprint(): Promise<string | null> {
-  return await getItem(FRACTAL_FINGERPRINT_KEY);
+export async function saveFractalFingerprint(record: FractalFingerprintRecord): Promise<void> {
+  await setItem(FRACTAL_FINGERPRINT_KEY, JSON.stringify(record));
+}
+
+export async function getFractalFingerprint(): Promise<FractalFingerprintRecord | string | null> {
+  const raw = await getItem(FRACTAL_FINGERPRINT_KEY);
+  if (raw === null) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.fingerprint === "string") {
+      return parsed as FractalFingerprintRecord;
+    }
+  } catch {}
+  return raw;
 }

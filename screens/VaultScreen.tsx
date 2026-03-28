@@ -31,6 +31,7 @@ import {
   saveMasterKeyHash,
   saveFractalFingerprint,
   getFractalFingerprint,
+  FractalFingerprintRecord,
 } from "../workers/storageWorker";
 
 import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer } from "../crypto/secureMemory";
@@ -114,12 +115,30 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
     verifyFractalFingerprint(fractalFingerprint);
   }, []);
 
+  function buildFingerprintRecord(fp: string): FractalFingerprintRecord {
+    return { fingerprint: fp, iterations, kdf: "argon2id", version: 1 };
+  }
+
   async function verifyFractalFingerprint(currentFingerprint: string) {
     const stored = await getFractalFingerprint();
     if (stored === null) {
-      await saveFractalFingerprint(currentFingerprint);
-    } else if (stored !== currentFingerprint) {
-      setFractalTampered(true);
+      await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
+    } else if (typeof stored === "string") {
+      if (stored !== currentFingerprint) {
+        setFractalTampered(true);
+      } else {
+        await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
+      }
+    } else {
+      const current = buildFingerprintRecord(currentFingerprint);
+      if (
+        stored.fingerprint !== current.fingerprint ||
+        stored.iterations !== current.iterations ||
+        stored.kdf !== current.kdf ||
+        stored.version !== current.version
+      ) {
+        setFractalTampered(true);
+      }
     }
   }
 
@@ -282,7 +301,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
       keySharesRef.current = newShares;
 
       const newFractal = refreshFractalFromShares(newShares);
-      await saveFractalFingerprint(newFractal.fingerprint);
+      await saveFractalFingerprint({ fingerprint: newFractal.fingerprint, iterations: pendingProfileIterations, kdf: "argon2id", version: 1 });
       setFractalTampered(false);
 
       setPendingProfileIterations(null);
