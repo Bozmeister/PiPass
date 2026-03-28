@@ -282,6 +282,7 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [focused, setFocused] = useState(false);
+  const [showForgotInfo, setShowForgotInfo] = useState(false);
   const webTopInset = Platform.OS === "web" ? 67 : 0;
 
   async function handleUnlock() {
@@ -307,6 +308,76 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
       setError("Failed to derive key. Please try again.");
     }
     setUnlocking(false);
+  }
+
+  if (showForgotInfo) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "#000" }}>
+        <ScrollView
+          contentContainerStyle={{ flexGrow: 1, justifyContent: "center", alignItems: "center", padding: 24, paddingTop: insets.top + webTopInset }}
+        >
+          <Ionicons name="warning-outline" size={64} color="#fbbf24" />
+          <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold" as const, marginTop: 24, textAlign: "center" }}>
+            Forgot Your Password?
+          </Text>
+          <Text style={{ color: "#aaa", fontSize: 15, marginTop: 16, textAlign: "center", lineHeight: 22 }}>
+            Your vault is encrypted and cannot be recovered without your password or recovery key.
+          </Text>
+          <Text style={{ color: "#ef4444", fontSize: 15, marginTop: 12, textAlign: "center", lineHeight: 22, fontWeight: "600" as const }}>
+            Resetting will permanently erase all stored data.
+          </Text>
+
+          <View style={{ width: "100%", marginTop: 36, gap: 12 }}>
+            <Pressable
+              onPress={() => setShowForgotInfo(false)}
+              style={{
+                backgroundColor: "#4CAF50", paddingVertical: 16, borderRadius: 12,
+                alignItems: "center", width: "100%",
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <Ionicons name="key-outline" size={20} color="#fff" />
+                <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" as const }}>Enter Password Again</Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              onPress={() => {}}
+              style={{
+                backgroundColor: "#1a1a1a", paddingVertical: 16, borderRadius: 12,
+                alignItems: "center", width: "100%", borderWidth: 1, borderColor: "#333",
+                opacity: 0.5,
+              }}
+              disabled
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <Ionicons name="document-text-outline" size={20} color="#aaa" />
+                <Text style={{ color: "#aaa", fontSize: 16, fontWeight: "600" as const }}>Use Recovery Key</Text>
+              </View>
+              <Text style={{ color: "#666", fontSize: 12, marginTop: 4 }}>Coming soon</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => {
+                setShowForgotInfo(false);
+                onRequestNuclearReset();
+              }}
+              style={{
+                backgroundColor: "#1a0808", paddingVertical: 16, borderRadius: 12,
+                alignItems: "center", width: "100%", borderWidth: 1, borderColor: "#3a1515",
+                marginTop: 8,
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <Ionicons name="nuclear-outline" size={20} color="#ef4444" />
+                <Text style={{ color: "#ef4444", fontSize: 16, fontWeight: "600" as const }}>Proceed to Secure Reset</Text>
+              </View>
+              <Text style={{ color: "#666", fontSize: 12, marginTop: 4 }}>This will permanently destroy your vault</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
+      </View>
+    );
   }
 
   return (
@@ -375,10 +446,10 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
         </Pressable>
 
         <Pressable
-          onPress={onRequestNuclearReset}
+          onPress={() => setShowForgotInfo(true)}
           style={{ marginTop: 32 }}
         >
-          <Text style={{ color: "#666", fontSize: 14 }}>Forgot password? You will need to securely reset your vault</Text>
+          <Text style={{ color: "#666", fontSize: 14 }}>Forgot your password?</Text>
         </Pressable>
       </ScrollView>
     </KeyboardAvoidingView>
