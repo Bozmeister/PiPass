@@ -43,6 +43,7 @@ export default function HomeScreen() {
   const [masterSalt, setMasterSaltState] = useState<string | null>(null);
   const [tamperLocked, setTamperLocked] = useState(false);
   const [pendingRecoveryKey, setPendingRecoveryKey] = useState<string | null>(null);
+  const [pendingRecoveryRawHex, setPendingRecoveryRawHex] = useState<string>("");
   const [pendingSetupShares, setPendingSetupShares] = useState<KeyShares | null>(null);
   const keySharesRef = useRef<KeyShares | null>(null);
 
@@ -111,9 +112,11 @@ export default function HomeScreen() {
       <RecoveryKeyModal
         visible={true}
         formattedKey={pendingRecoveryKey}
+        rawKeyHex={pendingRecoveryRawHex}
         onConfirm={async () => {
           await setVaultInitialized(true);
           setPendingRecoveryKey(null);
+          setPendingRecoveryRawHex("");
           setVaultExists(true);
           if (pendingSetupShares) {
             setKeyShares(pendingSetupShares);
@@ -145,6 +148,7 @@ export default function HomeScreen() {
         setMasterSaltState(salt);
         setIterations(validIters);
         setPendingSetupShares(shares);
+        setPendingRecoveryRawHex(rawKey);
         setPendingRecoveryKey(formatRecoveryKey(rawKey));
       }} />
     );
