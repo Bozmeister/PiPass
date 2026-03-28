@@ -1,4 +1,4 @@
-import { extractPiDigits, mapDigitsToCoordinates } from "../crypto/pi";
+import { extractPiDigits, mapDigitsToCoordinates } from "./pi";
 
 const THUMBNAIL_RESOLUTION = 48;
 const THUMBNAIL_MAX_ITER = 300;

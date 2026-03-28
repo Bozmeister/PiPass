@@ -1,23 +1,23 @@
 import React, { useState, useEffect, useRef } from "react";
 import { 
   View, Text, FlatList, Pressable, Alert, Platform, 
-  ActivityIndicator, AppState, Modal, Switch 
+  ActivityIndicator, AppState, Modal, Switch, TextInput 
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import * as ScreenCapture from "expo-screen-capture";
+import CryptoJS from "crypto-js";
 
-// Synchronized Imports from Workers
 import { 
   VaultEntry, 
   SecureNote, 
   DecryptedVaultEntry,
   encryptVaultEntry,
   decryptVaultEntry,
-  deriveMasterKeyShares,
   reEncryptEntry,
-  reEncryptSecureNote 
+  reEncryptSecureNote,
+  deriveMasterKeyShares,
 } from "../workers/vaultWorker";
 
 import { 
@@ -25,16 +25,19 @@ import {
   saveEntry, 
   deleteEntry as deleteStoredEntry, 
   destroyAllData, 
-  saveSecureNote, 
+  saveSecureNote,
+  getAllSecureNotes,
   getShowKeyprints, 
-  saveShowKeyprints 
+  saveShowKeyprints,
+  getMasterSalt,
+  saveMasterKeyHash,
 } from "../workers/storageWorker";
 
-import { KeyShares, wipeShares } from "../crypto/secureMemory";
+import { KeyShares, wipeShares, combineShares } from "../crypto/secureMemory";
+import { hashMasterKey } from "../crypto/keyDerivation";
 import { requireFreshBiometric } from "../crypto/biometricGate";
 import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
 
-// UI Components
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
 import SecureNotesModal from "../components/SecureNotesModal";
@@ -50,22 +53,28 @@ const PROFILES = [
 ];
 
 interface VaultScreenProps {
-  piSeed: number;
+  keyShares: KeyShares;
   iterations: number;
   onLock: () => void;
   onIterationsChange: (iterations: number) => void;
   onReset: () => void;
 }
 
-export default function VaultScreen({ piSeed, iterations, onLock, onIterationsChange, onReset }: VaultScreenProps) {
+function deriveVisualSeed(shares: KeyShares): number {
+  const keyHex = combineShares(shares);
+  const hash = CryptoJS.SHA256(keyHex).toString(CryptoJS.enc.Hex);
+  const seedStr = hash.slice(0, 8);
+  return parseInt(seedStr, 16) % 999999;
+}
+
+export default function VaultScreen({ keyShares, iterations, onLock, onIterationsChange, onReset }: VaultScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [entries, setEntries] = useState<VaultEntry[]>([]);
-  const keySharesRef = useRef<KeyShares | null>(null);
+  const keySharesRef = useRef<KeyShares>(keyShares);
   const isBiometricActive = useRef(false);
 
   const [loading, setLoading] = useState(true);
-  const [derivingKey, setDerivingKey] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<VaultEntry | null>(null);
   const [decryptedEntry, setDecryptedEntry] = useState<DecryptedVaultEntry | null>(null);
@@ -76,6 +85,8 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
   const [showSecureNotes, setShowSecureNotes] = useState(false);
   const [showKeyprints, setShowKeyprints] = useState(true);
   const [showKeyprintViewer, setShowKeyprintViewer] = useState(false);
+  const [pendingProfileIterations, setPendingProfileIterations] = useState<number | null>(null);
+  const [profilePassword, setProfilePassword] = useState("");
 
   const settingsTapCountRef = useRef(0);
   const settingsTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -84,65 +95,60 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
   const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const selectTokenRef = useRef<number>(0);
 
+  const visualSeed = useRef(deriveVisualSeed(keyShares)).current;
+
+  useEffect(() => {
+    keySharesRef.current = keyShares;
+  }, [keyShares]);
+
   useEffect(() => {
     if (Platform.OS !== "web") ScreenCapture.preventScreenCaptureAsync();
     return () => { if (Platform.OS !== "web") ScreenCapture.allowScreenCaptureAsync(); };
   }, []);
 
   useEffect(() => {
-    initializeVault();
+    loadVault();
     const appStateSub = AppState.addEventListener("change", (state) => {
       if ((state === "background" || state === "inactive") && !isBiometricActive.current) {
-        if (keySharesRef.current) wipeShares(keySharesRef.current);
-        keySharesRef.current = null;
         onLock();
       }
     });
     return () => {
       if (autoLockTimerRef.current) clearInterval(autoLockTimerRef.current);
       appStateSub.remove();
-      if (keySharesRef.current) wipeShares(keySharesRef.current);
     };
   }, []);
 
   function resetActivity() { lastActivityRef.current = Date.now(); }
 
-  async function initializeVault() {
-    setDerivingKey(true);
+  async function loadVault() {
     try {
-      const safeIterations = Math.max(iterations || 100000, 3);
-      if (safeIterations !== iterations) {
-        onIterationsChange(safeIterations);
-      }
-
-      console.log("Deriving key with iterations:", safeIterations);
-
-      const shares = await deriveMasterKeyShares(piSeed, safeIterations);
-      keySharesRef.current = shares;
-
       const keyprintPref = await getShowKeyprints();
       setShowKeyprints(keyprintPref);
 
       const stored = await getAllEntries();
       setEntries(stored);
 
+      const notes = await getAllSecureNotes();
+      setSecureNotes(notes);
+
       if (stored.length > 0) {
         try {
-          decryptVaultEntry(stored[0], shares);
+          decryptVaultEntry(stored[0], keySharesRef.current);
         } catch {
-          Alert.alert("Key Mismatch", "Clear & Start Fresh?", [
-            { text: "Clear", style: "destructive", onPress: async () => await destroyAllData() }
+          Alert.alert("Key Mismatch", "The stored entries don't match your current key. Clear & Start Fresh?", [
+            { text: "Clear", style: "destructive", onPress: async () => { await destroyAllData(); onReset(); } }
           ]);
         }
       }
     } catch (err) {
-      console.error("Initialization error:", err);
-      Alert.alert("Engine Error", "Failed to initialize vault.", [
-        { text: "Try Again", onPress: () => initializeVault() },
+      console.error("Vault load error:", err);
+      Alert.alert("Error", "Failed to load vault.", [
+        { text: "Try Again", onPress: () => loadVault() },
         { text: "Wipe Data", style: "destructive", onPress: async () => { await destroyAllData(); onReset(); } },
       ]);
     }
-    setDerivingKey(false);
+    setLoading(false);
     resetActivity();
 
     autoLockTimerRef.current = setInterval(() => {
@@ -155,7 +161,7 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
 
     const { sanitized, ok, error } = sanitizeEntryFields(entry);
     if (!ok) {
-      Alert.alert("Sanitization Error", error || "Input rejected by Hyperbaric Sanitizer.");
+      Alert.alert("Sanitization Error", error || "Input rejected.");
       return;
     }
 
@@ -221,35 +227,33 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
 
   async function handleProfileChange(newIterations: number) {
     if (newIterations === iterations || !keySharesRef.current) return;
-
     const safeNew = Math.max(newIterations || 100000, 3);
+    setPendingProfileIterations(safeNew);
+    setProfilePassword("");
+  }
 
-    if (entries.length === 0) {
-      await onIterationsChange(safeNew);
-      Alert.alert("Profile Updated", `Now using ${PROFILES.find(p => p.iterations === safeNew)?.label}`);
-      return;
-    }
+  async function confirmProfileChange() {
+    if (!pendingProfileIterations || !profilePassword.trim()) return;
 
     setMigrating(true);
     try {
-      const oldShares = keySharesRef.current!;
-      const newShares = await deriveMasterKeyShares(piSeed, safeNew);
+      const salt = await getMasterSalt();
+      if (!salt) throw new Error("No salt found");
 
-      for (const entry of entries) {
-        const reEnc = reEncryptEntry(entry, oldShares, newShares);
-        await saveEntry(reEnc);
-      }
-      for (const note of secureNotes) {
-        const reEnc = reEncryptSecureNote(note, oldShares, newShares);
-        await saveSecureNote(reEnc);
-      }
+      const newShares = await deriveMasterKeyShares(profilePassword, salt, pendingProfileIterations);
+      const newKeyHex = combineShares(newShares);
+      const newKeyHash = hashMasterKey(newKeyHex);
 
-      wipeShares(oldShares);
+      await saveMasterKeyHash(newKeyHash);
+      await onIterationsChange(pendingProfileIterations);
+
       keySharesRef.current = newShares;
-      await onIterationsChange(safeNew);
-      Alert.alert("Profile Changed", "All entries re-encrypted successfully.");
+
+      setPendingProfileIterations(null);
+      setProfilePassword("");
+      Alert.alert("Profile Updated", `Now using ${PROFILES.find(p => p.iterations === pendingProfileIterations)?.label || "custom"} profile.`);
     } catch (err) {
-      Alert.alert("Migration Failed", "Entries remain unchanged.");
+      Alert.alert("Migration Failed", "Incorrect password or key derivation error. Settings remain unchanged.");
     }
     setMigrating(false);
   }
@@ -273,9 +277,11 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
     }, 400);
   }
 
+  const webTopInset = Platform.OS === "web" ? 67 : 0;
+
   const renderItem = ({ item }: { item: VaultEntry }) => (
     <Pressable onPress={() => handleSelectEntry(item)} style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#222", flexDirection: "row", alignItems: "center" }}>
-      {showKeyprints && <FractalKeyprint piSeed={piSeed} size={44} animate={false} />}
+      {showKeyprints && <FractalKeyprint seed={visualSeed} size={44} animate={false} />}
       <View style={{ marginLeft: 12, flex: 1 }}>
         <Text style={{ color: "#fff", fontSize: 18 }}>{item.title}</Text>
         <Text style={{ color: "#888" }}>{item.username}</Text>
@@ -283,24 +289,23 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
     </Pressable>
   );
 
-  if (derivingKey) {
+  if (loading) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
-        <FractalKeyprint piSeed={piSeed} size={200} />
+        <FractalKeyprint seed={visualSeed} size={200} />
         <ActivityIndicator size="large" color="#4CAF50" style={{ marginTop: 30 }} />
-        <Text style={{ color: "#fff", fontSize: 20, marginTop: 20 }}>Synchronizing Vault Geometry...</Text>
+        <Text style={{ color: "#fff", fontSize: 20, marginTop: 20 }}>Loading Vault...</Text>
       </View>
     );
   }
 
   return (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
-      {/* Header */}
-      <View style={{ paddingTop: insets.top, padding: 16, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-        <Text style={{ color: "#fff", fontSize: 28, fontWeight: "bold" }}>Vault</Text>
+      <View style={{ paddingTop: insets.top + webTopInset, padding: 16, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+        <Text style={{ color: "#fff", fontSize: 28, fontWeight: "bold" as const }}>Vault</Text>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 20 }}>
           <Pressable onPress={() => setShowSecureNotes(true)}>
-            <Ionicons name="help-circle-outline" size={26} color="#4CAF50" />
+            <Ionicons name="document-lock-outline" size={24} color="#4CAF50" />
           </Pressable>
           <Pressable onPress={handleSettingsIconTap}>
             <Ionicons name="settings-outline" size={24} color="#fff" />
@@ -317,7 +322,7 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
         renderItem={renderItem}
         ListEmptyComponent={
           <View style={{ flex: 1, justifyContent: "center", alignItems: "center", marginTop: 100 }}>
-            <FractalKeyprint piSeed={piSeed} size={150} animate={true} />
+            <FractalKeyprint seed={visualSeed} size={150} animate={true} />
             <Text style={{ color: "#888", fontSize: 18, marginTop: 30 }}>Empty vault — add something!</Text>
           </View>
         }
@@ -331,42 +336,42 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
           entry={selectedEntry}
           decryptedEntry={decryptedEntry}
           decrypting={decrypting}
-          piIndex={piSeed}
+          visualSeed={visualSeed}
           onClose={handleCloseDetail}
           onDelete={() => handleDeleteEntry(selectedEntry.id)}
         />
       )}
 
-      {keySharesRef.current && (
-        <SecureNotesModal
-          visible={showSecureNotes}
-          notes={secureNotes}
-          keyShares={keySharesRef.current}
-          onClose={() => setShowSecureNotes(false)}
-          onNotesChanged={() => {}}
-          onActivity={resetActivity}
-        />
-      )}
+      <SecureNotesModal
+        visible={showSecureNotes}
+        notes={secureNotes}
+        keyShares={keySharesRef.current}
+        onClose={() => setShowSecureNotes(false)}
+        onNotesChanged={async () => {
+          const notes = await getAllSecureNotes();
+          setSecureNotes(notes);
+        }}
+        onActivity={resetActivity}
+      />
 
-      <KeyprintViewer visible={showKeyprintViewer} piSeed={piSeed} onClose={() => setShowKeyprintViewer(false)} />
+      <KeyprintViewer visible={showKeyprintViewer} seed={visualSeed} onClose={() => setShowKeyprintViewer(false)} />
 
-      {/* FULL SETTINGS PANEL */}
       <Modal visible={showSettings} animationType="slide" transparent>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.9)", justifyContent: "flex-end" }}>
           <View style={{ backgroundColor: "#111", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: insets.bottom + 20 }}>
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-              <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold" }}>Settings</Text>
+              <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold" as const }}>Settings</Text>
               <Pressable onPress={() => setShowSettings(false)}>
                 <Ionicons name="close" size={28} color="#666" />
               </Pressable>
             </View>
 
-            {/* Security Profile */}
             <Text style={{ color: "#aaa", fontSize: 14, marginBottom: 12 }}>Security Profile</Text>
             {PROFILES.map((profile) => (
               <Pressable
                 key={profile.iterations}
                 onPress={() => handleProfileChange(profile.iterations)}
+                disabled={migrating}
                 style={{
                   flexDirection: "row",
                   alignItems: "center",
@@ -376,18 +381,18 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
                   marginBottom: 8,
                   borderWidth: iterations === profile.iterations ? 2 : 0,
                   borderColor: profile.color,
+                  opacity: migrating ? 0.5 : 1,
                 }}
               >
                 <Ionicons name={profile.icon} size={24} color={profile.color} />
                 <View style={{ marginLeft: 16, flex: 1 }}>
-                  <Text style={{ color: "#fff", fontSize: 18, fontWeight: "600" }}>{profile.label}</Text>
-                  <Text style={{ color: "#888" }}>{profile.desc} • {profile.time}</Text>
+                  <Text style={{ color: "#fff", fontSize: 18, fontWeight: "600" as const }}>{profile.label}</Text>
+                  <Text style={{ color: "#888" }}>{profile.desc} {profile.time}</Text>
                 </View>
                 {iterations === profile.iterations && <Ionicons name="checkmark-circle" size={24} color={profile.color} />}
               </Pressable>
             ))}
 
-            {/* Show Keyprints Toggle */}
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 20, paddingVertical: 12 }}>
               <Text style={{ color: "#fff", fontSize: 18 }}>Show Fractal Keyprints</Text>
               <Switch
@@ -398,11 +403,56 @@ export default function VaultScreen({ piSeed, iterations, onLock, onIterationsCh
               />
             </View>
 
-            {/* Lock Vault */}
             <Pressable onPress={onLock} style={{ backgroundColor: "#1a1a1a", padding: 16, borderRadius: 12, alignItems: "center", marginTop: 30 }}>
               <Ionicons name="lock-closed-outline" size={20} color="#ef4444" style={{ marginBottom: 6 }} />
-              <Text style={{ color: "#ef4444", fontWeight: "600", fontSize: 16 }}>Lock Vault Now</Text>
+              <Text style={{ color: "#ef4444", fontWeight: "600" as const, fontSize: 16 }}>Lock Vault Now</Text>
             </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={pendingProfileIterations !== null} animationType="fade" transparent>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.9)", justifyContent: "center", alignItems: "center", padding: 24 }}>
+          <View style={{ backgroundColor: "#111", borderRadius: 16, padding: 24, width: "100%", maxWidth: 400 }}>
+            <Text style={{ color: "#fff", fontSize: 20, fontWeight: "bold" as const, marginBottom: 8 }}>
+              Confirm Password
+            </Text>
+            <Text style={{ color: "#aaa", fontSize: 14, marginBottom: 20 }}>
+              Enter your master password to change the security profile. Your key will be re-derived with the new settings.
+            </Text>
+            <TextInput
+              value={profilePassword}
+              onChangeText={setProfilePassword}
+              placeholder="Master password"
+              placeholderTextColor="#555"
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={{ color: "#fff", fontSize: 16, padding: 14, backgroundColor: "#1a1a1a", borderRadius: 8, borderWidth: 1, borderColor: "#333", marginBottom: 16 }}
+              testID="profile-password-input"
+            />
+            {migrating && (
+              <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 16 }}>
+                <ActivityIndicator color="#4CAF50" />
+                <Text style={{ color: "#aaa", marginLeft: 12, fontSize: 14 }}>Re-deriving key...</Text>
+              </View>
+            )}
+            <View style={{ flexDirection: "row", gap: 12 }}>
+              <Pressable
+                onPress={() => { setPendingProfileIterations(null); setProfilePassword(""); }}
+                disabled={migrating}
+                style={{ flex: 1, padding: 14, borderRadius: 8, backgroundColor: "#1a1a1a", alignItems: "center" }}
+              >
+                <Text style={{ color: "#aaa", fontSize: 16 }}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={confirmProfileChange}
+                disabled={!profilePassword.trim() || migrating}
+                style={{ flex: 1, padding: 14, borderRadius: 8, backgroundColor: profilePassword.trim() && !migrating ? "#4CAF50" : "#333", alignItems: "center" }}
+              >
+                <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" as const }}>Confirm</Text>
+              </Pressable>
+            </View>
           </View>
         </View>
       </Modal>

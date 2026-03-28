@@ -1,0 +1,62 @@
+You are a senior security engineer and cryptography expert.
+
+Refactor my existing PiPass project into a zero-knowledge secure vault with the following strict requirements:
+
+CRYPTOGRAPHY:
+
+* Remove all custom cryptographic algorithms (Mandelbrot, Pi-based derivations, fractal math) from any security-critical path.
+* Use Argon2id for key derivation with high memory cost (>=256MB), proper salt (16+ bytes), and secure parameters.
+* Use AES-256-GCM or ChaCha20-Poly1305 for encryption with authenticated encryption.
+* Use HKDF for deriving subkeys for individual vault entries.
+
+KEY MANAGEMENT:
+
+* Master key must NEVER leave the client.
+* Integrate OS-level secure storage:
+
+  * iOS Keychain / Secure Enclave
+  * Android Keystore
+* Wrap the master key using a device-bound key.
+
+ARCHITECTURE:
+
+* Server must be zero-knowledge:
+
+  * Store only encrypted vault blobs
+  * Never store plaintext or keys
+* Refactor API routes to enforce authentication and eliminate trust in client-provided identifiers.
+
+AUTHENTICATION:
+
+* Implement secure authentication using SRP or OPAQUE protocol.
+* Do not send passwords or password hashes to the server.
+
+CLIENT SECURITY:
+
+* Move all cryptographic operations into a secure module (preferably native module or WebAssembly).
+* Ensure sensitive data is cleared from memory after use.
+* Implement auto-lock when app is backgrounded or idle.
+* Add jailbreak/root detection and debugger detection.
+
+DATA MODEL:
+
+* Encrypt entire vault as a single blob.
+* Additionally support per-entry encryption using keys derived via HKDF.
+
+MANDATORY RULES:
+
+* Do NOT invent new cryptographic algorithms.
+* Do NOT rely on obscurity for security.
+* All security must rely on well-known, peer-reviewed primitives.
+
+OPTIONAL:
+
+* Mandelbrot fractals may be used ONLY as a visual representation derived from the master key.
+* The fractal must not influence cryptographic strength.
+
+OUTPUT:
+
+* Provide refactored code with clear separation between crypto, storage, and UI.
+* Explain all security decisions inline with comments.
+
+Work step-by-step and do not skip security-critical details.

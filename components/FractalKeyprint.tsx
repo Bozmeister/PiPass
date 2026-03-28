@@ -3,14 +3,14 @@ import { View, Animated, Pressable, Image } from "react-native";
 import { generateFractalDataUri } from "../utils/fractalKeyprint";
 
 interface FractalKeyprintProps {
-  piSeed: number;
+  seed: number;
   size?: number;
   onPress?: () => void;
   animate?: boolean;
 }
 
 export default function FractalKeyprint({
-  piSeed,
+  seed,
   size = 96,
   onPress,
   animate = true,
@@ -37,7 +37,7 @@ export default function FractalKeyprint({
     return () => animation.stop();
   }, [animate]);
 
-  const dataUri = useMemo(() => generateFractalDataUri(piSeed, size * 2, 48, 300), [piSeed, size]);
+  const dataUri = useMemo(() => generateFractalDataUri(seed, size * 2, 48, 300), [seed, size]);
 
   const imageContent = (
     <Animated.View
@@ -47,13 +47,13 @@ export default function FractalKeyprint({
         borderRadius: size / 2,
         overflow: "hidden",
         transform: [{ scale: pulseAnim }],
-        borderWidth: 3,                    // thicker brighter border
-        borderColor: "#00ff9f",            // bright neon green
+        borderWidth: 3,
+        borderColor: "#00ff9f",
         shadowColor: "#00ff9f",
         shadowOffset: { width: 0, height: 0 },
         shadowOpacity: 0.8,
         shadowRadius: 12,
-        elevation: 10,                     // Android glow
+        elevation: 10,
       }}
     >
       <Image
@@ -61,8 +61,6 @@ export default function FractalKeyprint({
         style={{ width: size, height: size }}
         resizeMode="cover"
       />
-
-      {/* Bright inner glow ring */}
       <View
         style={{
           position: "absolute",

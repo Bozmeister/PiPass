@@ -17,13 +17,13 @@ import {
 
 interface KeyprintViewerProps {
   visible: boolean;
-  piSeed: number;
+  seed: number;
   onClose: () => void;
 }
 
 export default function KeyprintViewer({
   visible,
-  piSeed,
+  seed,
   onClose,
 }: KeyprintViewerProps) {
   const insets = useSafeAreaInsets();
@@ -31,13 +31,13 @@ export default function KeyprintViewer({
   const webBottomInset = Platform.OS === "web" ? 34 : 0;
 
   const fractalUri = useMemo(
-    () => (visible ? generateFractalDataUri(piSeed, 600, 96, 500) : ""),
-    [visible, piSeed]
+    () => (visible ? generateFractalDataUri(seed, 600, 96, 500) : ""),
+    [visible, seed]
   );
 
   const gridData = useMemo(
-    () => (visible ? getGridPointData(piSeed) : null),
-    [visible, piSeed]
+    () => (visible ? getGridPointData(seed) : null),
+    [visible, seed]
   );
 
   if (!visible) return null;
@@ -57,9 +57,9 @@ export default function KeyprintViewer({
             style={{
               color: "#4CAF50",
               fontSize: 13,
-              fontWeight: "700",
+              fontWeight: "700" as const,
               letterSpacing: 3,
-              textTransform: "uppercase",
+              textTransform: "uppercase" as const,
               marginBottom: 20,
             }}
           >
@@ -100,15 +100,15 @@ export default function KeyprintViewer({
             style={{
               color: "#4CAF50",
               fontSize: 13,
-              fontWeight: "500",
+              fontWeight: "500" as const,
               textAlign: "center",
-              fontStyle: "italic",
+              fontStyle: "italic" as const,
               paddingHorizontal: 24,
               marginBottom: 24,
               lineHeight: 20,
             }}
           >
-            This is YOUR mathematical signature — impossible to forge.
+            Your unique vault fingerprint — derived from your master key.
           </Text>
 
           {gridData && (
@@ -117,12 +117,12 @@ export default function KeyprintViewer({
                 style={{
                   color: "#888",
                   fontSize: 11,
-                  textTransform: "uppercase",
+                  textTransform: "uppercase" as const,
                   letterSpacing: 2,
                   marginBottom: 12,
                 }}
               >
-                Mandelbrot Coordinates
+                Fractal Coordinates
               </Text>
               <View
                 style={{
@@ -146,7 +146,7 @@ export default function KeyprintViewer({
                 style={{
                   color: "#888",
                   fontSize: 11,
-                  textTransform: "uppercase",
+                  textTransform: "uppercase" as const,
                   letterSpacing: 2,
                   marginBottom: 12,
                 }}
@@ -173,7 +173,7 @@ export default function KeyprintViewer({
                       style={{
                         color: "#fff",
                         fontSize: 12,
-                        fontWeight: "600",
+                        fontWeight: "600" as const,
                         fontFamily:
                           Platform.OS === "web" ? "monospace" : undefined,
                       }}
@@ -197,7 +197,7 @@ export default function KeyprintViewer({
                       style={{
                         color: pt.escaped ? "#4CAF50" : "#ef4444",
                         fontSize: 13,
-                        fontWeight: "700",
+                        fontWeight: "700" as const,
                       }}
                     >
                       {pt.escapeTime}
@@ -240,7 +240,7 @@ export default function KeyprintViewer({
               color="#ef4444"
               style={{ marginRight: 10 }}
             />
-            <Text style={{ color: "#ef4444", fontSize: 15, fontWeight: "700" }}>
+            <Text style={{ color: "#ef4444", fontSize: 15, fontWeight: "700" as const }}>
               Close Vault View
             </Text>
           </Pressable>
@@ -259,7 +259,7 @@ function CoordRow({ label, value }: { label: string; value: string }) {
         paddingVertical: 4,
       }}
     >
-      <Text style={{ color: "#4CAF50", fontSize: 12, fontWeight: "600" }}>
+      <Text style={{ color: "#4CAF50", fontSize: 12, fontWeight: "600" as const }}>
         {label}
       </Text>
       <Text

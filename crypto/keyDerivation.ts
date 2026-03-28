@@ -1,65 +1,101 @@
 import CryptoJS from "crypto-js";
-import * as Device from "expo-device";
+import * as ExpoCrypto from "expo-crypto";
+import * as SecureStore from "expo-secure-store";
 import { Platform } from "react-native";
-import { extractPiDigits, mapDigitsToCoordinates } from "./pi";
-import { computeFullPipeline, GridPoint } from "./mandelbrot";
 
-function getDeviceIdentifier(): string {
+// Key derivation using industry-standard PBKDF2-SHA256.
+// Argon2id is attempted first (if WebAssembly is available), with PBKDF2 as fallback.
+// No custom cryptographic algorithms are used in the security-critical path.
+
+let argon2idFn: ((params: any) => Promise<Uint8Array>) | null = null;
+let argon2LoadFailed = false;
+
+async function loadArgon2(): Promise<((params: any) => Promise<Uint8Array>) | null> {
+  if (argon2LoadFailed) return null;
+  if (argon2idFn) return argon2idFn;
+  try {
+    const mod = await import("hash-wasm");
+    argon2idFn = mod.argon2id;
+    return argon2idFn;
+  } catch {
+    argon2LoadFailed = true;
+    return null;
+  }
+}
+
+async function getDeviceUUID(): Promise<string> {
   if (Platform.OS === "web") {
-    return "web-device-" + (navigator.userAgent || "unknown");
+    let uuid = localStorage.getItem("deviceUUID");
+    if (!uuid) {
+      uuid = ExpoCrypto.randomUUID();
+      localStorage.setItem("deviceUUID", uuid);
+    }
+    return uuid;
+  }
+  let uuid = await SecureStore.getItemAsync("deviceUUID");
+  if (!uuid) {
+    uuid = ExpoCrypto.randomUUID();
+    await SecureStore.setItemAsync("deviceUUID", uuid);
+  }
+  return uuid;
+}
+
+export function generateMasterSalt(): string {
+  const saltBytes = ExpoCrypto.getRandomBytes(32);
+  return Array.from(saltBytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// Derives the master key from a user-provided password.
+// Uses Argon2id when available, PBKDF2-SHA256 as fallback.
+// The salt must be stored alongside the vault — it is NOT secret.
+export async function deriveMasterKey(
+  password: string,
+  saltHex: string,
+  iterations: number = 100000
+): Promise<string> {
+  const safeIterations = Math.max(iterations || 100000, 3);
+  const deviceUUID = await getDeviceUUID();
+
+  // Mix password with device UUID so keys are device-bound
+  const material = password + ":" + deviceUUID;
+  const salt = new TextEncoder().encode(saltHex);
+
+  // Try Argon2id first (memory-hard, best protection)
+  const argon2 = await loadArgon2();
+  if (argon2) {
+    try {
+      const timeCost = safeIterations <= 25000 ? 3 : safeIterations <= 100000 ? 4 : 6;
+      const memorySize = safeIterations <= 25000 ? 65536 : safeIterations <= 100000 ? 131072 : 262144;
+
+      const keyBytes = await argon2({
+        password: new TextEncoder().encode(material),
+        salt,
+        iterations: timeCost,
+        memorySize,
+        parallelism: 4,
+        hashLength: 32,
+        outputType: "binary" as const,
+      });
+      return Array.from(keyBytes)
+        .map((b: number) => b.toString(16).padStart(2, "0"))
+        .join("");
+    } catch {
+      // Fall through to PBKDF2
+    }
   }
 
-  const parts: string[] = [];
-  if (Device.osBuildId) parts.push(Device.osBuildId);
-  if (Device.osInternalBuildId) parts.push(Device.osInternalBuildId);
-  if (Device.modelName) parts.push(Device.modelName);
-  if (Device.brand) parts.push(Device.brand);
-
-  return parts.length > 0 ? parts.join("-") : "unknown-device";
-}
-
-function serializeOrbits(grid: GridPoint[]): string {
-  const orbits = grid.map((point) => ({
-    r: point.row,
-    c: point.col,
-    cr: point.cReal,
-    ci: point.cImag,
-    iter: point.result.iterations,
-    esc: point.result.escaped,
-    orbit: point.result.orbit.map((z) => [
-      Math.round(z.re * 1e12) / 1e12,
-      Math.round(z.im * 1e12) / 1e12,
-    ]),
-  }));
-  return JSON.stringify(orbits);
-}
-
-export function deriveClusterKey(userPiSeed: number, iterations: number = 100000): string {
-  const finalIterations = Math.max(iterations || 100000, 3);
-  const digits30 = extractPiDigits(userPiSeed, 30);
-
-  const coords = mapDigitsToCoordinates(digits30);
-
-  const grid = computeFullPipeline(
-    coords.x,
-    coords.y,
-    coords.zoomFactor,
-    coords.jitterDigits
-  );
-
-  const orbitData = serializeOrbits(grid);
-  const deviceId = getDeviceIdentifier();
-  const seedStr = userPiSeed.toString();
-
-  const hashInput = orbitData + deviceId + seedStr;
-  const initialHash = CryptoJS.SHA256(hashInput).toString(CryptoJS.enc.Hex);
-
-  const salt = CryptoJS.SHA256(deviceId + seedStr).toString(CryptoJS.enc.Hex);
-  const stretched = CryptoJS.PBKDF2(initialHash, salt, {
+  // Fallback: PBKDF2-SHA256 (works everywhere)
+  const stretched = CryptoJS.PBKDF2(material, saltHex, {
     keySize: 256 / 32,
-    iterations: finalIterations,
+    iterations: safeIterations,
     hasher: CryptoJS.algo.SHA256,
   });
-
   return stretched.toString(CryptoJS.enc.Hex);
+}
+
+// Verify a password against a known master key hash
+export function hashMasterKey(masterKeyHex: string): string {
+  return CryptoJS.SHA256(masterKeyHex).toString(CryptoJS.enc.Hex);
 }

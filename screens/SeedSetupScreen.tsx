@@ -2,11 +2,9 @@ import React, { useState, useRef, useEffect } from "react";
 import { View, Text, TextInput, Pressable, Platform, ScrollView, Keyboard, KeyboardAvoidingView, Alert, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import * as ExpoCrypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { saveEntry, saveSecureNote } from "../workers/storageWorker";
-import { createHeuristicState, checkHeuristicLockout, getLockoutRemaining, HeuristicState } from "../utils/watchman";
 
 const PROFILES = [
   { label: "Balanced", iterations: 25000, time: "~3s", desc: "Fast unlock", color: "#4CAF50", icon: "flash-outline" as const },
@@ -14,64 +12,27 @@ const PROFILES = [
   { label: "Deep Vault", iterations: 250000, time: "~20s", desc: "Maximum protection", color: "#ef4444", icon: "lock-closed-outline" as const },
 ];
 
+const MIN_PASSWORD_LENGTH = 8;
+
 interface SeedSetupScreenProps {
-  onSeedSet: (seed: number, iterations: number) => void;
+  onSetup: (password: string, iterations: number) => void;
 }
 
-export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
+export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
   const insets = useSafeAreaInsets();
-  const [seedInput, setSeedInput] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [selectedProfile, setSelectedProfile] = useState(1);
   const [importing, setImporting] = useState(false);
   const [importedCount, setImportedCount] = useState<number | null>(null);
-  const [locked, setLocked] = useState(false);
-  const [lockCountdown, setLockCountdown] = useState(0);
-  const inputRef = useRef<TextInput>(null);
-  const heuristicRef = useRef<HeuristicState>(createHeuristicState());
-  const lockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
+  const passwordRef = useRef<TextInput>(null);
   const webTopInset = Platform.OS === "web" ? 67 : 0;
 
-  useEffect(() => {
-    return () => {
-      if (lockTimerRef.current) clearInterval(lockTimerRef.current);
-    };
-  }, []);
-
-  function startLockoutTimer() {
-    setLocked(true);
-    if (lockTimerRef.current) clearInterval(lockTimerRef.current);
-    lockTimerRef.current = setInterval(() => {
-      const remaining = getLockoutRemaining(heuristicRef.current);
-      if (remaining <= 0) {
-        setLocked(false);
-        setLockCountdown(0);
-        if (lockTimerRef.current) {
-          clearInterval(lockTimerRef.current);
-          lockTimerRef.current = null;
-        }
-      } else {
-        setLockCountdown(Math.ceil(remaining / 1000));
-      }
-    }, 500);
-    setLockCountdown(30);
-  }
-
-  function handleSeedChange(text: string) {
-    const numericOnly = text.replace(/[^0-9]/g, "");
-    const result = checkHeuristicLockout(heuristicRef.current, numericOnly, seedInput);
-    heuristicRef.current = result.state;
-
-    if (result.lockTriggered) {
-      startLockoutTimer();
-      const msg = "Suspicious input detected. The seed input is locked for 30 seconds.";
-      if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Security Lockout", msg); }
-      return;
-    }
-
-    if (result.blocked) return;
-
-    setSeedInput(numericOnly);
-  }
+  const passwordsMatch = password === confirmPassword;
+  const showMismatch = confirmPassword.length > 0 && !passwordsMatch;
+  const passwordStrong = password.length >= MIN_PASSWORD_LENGTH;
+  const isValid = passwordStrong && passwordsMatch && confirmPassword.length > 0;
 
   async function handleImport() {
     try {
@@ -126,35 +87,20 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
       setImportedCount(count);
       setImporting(false);
 
-      const msg = `Successfully imported ${count} items. Set your Pi Seed and security profile to unlock the vault.`;
+      const msg = `Successfully imported ${count} items. Set your master password and security profile to unlock the vault.`;
       if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Import Complete", msg); }
     } catch (err) {
       setImporting(false);
-      console.error("Import failed:", err);
       const msg = "Could not read the backup file. Make sure it's a valid .vault file.";
       if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Import Failed", msg); }
     }
   }
 
-  function handleRandomSeed() {
-    if (locked) return;
-    const bytes = ExpoCrypto.getRandomBytes(4);
-    const val = ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
-    const seed = val % 999000 + 1000;
-    setSeedInput(seed.toString());
-    Keyboard.dismiss();
-  }
-
   function handleConfirm() {
-    if (locked) return;
-    const seed = parseInt(seedInput, 10);
-    if (isNaN(seed) || seed < 0 || seed > 999999) return;
+    if (!isValid) return;
     Keyboard.dismiss();
-    onSeedSet(seed, PROFILES[selectedProfile].iterations);
+    onSetup(password, PROFILES[selectedProfile].iterations);
   }
-
-  const seedValue = parseInt(seedInput, 10);
-  const isValid = !isNaN(seedValue) && seedValue >= 0 && seedValue <= 999999 && seedInput.trim().length > 0;
 
   return (
     <KeyboardAvoidingView
@@ -173,87 +119,81 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
           keyboardShouldPersistTaps="handled"
         >
           <View style={{ alignItems: "center", marginBottom: 32 }}>
-            <Ionicons name="key" size={48} color="#4CAF50" />
-            <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold", marginTop: 16 }}>
-              Set Your Pi Seed
+            <Ionicons name="shield-checkmark" size={48} color="#4CAF50" />
+            <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold" as const, marginTop: 16 }}>
+              Create Master Password
             </Text>
             <Text style={{ color: "#aaa", fontSize: 14, textAlign: "center", marginTop: 8, lineHeight: 20 }}>
-              Choose a secret number (0-999999). This number determines where in Pi your encryption key starts. Keep it private — it's part of your vault's security.
+              Your master password protects your entire vault. Choose a strong, unique password that you can remember.
             </Text>
           </View>
 
-          <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 6 }}>
-            Pi Seed Index
+          <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 6 }}>
+            Master Password
+          </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "#1a1a1a", borderRadius: 8, marginBottom: 4, borderWidth: 1, borderColor: password.length > 0 ? (passwordStrong ? "#4CAF50" : "#ff4444") : "#333" }}>
+            <TextInput
+              ref={passwordRef}
+              value={password}
+              onChangeText={setPassword}
+              placeholder="Enter master password"
+              placeholderTextColor="#555"
+              secureTextEntry={!showPassword}
+              autoCapitalize="none"
+              autoCorrect={false}
+              textContentType="none"
+              autoComplete="off"
+              style={{ color: "#fff", fontSize: 18, padding: 16, flex: 1 }}
+              testID="password-input"
+            />
+            <Pressable onPress={() => setShowPassword(!showPassword)} style={{ padding: 16 }}>
+              <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#888" />
+            </Pressable>
+          </View>
+          {password.length > 0 && !passwordStrong && (
+            <Text style={{ color: "#ff4444", fontSize: 12, marginBottom: 12 }}>
+              Minimum {MIN_PASSWORD_LENGTH} characters required
+            </Text>
+          )}
+          {passwordStrong && (
+            <Text style={{ color: "#4CAF50", fontSize: 12, marginBottom: 12 }}>
+              Password strength: Good
+            </Text>
+          )}
+          {!password.length && <View style={{ height: 12, marginBottom: 12 }} />}
+
+          <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 6 }}>
+            Confirm Password
           </Text>
           <TextInput
-            ref={inputRef}
-            value={seedInput}
-            onChangeText={handleSeedChange}
-            onSubmitEditing={handleConfirm}
-            returnKeyType="done"
-            keyboardType="number-pad"
-            placeholder={locked ? "LOCKED" : "Enter a number (0-999999)"}
-            placeholderTextColor={locked ? "#ff3333" : "#555"}
-            maxLength={6}
-            editable={!locked}
-            secureTextEntry={true}
+            value={confirmPassword}
+            onChangeText={setConfirmPassword}
+            placeholder="Re-enter master password"
+            placeholderTextColor="#555"
+            secureTextEntry={!showPassword}
+            autoCapitalize="none"
             autoCorrect={false}
+            textContentType="none"
+            autoComplete="off"
             style={{
-              color: locked ? "#ff3333" : "#fff",
-              fontSize: 24,
-              backgroundColor: locked ? "#1a0a0a" : "#1a1a1a",
+              color: "#fff",
+              fontSize: 18,
+              backgroundColor: "#1a1a1a",
               borderRadius: 8,
               padding: 16,
-              marginBottom: locked ? 4 : 12,
-              textAlign: "center",
-              letterSpacing: 4,
-              borderWidth: locked ? 2 : 1,
-              borderColor: locked ? "#8b0000" : isValid ? "#4CAF50" : "#333",
-            }}
-            testID="seed-input"
-          />
-
-          {locked && (
-            <View style={{
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: "#2a0a0a",
-              borderRadius: 8,
-              padding: 10,
-              marginBottom: 12,
+              marginBottom: showMismatch ? 4 : 16,
               borderWidth: 1,
-              borderColor: "#8b0000",
+              borderColor: showMismatch ? "#ff4444" : confirmPassword.length > 0 && passwordsMatch ? "#4CAF50" : "#333",
             }}
-            testID="lockout-banner"
-            >
-              <Ionicons name="warning" size={16} color="#ff3333" />
-              <Text style={{ color: "#ff3333", fontSize: 13, fontWeight: "700", marginLeft: 8 }}>
-                Security Lockout: {lockCountdown}s remaining
-              </Text>
-            </View>
+            testID="confirm-password-input"
+          />
+          {showMismatch && (
+            <Text style={{ color: "#ff4444", fontSize: 12, marginBottom: 16 }}>
+              Passwords do not match
+            </Text>
           )}
 
-          <Pressable
-            onPress={handleRandomSeed}
-            disabled={locked}
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "center",
-              paddingVertical: 12,
-              marginBottom: 24,
-              opacity: locked ? 0.4 : 1,
-            }}
-            testID="random-seed-button"
-          >
-            <Ionicons name="dice-outline" size={18} color="#4CAF50" />
-            <Text style={{ color: "#4CAF50", fontSize: 14, fontWeight: "600", marginLeft: 8 }}>
-              Generate Random Seed
-            </Text>
-          </Pressable>
-
-          <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 10 }}>
+          <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 10, marginTop: 8 }}>
             Security Profile
           </Text>
           {PROFILES.map((profile, idx) => {
@@ -275,42 +215,30 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
                 testID={`profile-${profile.label.toLowerCase().replace(" ", "-")}`}
               >
                 <View style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: 11,
-                  borderWidth: 2,
-                  borderColor: selected ? profile.color : "#555",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  marginRight: 12,
+                  width: 22, height: 22, borderRadius: 11,
+                  borderWidth: 2, borderColor: selected ? profile.color : "#555",
+                  alignItems: "center", justifyContent: "center", marginRight: 12,
                 }}>
                   {selected && (
-                    <View style={{
-                      width: 12,
-                      height: 12,
-                      borderRadius: 6,
-                      backgroundColor: profile.color,
-                    }} />
+                    <View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: profile.color }} />
                   )}
                 </View>
                 <Ionicons name={profile.icon} size={20} color={selected ? profile.color : "#666"} style={{ marginRight: 10 }} />
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center" }}>
-                    <Text style={{ color: selected ? "#fff" : "#aaa", fontSize: 15, fontWeight: "700" }}>
+                    <Text style={{ color: selected ? "#fff" : "#aaa", fontSize: 15, fontWeight: "700" as const }}>
                       {profile.label}
                     </Text>
                     {profile.label === "Fortress" && (
                       <View style={{ backgroundColor: "#fbbf2433", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1, marginLeft: 8 }}>
-                        <Text style={{ color: "#fbbf24", fontSize: 10, fontWeight: "700" }}>DEFAULT</Text>
+                        <Text style={{ color: "#fbbf24", fontSize: 10, fontWeight: "700" as const }}>DEFAULT</Text>
                       </View>
                     )}
                   </View>
-                  <Text style={{ color: "#888", fontSize: 12, marginTop: 2 }}>
-                    {profile.desc}
-                  </Text>
+                  <Text style={{ color: "#888", fontSize: 12, marginTop: 2 }}>{profile.desc}</Text>
                 </View>
                 <View style={{ alignItems: "flex-end" }}>
-                  <Text style={{ color: selected ? profile.color : "#666", fontSize: 13, fontWeight: "600" }}>
+                  <Text style={{ color: selected ? profile.color : "#666", fontSize: 13, fontWeight: "600" as const }}>
                     {profile.time}
                   </Text>
                   <Text style={{ color: "#555", fontSize: 10 }}>
@@ -322,57 +250,45 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
           })}
 
           <View style={{
-            backgroundColor: "#1a1a0a",
-            borderWidth: 1,
-            borderColor: "#444400",
-            borderRadius: 8,
-            padding: 12,
-            marginTop: 14,
-            marginBottom: 24,
+            backgroundColor: "#1a1a0a", borderWidth: 1, borderColor: "#444400",
+            borderRadius: 8, padding: 12, marginTop: 14, marginBottom: 24,
           }}>
             <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 4 }}>
               <Ionicons name="warning-outline" size={16} color="#fbbf24" />
-              <Text style={{ color: "#fbbf24", fontSize: 13, fontWeight: "600", marginLeft: 6 }}>
-                Remember This Number
+              <Text style={{ color: "#fbbf24", fontSize: 13, fontWeight: "600" as const, marginLeft: 6 }}>
+                Zero-Knowledge Security
               </Text>
             </View>
             <Text style={{ color: "#aaa", fontSize: 12, lineHeight: 18 }}>
-              This number is the heart of your vault. If you lose it, your passwords cannot be recovered.
+              Your master password is never stored. All encryption happens on your device. If you forget your password, your vault cannot be recovered.
             </Text>
           </View>
 
           <Pressable
             onPress={handleConfirm}
-            disabled={!isValid || locked}
+            disabled={!isValid}
             style={{
-              backgroundColor: isValid && !locked ? "#4CAF50" : "#333",
-              paddingVertical: 16,
-              borderRadius: 8,
-              alignItems: "center",
+              backgroundColor: isValid ? "#4CAF50" : "#333",
+              paddingVertical: 16, borderRadius: 8, alignItems: "center",
             }}
-            testID="confirm-seed-button"
+            testID="confirm-setup-button"
           >
-            <Text style={{ color: "#fff", fontSize: 16, fontWeight: "700" }}>
-              {importedCount !== null ? `Set Seed & Restore ${importedCount} Entries` : "Set Seed & Create Vault"}
+            <Text style={{ color: "#fff", fontSize: 16, fontWeight: "700" as const }}>
+              {importedCount !== null ? `Create Vault & Restore ${importedCount} Entries` : "Create Vault"}
             </Text>
           </Pressable>
 
           <View style={{ marginTop: 32, borderTopWidth: 1, borderTopColor: "#222", paddingTop: 24 }}>
-            <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 10 }}>
+            <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 10 }}>
               Restore From Backup
             </Text>
             <Pressable
               onPress={handleImport}
               disabled={importing}
               style={{
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: "#0a1a1a",
-                borderRadius: 10,
-                padding: 14,
-                borderWidth: 1,
-                borderColor: "#114a4a",
+                flexDirection: "row", alignItems: "center", justifyContent: "center",
+                backgroundColor: "#0a1a1a", borderRadius: 10, padding: 14,
+                borderWidth: 1, borderColor: "#114a4a",
               }}
               testID="import-backup-button"
             >
@@ -381,15 +297,12 @@ export default function SeedSetupScreen({ onSeedSet }: SeedSetupScreenProps) {
               ) : (
                 <>
                   <Ionicons name="cloud-upload-outline" size={18} color="#4CAF50" style={{ marginRight: 8 }} />
-                  <Text style={{ color: "#4CAF50", fontSize: 15, fontWeight: "600" }}>
+                  <Text style={{ color: "#4CAF50", fontSize: 15, fontWeight: "600" as const }}>
                     {importedCount !== null ? `${importedCount} Entries Loaded` : "Import .vault Backup"}
                   </Text>
                 </>
               )}
             </Pressable>
-            <Text style={{ color: "#666", fontSize: 11, textAlign: "center", marginTop: 8, lineHeight: 16 }}>
-              Import a previously exported PiPass backup file. You must use the same Pi Seed and security profile that created the original vault.
-            </Text>
           </View>
         </ScrollView>
       </Pressable>

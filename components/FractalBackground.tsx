@@ -1,6 +1,6 @@
-import React, { useMemo, useRef } from "react";
+import React, { useMemo } from "react";
 import { View } from "react-native";
-import Svg, { Rect, Defs, LinearGradient, Stop } from "react-native-svg";
+import Svg, { Rect } from "react-native-svg";
 
 const GRID_W = 80;
 const GRID_H = 80;
@@ -10,11 +10,11 @@ interface FractalBackgroundProps {
   centerX: number;
   centerY: number;
   zoom: number;
-  piIndex: number;
+  seed: number;
 }
 
 interface CacheEntry {
-  piIndex: number;
+  seed: number;
   pixels: number[];
 }
 
@@ -69,16 +69,16 @@ export default function FractalBackground({
   centerX,
   centerY,
   zoom,
-  piIndex,
+  seed,
 }: FractalBackgroundProps) {
   const pixels = useMemo(() => {
-    if (cacheRef.current && cacheRef.current.piIndex === piIndex) {
+    if (cacheRef.current && cacheRef.current.seed === seed) {
       return cacheRef.current.pixels;
     }
     const result = computeMandelbrotGrid(centerX, centerY, zoom);
-    cacheRef.current = { piIndex, pixels: result };
+    cacheRef.current = { seed, pixels: result };
     return result;
-  }, [piIndex, centerX, centerY, zoom]);
+  }, [seed, centerX, centerY, zoom]);
 
   const cellW = 100 / GRID_W;
   const cellH = 100 / GRID_H;

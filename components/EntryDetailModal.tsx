@@ -4,17 +4,24 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Clipboard from "expo-clipboard";
 import { VaultEntry, DecryptedVaultEntry } from "../workers/vaultWorker";
-import { extractPiDigits, mapDigitsToCoordinates } from "../crypto/pi";
 import FractalBackground from "./FractalBackground";
 
 const CLIPBOARD_CLEAR_MS = 30000;
+
+function seedToCoords(seed: number) {
+  const s = seed % 999999;
+  const x = ((s * 7919) % 999999) / 999999 * 4.0 - 2.0;
+  const y = ((s * 104729) % 999999) / 999999 * 4.0 - 2.0;
+  const z = Math.pow(10, 1 + ((s * 31) % 100) / 100 * 11);
+  return { x, y, zoomFactor: z };
+}
 
 interface EntryDetailModalProps {
   visible: boolean;
   entry: VaultEntry;
   decryptedEntry: DecryptedVaultEntry | null;
   decrypting: boolean;
-  piIndex: number;
+  visualSeed: number;
   onClose: () => void;
   onDelete: () => void;
 }
@@ -24,7 +31,7 @@ export default function EntryDetailModal({
   entry,
   decryptedEntry,
   decrypting,
-  piIndex,
+  visualSeed,
   onClose,
   onDelete,
 }: EntryDetailModalProps) {
@@ -61,11 +68,7 @@ export default function EntryDetailModal({
   const password = decryptedEntry?.password || "";
   const notes = decryptedEntry?.notes;
 
-  const fractalCoords = useMemo(() => {
-    const digits = extractPiDigits(piIndex, 30);
-    const coords = mapDigitsToCoordinates(digits);
-    return coords;
-  }, [piIndex]);
+  const fractalCoords = useMemo(() => seedToCoords(visualSeed), [visualSeed]);
 
   return (
     <Modal visible={visible} animationType="slide" transparent>
@@ -75,13 +78,13 @@ export default function EntryDetailModal({
             centerX={fractalCoords.x}
             centerY={fractalCoords.y}
             zoom={fractalCoords.zoomFactor}
-            piIndex={piIndex}
+            seed={visualSeed}
           />
           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 16, borderBottomWidth: 1, borderBottomColor: "#222" }}>
             <Pressable onPress={onClose}>
               <Ionicons name="close" size={24} color="#fff" />
             </Pressable>
-            <Text style={{ color: "#fff", fontSize: 17, fontWeight: "600" }}>{displayTitle}</Text>
+            <Text style={{ color: "#fff", fontSize: 17, fontWeight: "600" as const }}>{displayTitle}</Text>
             <Pressable onPress={onDelete}>
               <Ionicons name="trash-outline" size={22} color="#ff6b6b" />
             </Pressable>
@@ -94,7 +97,7 @@ export default function EntryDetailModal({
             }}
           >
             <View style={{ marginBottom: 20 }}>
-              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 4 }}>Username</Text>
+              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Username</Text>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <Text style={{ color: "#fff", fontSize: 16, flex: 1 }}>{displayUsername}</Text>
                 {decryptedEntry && (
@@ -110,7 +113,7 @@ export default function EntryDetailModal({
             </View>
 
             <View style={{ marginBottom: 20 }}>
-              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 4 }}>Password</Text>
+              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Password</Text>
               {decrypting ? (
                 <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 4 }}>
                   <ActivityIndicator size="small" color="#fff" />
@@ -139,7 +142,7 @@ export default function EntryDetailModal({
 
             {displayUrl && (
               <View style={{ marginBottom: 20 }}>
-                <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 4 }}>URL</Text>
+                <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>URL</Text>
                 <View style={{ flexDirection: "row", alignItems: "center" }}>
                   <Text style={{ color: "#4CAF50", fontSize: 16, flex: 1 }}>{displayUrl}</Text>
                   {decryptedEntry && (
@@ -157,7 +160,7 @@ export default function EntryDetailModal({
 
             {notes && (
               <View style={{ marginBottom: 20 }}>
-                <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 4 }}>Notes</Text>
+                <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Notes</Text>
                 <Text style={{ color: "#fff", fontSize: 16 }}>{notes}</Text>
               </View>
             )}
@@ -179,7 +182,7 @@ export default function EntryDetailModal({
             )}
 
             <View style={{ marginBottom: 20 }}>
-              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase", marginBottom: 4 }}>Created</Text>
+              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Created</Text>
               <Text style={{ color: "#fff", fontSize: 14 }}>{new Date(entry.createdAt).toLocaleString()}</Text>
             </View>
           </ScrollView>

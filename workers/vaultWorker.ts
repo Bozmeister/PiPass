@@ -1,7 +1,7 @@
 import * as ExpoCrypto from "expo-crypto";
-import CryptoJS from "crypto-js";
-import { deriveClusterKey } from "../crypto/keyDerivation";
+import { deriveMasterKey, generateMasterSalt, hashMasterKey } from "../crypto/keyDerivation";
 import { encryptData, decryptData } from "../crypto/encryption";
+import { deriveEntryKey, generateSaltHex } from "../crypto/hkdf";
 import {
   splitKeyIntoShares,
   combineShares,
@@ -10,24 +10,6 @@ import {
   hexToBytes,
   KeyShares,
 } from "../crypto/secureMemory";
-import * as SecureStore from "expo-secure-store";
-
-let argon2idFn: typeof import("hash-wasm").argon2id | null = null;
-let argon2LoadFailed = false;
-
-async function loadArgon2(): Promise<typeof import("hash-wasm").argon2id | null> {
-  if (argon2LoadFailed) return null;
-  if (argon2idFn) return argon2idFn;
-  try {
-    const mod = await import("hash-wasm");
-    argon2idFn = mod.argon2id;
-    return argon2idFn;
-  } catch {
-    argon2LoadFailed = true;
-    console.warn("Argon2id unavailable (no WebAssembly), using PBKDF2 fallback");
-    return null;
-  }
-}
 
 export interface VaultEntry {
   id: string;
@@ -39,6 +21,7 @@ export interface VaultEntry {
   encryptedUrl?: string;
   url?: string;
   notes?: string;
+  salt: string; // Per-entry salt for HKDF subkey derivation
   createdAt: number;
   updatedAt: number;
 }
@@ -54,68 +37,15 @@ export interface DecryptedVaultEntry {
   updatedAt: number;
 }
 
+// Derives master key from password and returns XOR-split shares.
+// The raw key only exists briefly during derivation.
 export async function deriveMasterKeyShares(
-  userPiSeed: number,
+  password: string,
+  saltHex: string,
   iterations: number = 100000
 ): Promise<KeyShares> {
   const safeIterations = Math.max(iterations || 100000, 3);
-  console.log("Argon2id hydration guard: iterations resolved to", safeIterations);
-
-  const rawKey = deriveClusterKey(userPiSeed, safeIterations);
-  const deviceUUID = await getDeviceUUID();
-  const rawMaterial = rawKey + deviceUUID + userPiSeed.toString();
-
-  const salt = new TextEncoder().encode(deviceUUID + userPiSeed.toString().slice(0, 16));
-
-  // Guard: force positive params
-  let timeCost = safeIterations === 25000 ? 3 : safeIterations === 100000 ? 4 : 6;
-  let memorySize = safeIterations === 25000 ? 65536 : safeIterations === 100000 ? 131072 : 262144;
-  if (timeCost <= 0) timeCost = 3;
-  if (memorySize <= 0) memorySize = 65536;
-
-  console.log("Argon2id params:", { iterations: timeCost, memorySize });
-
-  let masterKeyHex: string;
-
-  const argon2 = await loadArgon2();
-  if (argon2) {
-    try {
-      const argonKeyBytes = await argon2({
-        password: new TextEncoder().encode(rawMaterial),
-        salt,
-        iterations: timeCost,
-        memorySize,
-        parallelism: 4,
-        hashLength: 32,
-        outputType: "binary" as const,
-      });
-      masterKeyHex = Array.from(argonKeyBytes)
-        .map(b => b.toString(16).padStart(2, "0"))
-        .join("");
-      console.log("Key derived via Argon2id");
-    } catch (argonErr) {
-      console.warn("Argon2id runtime error, falling back to PBKDF2:", argonErr);
-      const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, "0")).join("");
-      const pbkdf2Iterations = safeIterations;
-      const stretched = CryptoJS.PBKDF2(rawMaterial, saltHex, {
-        keySize: 256 / 32,
-        iterations: pbkdf2Iterations,
-        hasher: CryptoJS.algo.SHA256,
-      });
-      masterKeyHex = stretched.toString(CryptoJS.enc.Hex);
-      console.log("Key derived via PBKDF2 fallback");
-    }
-  } else {
-    const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, "0")).join("");
-    const pbkdf2Iterations = safeIterations;
-    const stretched = CryptoJS.PBKDF2(rawMaterial, saltHex, {
-      keySize: 256 / 32,
-      iterations: pbkdf2Iterations,
-      hasher: CryptoJS.algo.SHA256,
-    });
-    masterKeyHex = stretched.toString(CryptoJS.enc.Hex);
-    console.log("Key derived via PBKDF2 fallback (no WebAssembly)");
-  }
+  const masterKeyHex = await deriveMasterKey(password, saltHex, safeIterations);
 
   const shares = splitKeyIntoShares(masterKeyHex);
 
@@ -125,72 +55,90 @@ export async function deriveMasterKeyShares(
   return shares;
 }
 
-// DEVICE UUID HELPER
-async function getDeviceUUID(): Promise<string> {
-  let uuid = await SecureStore.getItemAsync("deviceUUID");
-  if (!uuid) {
-    uuid = ExpoCrypto.randomUUID();
-    await SecureStore.setItemAsync("deviceUUID", uuid);
-  }
-  return uuid;
-}
+export { generateMasterSalt, hashMasterKey };
 
-// REST OF THE FILE UNCHANGED
+// Encrypts a vault entry using a per-entry subkey derived via HKDF.
 export function encryptVaultEntry(
   entry: Omit<DecryptedVaultEntry, "id" | "createdAt" | "updatedAt">,
   shares: KeyShares,
   id?: string
 ): VaultEntry {
-  const keyHex = combineShares(shares);
+  const masterKeyHex = combineShares(shares);
+  const entryId = id || generateId();
+  const entrySalt = generateSaltHex();
+
   try {
+    const entryKey = deriveEntryKey(masterKeyHex, entryId, entrySalt);
     const now = Date.now();
-    return {
-      id: id || generateId(),
+
+    const result: VaultEntry = {
+      id: entryId,
       title: entry.title,
       username: entry.username,
-      encryptedPassword: encryptData(entry.password, keyHex),
-      encryptedTitle: encryptData(entry.title, keyHex),
-      encryptedUsername: encryptData(entry.username, keyHex),
-      encryptedUrl: entry.url ? encryptData(entry.url, keyHex) : undefined,
+      encryptedPassword: encryptData(entry.password, entryKey),
+      encryptedTitle: encryptData(entry.title, entryKey),
+      encryptedUsername: encryptData(entry.username, entryKey),
+      encryptedUrl: entry.url ? encryptData(entry.url, entryKey) : undefined,
       url: entry.url,
-      notes: entry.notes ? encryptData(entry.notes, keyHex) : undefined,
+      notes: entry.notes ? encryptData(entry.notes, entryKey) : undefined,
+      salt: entrySalt,
       createdAt: now,
       updatedAt: now,
     };
+
+    const entryKeyBytes = hexToBytes(entryKey);
+    wipeBuffer(entryKeyBytes);
+
+    return result;
   } finally {
-    const wipeBuf = hexToBytes(keyHex);
+    const wipeBuf = hexToBytes(masterKeyHex);
     wipeBuffer(wipeBuf);
   }
 }
 
+// Decrypts a vault entry using its per-entry subkey.
 export function decryptVaultEntry(
   entry: VaultEntry,
   shares: KeyShares
 ): DecryptedVaultEntry {
-  const keyHex = combineShares(shares);
+  const masterKeyHex = combineShares(shares);
+
   try {
+    // For entries with per-entry salt, derive subkey via HKDF
+    // For legacy entries without salt, use master key directly
+    const entryKey = entry.salt
+      ? deriveEntryKey(masterKeyHex, entry.id, entry.salt)
+      : masterKeyHex;
+
     const title = entry.encryptedTitle
-      ? decryptData(entry.encryptedTitle, keyHex)
+      ? decryptData(entry.encryptedTitle, entryKey)
       : entry.title;
     const username = entry.encryptedUsername
-      ? decryptData(entry.encryptedUsername, keyHex)
+      ? decryptData(entry.encryptedUsername, entryKey)
       : entry.username;
     const url = entry.encryptedUrl
-      ? decryptData(entry.encryptedUrl, keyHex)
+      ? decryptData(entry.encryptedUrl, entryKey)
       : entry.url;
 
-    return {
+    const result: DecryptedVaultEntry = {
       id: entry.id,
       title,
       username,
-      password: decryptData(entry.encryptedPassword, keyHex),
+      password: decryptData(entry.encryptedPassword, entryKey),
       url,
-      notes: entry.notes ? decryptData(entry.notes, keyHex) : undefined,
+      notes: entry.notes ? decryptData(entry.notes, entryKey) : undefined,
       createdAt: entry.createdAt,
       updatedAt: entry.updatedAt,
     };
+
+    if (entry.salt) {
+      const entryKeyBytes = hexToBytes(entryKey);
+      wipeBuffer(entryKeyBytes);
+    }
+
+    return result;
   } finally {
-    const wipeBuf = hexToBytes(keyHex);
+    const wipeBuf = hexToBytes(masterKeyHex);
     wipeBuffer(wipeBuf);
   }
 }
@@ -201,25 +149,17 @@ export function reEncryptEntry(
   newShares: KeyShares
 ): VaultEntry {
   const decrypted = decryptVaultEntry(entry, oldShares);
-  const newKeyHex = combineShares(newShares);
-  try {
-    return {
-      id: entry.id,
+  return encryptVaultEntry(
+    {
       title: decrypted.title,
       username: decrypted.username,
-      encryptedPassword: encryptData(decrypted.password, newKeyHex),
-      encryptedTitle: encryptData(decrypted.title, newKeyHex),
-      encryptedUsername: encryptData(decrypted.username, newKeyHex),
-      encryptedUrl: decrypted.url ? encryptData(decrypted.url, newKeyHex) : undefined,
+      password: decrypted.password,
       url: decrypted.url,
-      notes: decrypted.notes ? encryptData(decrypted.notes, newKeyHex) : undefined,
-      createdAt: entry.createdAt,
-      updatedAt: Date.now(),
-    };
-  } finally {
-    const wipeBuf = hexToBytes(newKeyHex);
-    wipeBuffer(wipeBuf);
-  }
+      notes: decrypted.notes,
+    },
+    newShares,
+    entry.id
+  );
 }
 
 export interface SecureNote {
@@ -227,6 +167,7 @@ export interface SecureNote {
   encryptedLabel: string;
   encryptedContent: string;
   label: string;
+  salt: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -244,19 +185,30 @@ export function encryptSecureNote(
   shares: KeyShares,
   id?: string
 ): SecureNote {
-  const keyHex = combineShares(shares);
+  const masterKeyHex = combineShares(shares);
+  const noteId = id || generateId();
+  const noteSalt = generateSaltHex();
+
   try {
+    const noteKey = deriveEntryKey(masterKeyHex, noteId, noteSalt);
     const now = Date.now();
-    return {
-      id: id || generateId(),
+
+    const result: SecureNote = {
+      id: noteId,
       label: note.label,
-      encryptedLabel: encryptData(note.label, keyHex),
-      encryptedContent: encryptData(note.content, keyHex),
+      encryptedLabel: encryptData(note.label, noteKey),
+      encryptedContent: encryptData(note.content, noteKey),
+      salt: noteSalt,
       createdAt: now,
       updatedAt: now,
     };
+
+    const noteKeyBytes = hexToBytes(noteKey);
+    wipeBuffer(noteKeyBytes);
+
+    return result;
   } finally {
-    const wipeBuf = hexToBytes(keyHex);
+    const wipeBuf = hexToBytes(masterKeyHex);
     wipeBuffer(wipeBuf);
   }
 }
@@ -265,17 +217,29 @@ export function decryptSecureNote(
   note: SecureNote,
   shares: KeyShares
 ): DecryptedSecureNote {
-  const keyHex = combineShares(shares);
+  const masterKeyHex = combineShares(shares);
+
   try {
-    return {
+    const noteKey = note.salt
+      ? deriveEntryKey(masterKeyHex, note.id, note.salt)
+      : masterKeyHex;
+
+    const result: DecryptedSecureNote = {
       id: note.id,
-      label: note.encryptedLabel ? decryptData(note.encryptedLabel, keyHex) : note.label,
-      content: decryptData(note.encryptedContent, keyHex),
+      label: note.encryptedLabel ? decryptData(note.encryptedLabel, noteKey) : note.label,
+      content: decryptData(note.encryptedContent, noteKey),
       createdAt: note.createdAt,
       updatedAt: note.updatedAt,
     };
+
+    if (note.salt) {
+      const noteKeyBytes = hexToBytes(noteKey);
+      wipeBuffer(noteKeyBytes);
+    }
+
+    return result;
   } finally {
-    const wipeBuf = hexToBytes(keyHex);
+    const wipeBuf = hexToBytes(masterKeyHex);
     wipeBuffer(wipeBuf);
   }
 }
@@ -286,20 +250,11 @@ export function reEncryptSecureNote(
   newShares: KeyShares
 ): SecureNote {
   const decrypted = decryptSecureNote(note, oldShares);
-  const newKeyHex = combineShares(newShares);
-  try {
-    return {
-      id: note.id,
-      label: decrypted.label,
-      encryptedLabel: encryptData(decrypted.label, newKeyHex),
-      encryptedContent: encryptData(decrypted.content, newKeyHex),
-      createdAt: note.createdAt,
-      updatedAt: Date.now(),
-    };
-  } finally {
-    const wipeBuf = hexToBytes(newKeyHex);
-    wipeBuffer(wipeBuf);
-  }
+  return encryptSecureNote(
+    { label: decrypted.label, content: decrypted.content },
+    newShares,
+    note.id
+  );
 }
 
 function generateId(): string {
