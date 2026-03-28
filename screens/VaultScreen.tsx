@@ -38,7 +38,7 @@ import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer } from "..
 import { hashMasterKey } from "../crypto/keyDerivation";
 import { requireFreshBiometric } from "../crypto/biometricGate";
 import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
-import { deriveFractalSeed } from "../crypto/hkdf";
+import { deriveFractalSeed, deriveFractalSeedLegacy } from "../crypto/hkdf";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_FOCUS } from "../styles/inputTheme";
 
 import AddEntryModal from "../components/AddEntryModal";
@@ -119,15 +119,25 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
     return { fingerprint: fp, iterations, kdf: "argon2id", version: 1 };
   }
 
+  function getLegacyFingerprint(): string {
+    const keyHex = combineShares(keySharesRef.current);
+    const legacy = deriveFractalSeedLegacy(keyHex);
+    const kb = hexToBytes(keyHex);
+    wipeBuffer(kb);
+    return legacy.fingerprint;
+  }
+
   async function verifyFractalFingerprint(currentFingerprint: string) {
     const stored = await getFractalFingerprint();
     if (stored === null) {
       await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
     } else if (typeof stored === "string") {
-      if (stored !== currentFingerprint) {
-        setFractalTampered(true);
-      } else {
+      if (stored === currentFingerprint) {
         await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
+      } else if (stored === getLegacyFingerprint()) {
+        await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
+      } else {
+        setFractalTampered(true);
       }
     } else {
       const current = buildFingerprintRecord(currentFingerprint);
@@ -137,7 +147,12 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
         stored.kdf !== current.kdf ||
         stored.version !== current.version
       ) {
-        setFractalTampered(true);
+        const legacyFp = getLegacyFingerprint();
+        if (stored.fingerprint === legacyFp || (typeof stored === "object" && stored.fingerprint === legacyFp)) {
+          await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
+        } else {
+          setFractalTampered(true);
+        }
       }
     }
   }

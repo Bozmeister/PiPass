@@ -71,6 +71,14 @@ export interface FractalParams {
   maxIterations: number;
 }
 
+export function deriveFractalSeedLegacy(masterKeyHex: string): { fingerprint: string } {
+  const legacySalt = "00".repeat(16);
+  const prk = hkdfExtract(legacySalt, masterKeyHex);
+  const seedHex = hkdfExpand(prk, "fractal", 32);
+  const fingerprint = CryptoJS.SHA256(CryptoJS.enc.Hex.parse(seedHex)).toString(CryptoJS.enc.Hex);
+  return { fingerprint };
+}
+
 export function deriveFractalSeed(masterKeyHex: string): { seedNumber: number; fingerprint: string; fractalParams: FractalParams } {
   const prk = hkdfExtract(HKDF_SALT_V1, masterKeyHex);
   const seedHex = hkdfExpand(prk, "fractal", 32);
