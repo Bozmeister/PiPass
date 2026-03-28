@@ -19,7 +19,7 @@ Preferred communication style: Simple, everyday language.
   2. `SeedSetupScreen` — master password setup (first-time only)
   3. `UnlockScreen` — password verify against stored hash (returning users)
   4. `VaultScreen` — main vault UI with key shares prop
-- **UI Components**: Custom modals (`AddEntryModal`, `EntryDetailModal`) for CRUD operations on vault entries
+- **UI Components**: Custom modals (`AddEntryModal`, `EntryDetailModal`, `NuclearResetModal`, `RecoveryKeyModal`) for CRUD operations and vault lifecycle
   - `AddEntryModal`: Includes double-entry password validation (confirm password field), red "Mismatch" warning, success Alert on save, try/catch error handling
   - `FaviconImage`: Fetches website favicons from Google's favicon service, caches locally via expo-file-system on native, globe icon fallback. Shown in vault list items (when keyprints are off) and next to URLs in EntryDetailModal
 - **Input Theme** (`styles/inputTheme.ts`): WCAG AA-compliant dark input styling used across all input screens. Constants: INPUT_BG (#1e1e1e), INPUT_TEXT (#f0f0f0), INPUT_PLACEHOLDER (#777), INPUT_BORDER (#3a3a3a), INPUT_BORDER_FOCUS (#4a90d9 blue), INPUT_BORDER_ERROR (#ef4444), INPUT_BORDER_SUCCESS (#4CAF50), LABEL_COLOR (#999). Applied to: UnlockScreen, SeedSetupScreen, AddEntryModal, EntryDetailModal, SecureNotesModal, VaultScreen profile password
@@ -63,7 +63,7 @@ Preferred communication style: Simple, everyday language.
    - `deriveVisualSeed(keyShares)` in VaultScreen generates a visual seed from master key hash
 
 ### Local Storage (`workers/` directory)
-- **Storage Worker** (`storageWorker.ts`): Password-based with no piSeed. Stores master salt, master key hash, security profile. Uses `expo-secure-store` on native, `localStorage` on web. Includes `destroyAllData()` for nuclear wipe.
+- **Storage Worker** (`storageWorker.ts`): Password-based with no piSeed. Stores master salt, master key hash, security profile, recovery key hash. Uses `expo-secure-store` on native, `localStorage` on web. Includes `destroyAllData()` for nuclear wipe.
 - **Vault Worker** (`vaultWorker.ts`): Uses per-entry HKDF subkeys with `KeyShares` throughout. `deriveMasterKeyShares()` returns XOR-split key shares. Encrypt/decrypt operations use per-entry keys derived from master key + entry ID via HKDF.
 
 ### Backend (Express server) — Zero-Knowledge API
@@ -163,3 +163,5 @@ scripts/          # Build scripts
 - **PBKDF2 Fallback**: `hash-wasm` Argon2id requires WebAssembly; if unavailable, falls back to PBKDF2-SHA256 via `crypto-js`
 - **Encryption format**: New format is `ivHex:cipherHex:macHex` (3-part with HMAC); legacy `ivHex:cipherHex` (2-part) still decryptable
 - **Fractal seed derivation**: `HKDF(master_key, info="fractal")` derives a deterministic seed for the Mandelbrot visualization — uses fixed all-zero salt, completely independent from encryption subkey derivation. SHA-256 fingerprint of the HKDF output is stored and verified on every unlock; mismatch triggers a security warning banner. Fingerprint is updated after security profile changes (re-derived key).
+- **Recovery Key** (`crypto/recoveryKey.ts`): 256-bit recovery key generated on vault creation via `expo-crypto`. Only SHA-256 hash is stored (`saveRecoveryKeyHash`). Key displayed once to user in `RecoveryKeyModal`, formatted as `XXXX-XXXX-...` groups. Verification uses constant-time comparison. Raw key never logged, stored, or sent over network.
+- **Nuclear Reset** (`components/NuclearResetModal.tsx`): Multi-step guarded flow: warning → password verification → exact phrase "DELETE MY VAULT" → 10-second countdown → optional biometric → `destroyAllData()`. Session tokens and ref guards prevent race conditions and fast-tap bypasses.

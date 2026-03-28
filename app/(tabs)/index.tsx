@@ -17,6 +17,7 @@ import {
   getSecurityProfile,
   saveSecurityProfile,
   destroyAllData,
+  saveRecoveryKeyHash,
 } from "../../workers/storageWorker";
 import { generateMasterSalt, hashMasterKey } from "../../crypto/keyDerivation";
 import { deriveMasterKeyShares } from "../../workers/vaultWorker";
@@ -27,6 +28,12 @@ import {
   startPeriodicGuard,
   stopPeriodicGuard,
 } from "../../crypto/integrityGuard";
+import {
+  generateRecoveryKey,
+  formatRecoveryKey,
+  hashRecoveryKey,
+} from "../../crypto/recoveryKey";
+import RecoveryKeyModal from "../../components/RecoveryKeyModal";
 
 export default function HomeScreen() {
   const [authenticated, setAuthenticated] = useState(false);
@@ -35,6 +42,8 @@ export default function HomeScreen() {
   const [keyShares, setKeyShares] = useState<KeyShares | null>(null);
   const [masterSalt, setMasterSaltState] = useState<string | null>(null);
   const [tamperLocked, setTamperLocked] = useState(false);
+  const [pendingRecoveryKey, setPendingRecoveryKey] = useState<string | null>(null);
+  const [pendingSetupShares, setPendingSetupShares] = useState<KeyShares | null>(null);
   const keySharesRef = useRef<KeyShares | null>(null);
 
   useEffect(() => {
@@ -97,6 +106,24 @@ export default function HomeScreen() {
 
   if (vaultExists === null) return null;
 
+  if (pendingRecoveryKey !== null) {
+    return (
+      <RecoveryKeyModal
+        visible={true}
+        formattedKey={pendingRecoveryKey}
+        onConfirm={async () => {
+          await setVaultInitialized(true);
+          setPendingRecoveryKey(null);
+          setVaultExists(true);
+          if (pendingSetupShares) {
+            setKeyShares(pendingSetupShares);
+            setPendingSetupShares(null);
+          }
+        }}
+      />
+    );
+  }
+
   if (!vaultExists) {
     return (
       <SeedSetupScreen onSetup={async (password, iters) => {
@@ -107,15 +134,18 @@ export default function HomeScreen() {
         const keyHex = combineShares(shares);
         const keyHash = hashMasterKey(keyHex);
 
+        const rawKey = generateRecoveryKey();
+        const keyHashRecovery = hashRecoveryKey(rawKey);
+
         await saveMasterSalt(salt);
         await saveMasterKeyHash(keyHash);
         await saveSecurityProfile(validIters);
-        await setVaultInitialized(true);
+        await saveRecoveryKeyHash(keyHashRecovery);
 
         setMasterSaltState(salt);
         setIterations(validIters);
-        setKeyShares(shares);
-        setVaultExists(true);
+        setPendingSetupShares(shares);
+        setPendingRecoveryKey(formatRecoveryKey(rawKey));
       }} />
     );
   }
