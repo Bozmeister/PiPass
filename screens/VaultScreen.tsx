@@ -129,33 +129,28 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   }
 
   async function verifyFractalFingerprint(currentFingerprint: string) {
+    const legacyFp = getLegacyFingerprint();
     const stored = await getFractalFingerprint();
     if (stored === null) {
       await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
-    } else if (typeof stored === "string") {
-      if (stored === currentFingerprint) {
-        await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
-      } else if (stored === getLegacyFingerprint()) {
-        await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
-      } else {
-        setFractalTampered(true);
-      }
-    } else {
-      const current = buildFingerprintRecord(currentFingerprint);
-      if (
-        stored.fingerprint !== current.fingerprint ||
-        stored.iterations !== current.iterations ||
-        stored.kdf !== current.kdf ||
-        stored.version !== current.version
-      ) {
-        const legacyFp = getLegacyFingerprint();
-        if (stored.fingerprint === legacyFp || (typeof stored === "object" && stored.fingerprint === legacyFp)) {
-          await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
-        } else {
-          setFractalTampered(true);
-        }
-      }
+      return;
     }
+
+    const storedFp = typeof stored === "string" ? stored : stored.fingerprint;
+
+    if (storedFp === currentFingerprint) {
+      if (typeof stored === "string") {
+        await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
+      }
+      return;
+    }
+
+    if (storedFp === legacyFp) {
+      await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
+      return;
+    }
+
+    setFractalTampered(true);
   }
 
   function refreshFractalFromShares(shares: KeyShares) {
