@@ -128,25 +128,52 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
     return legacy.fingerprint;
   }
 
+  function isValidRecord(v: unknown): v is FractalFingerprintRecord {
+    if (!v || typeof v !== "object") return false;
+    const r = v as Record<string, unknown>;
+    return (
+      typeof r.fingerprint === "string" &&
+      typeof r.iterations === "number" &&
+      r.kdf === "argon2id" &&
+      r.version === 1
+    );
+  }
+
   async function verifyFractalFingerprint(currentFingerprint: string) {
     const legacyFp = getLegacyFingerprint();
     const stored = await getFractalFingerprint();
+    const expected = buildFingerprintRecord(currentFingerprint);
+
     if (stored === null) {
-      await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
+      await saveFractalFingerprint(expected);
       return;
     }
 
-    const storedFp = typeof stored === "string" ? stored : stored.fingerprint;
-
-    if (storedFp === currentFingerprint) {
-      if (typeof stored === "string") {
-        await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
+    if (typeof stored === "string") {
+      if (stored === currentFingerprint || stored === legacyFp) {
+        await saveFractalFingerprint(expected);
+        return;
       }
+      setFractalTampered(true);
       return;
     }
 
-    if (storedFp === legacyFp) {
-      await saveFractalFingerprint(buildFingerprintRecord(currentFingerprint));
+    if (!isValidRecord(stored)) {
+      setFractalTampered(true);
+      return;
+    }
+
+    if (
+      stored.fingerprint === expected.fingerprint &&
+      stored.iterations === expected.iterations &&
+      stored.kdf === expected.kdf &&
+      stored.version === expected.version
+    ) {
+      return;
+    }
+
+    if (stored.fingerprint === legacyFp) {
+      await saveFractalFingerprint(expected);
       return;
     }
 
