@@ -28,12 +28,14 @@ import {
   startPeriodicGuard,
   stopPeriodicGuard,
 } from "../../crypto/integrityGuard";
+import { requireFreshBiometric } from "../../crypto/biometricGate";
 import {
   generateRecoveryKey,
   formatRecoveryKey,
   hashRecoveryKey,
 } from "../../crypto/recoveryKey";
 import RecoveryKeyModal from "../../components/RecoveryKeyModal";
+import NuclearResetModal from "../../components/NuclearResetModal";
 
 export default function HomeScreen() {
   const [authenticated, setAuthenticated] = useState(false);
@@ -46,6 +48,7 @@ export default function HomeScreen() {
   const [pendingRecoveryRawHex, setPendingRecoveryRawHex] = useState<string>("");
   const [pendingSetupShares, setPendingSetupShares] = useState<KeyShares | null>(null);
   const [vaultLocked, setVaultLocked] = useState(false);
+  const [showUnlockNuclearReset, setShowUnlockNuclearReset] = useState(false);
   const lockedSharesRef = useRef<KeyShares | null>(null);
   const keySharesRef = useRef<KeyShares | null>(null);
 
@@ -158,15 +161,35 @@ export default function HomeScreen() {
 
   if (!keyShares && !vaultLocked) {
     return (
-      <UnlockScreen
-        salt={masterSalt!}
-        iterations={iterations}
-        onUnlocked={(shares) => setKeyShares(shares)}
-        onReset={() => {
-          setVaultExists(false);
-          setKeyShares(null);
-        }}
-      />
+      <>
+        <UnlockScreen
+          salt={masterSalt!}
+          iterations={iterations}
+          onUnlocked={(shares) => setKeyShares(shares)}
+          onRequestNuclearReset={() => setShowUnlockNuclearReset(true)}
+        />
+        <NuclearResetModal
+          visible={showUnlockNuclearReset}
+          onClose={() => setShowUnlockNuclearReset(false)}
+          onConfirmReset={async () => {
+            await destroyAllData();
+            setShowUnlockNuclearReset(false);
+            setVaultExists(false);
+            setKeyShares(null);
+          }}
+          verifyPassword={async (pw) => {
+            const salt = await getMasterSalt();
+            if (!salt) return false;
+            const shares = await deriveMasterKeyShares(pw, salt, iterations);
+            const keyHex = combineShares(shares);
+            const keyHash = hashMasterKey(keyHex);
+            wipeShares(shares);
+            const storedHash = await getMasterKeyHash();
+            return !!storedHash && keyHash === storedHash;
+          }}
+          requireBiometric={requireFreshBiometric}
+        />
+      </>
     );
   }
 
@@ -212,16 +235,34 @@ export default function HomeScreen() {
               setKeyShares(newShares);
               setVaultLocked(false);
             }}
-            onReset={() => {
+            onRequestNuclearReset={() => setShowUnlockNuclearReset(true)}
+          />
+          <NuclearResetModal
+            visible={showUnlockNuclearReset}
+            onClose={() => setShowUnlockNuclearReset(false)}
+            onConfirmReset={async () => {
               if (lockedSharesRef.current) {
                 wipeShares(lockedSharesRef.current);
                 lockedSharesRef.current = null;
               }
+              await destroyAllData();
+              setShowUnlockNuclearReset(false);
               setKeyShares(null);
               setVaultLocked(false);
               setVaultExists(false);
               setAuthenticated(false);
             }}
+            verifyPassword={async (pw) => {
+              const salt = await getMasterSalt();
+              if (!salt) return false;
+              const shares = await deriveMasterKeyShares(pw, salt, iterations);
+              const keyHex = combineShares(shares);
+              const keyHash = hashMasterKey(keyHex);
+              wipeShares(shares);
+              const storedHash = await getMasterKeyHash();
+              return !!storedHash && keyHash === storedHash;
+            }}
+            requireBiometric={requireFreshBiometric}
           />
         </View>
       )}
@@ -229,11 +270,11 @@ export default function HomeScreen() {
   );
 }
 
-function UnlockScreen({ salt, iterations, onUnlocked, onReset }: {
+function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
   salt: string;
   iterations: number;
   onUnlocked: (shares: KeyShares) => void;
-  onReset: () => void;
+  onRequestNuclearReset: () => void;
 }) {
   const insets = useSafeAreaInsets();
   const [password, setPassword] = useState("");
@@ -334,25 +375,10 @@ function UnlockScreen({ salt, iterations, onUnlocked, onReset }: {
         </Pressable>
 
         <Pressable
-          onPress={async () => {
-            const msg = "This will erase all vault data. This cannot be undone.";
-            if (Platform.OS === "web") {
-              if (confirm(msg)) {
-                destroyAllData().then(() => onReset());
-              }
-            } else {
-              Alert.alert("Reset Vault", msg, [
-                { text: "Cancel", style: "cancel" },
-                { text: "Reset", style: "destructive", onPress: async () => {
-                  await destroyAllData();
-                  onReset();
-                }},
-              ]);
-            }
-          }}
+          onPress={onRequestNuclearReset}
           style={{ marginTop: 32 }}
         >
-          <Text style={{ color: "#666", fontSize: 14 }}>Forgot password? Reset vault</Text>
+          <Text style={{ color: "#666", fontSize: 14 }}>Forgot password? You will need to securely reset your vault</Text>
         </Pressable>
       </ScrollView>
     </KeyboardAvoidingView>
