@@ -38,12 +38,14 @@ import { hashMasterKey } from "../crypto/keyDerivation";
 import { requireFreshBiometric } from "../crypto/biometricGate";
 import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
 import { deriveFractalSeed } from "../crypto/hkdf";
+import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_FOCUS } from "../styles/inputTheme";
 
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
 import SecureNotesModal from "../components/SecureNotesModal";
 import FractalKeyprint from "../components/FractalKeyprint";
 import KeyprintViewer from "../components/KeyprintViewer";
+import FaviconImage from "../components/FaviconImage";
 
 const AUTO_LOCK_MS = 60000;
 
@@ -89,6 +91,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   const [showKeyprintViewer, setShowKeyprintViewer] = useState(false);
   const [pendingProfileIterations, setPendingProfileIterations] = useState<number | null>(null);
   const [profilePassword, setProfilePassword] = useState("");
+  const [profilePasswordFocused, setProfilePasswordFocused] = useState(false);
 
   const settingsTapCountRef = useRef(0);
   const settingsTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -314,7 +317,11 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
 
   const renderItem = ({ item }: { item: VaultEntry }) => (
     <Pressable onPress={() => handleSelectEntry(item)} style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#222", flexDirection: "row", alignItems: "center" }}>
-      {showKeyprints && <FractalKeyprint seed={visualSeed} size={44} animate={false} />}
+      {showKeyprints ? (
+        <FractalKeyprint seed={visualSeed} size={44} animate={false} />
+      ) : (
+        <FaviconImage url={item.url} size={32} />
+      )}
       <View style={{ marginLeft: 12, flex: 1 }}>
         <Text style={{ color: "#fff", fontSize: 18 }}>{item.title}</Text>
         <Text style={{ color: "#888" }}>{item.username}</Text>
@@ -481,11 +488,13 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
               value={profilePassword}
               onChangeText={setProfilePassword}
               placeholder="Master password"
-              placeholderTextColor="#555"
+              placeholderTextColor={INPUT_PLACEHOLDER}
               secureTextEntry
               autoCapitalize="none"
               autoCorrect={false}
-              style={{ color: "#fff", fontSize: 16, padding: 14, backgroundColor: "#1a1a1a", borderRadius: 8, borderWidth: 1, borderColor: "#333", marginBottom: 16 }}
+              onFocus={() => setProfilePasswordFocused(true)}
+              onBlur={() => setProfilePasswordFocused(false)}
+              style={{ color: INPUT_TEXT, fontSize: 16, padding: 14, backgroundColor: INPUT_BG, borderRadius: 8, borderWidth: 1, borderColor: profilePasswordFocused ? INPUT_BORDER_FOCUS : INPUT_BORDER, marginBottom: 16 }}
               testID="profile-password-input"
             />
             {migrating && (

@@ -3,6 +3,7 @@ import { View, Text, TextInput, Pressable, Platform, Alert, ActivityIndicator, S
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_ERROR, INPUT_BORDER_FOCUS } from "../../styles/inputTheme";
 import AuthScreen from "../../screens/AuthScreen";
 import SeedSetupScreen from "../../screens/SeedSetupScreen";
 import VaultScreen from "../../screens/VaultScreen";
@@ -168,6 +169,7 @@ function UnlockScreen({ salt, iterations, onUnlocked, onReset }: {
   const [unlocking, setUnlocking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [focused, setFocused] = useState(false);
   const webTopInset = Platform.OS === "web" ? 67 : 0;
 
   async function handleUnlock() {
@@ -215,26 +217,28 @@ function UnlockScreen({ salt, iterations, onUnlocked, onReset }: {
 
         <View style={{
           flexDirection: "row", alignItems: "center",
-          backgroundColor: "#e8e8e8", borderRadius: 8, marginTop: 32, width: "100%",
-          borderWidth: 1, borderColor: error ? "#ff4444" : "#ccc",
+          backgroundColor: INPUT_BG, borderRadius: 8, marginTop: 32, width: "100%",
+          borderWidth: 1, borderColor: error ? INPUT_BORDER_ERROR : (focused ? INPUT_BORDER_FOCUS : INPUT_BORDER),
         }}>
           <TextInput
             value={password}
             onChangeText={(t) => { setPassword(t); setError(null); }}
             onSubmitEditing={handleUnlock}
             placeholder="Master password"
-            placeholderTextColor="#888"
+            placeholderTextColor={INPUT_PLACEHOLDER}
             secureTextEntry={!showPassword}
             autoCapitalize="none"
             autoCorrect={false}
             textContentType="none"
             autoComplete="off"
             returnKeyType="go"
-            style={{ color: "#000", fontSize: 18, padding: 16, flex: 1 }}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            style={{ color: INPUT_TEXT, fontSize: 18, padding: 16, flex: 1 }}
             testID="unlock-password-input"
           />
           <Pressable onPress={() => setShowPassword(!showPassword)} style={{ padding: 16 }}>
-            <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#555" />
+            <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#888" />
           </Pressable>
         </View>
 

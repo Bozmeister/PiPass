@@ -1,10 +1,11 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
-import { View, Text, Pressable, Modal, ScrollView, Platform, ActivityIndicator, Alert } from "react-native";
+import { View, Text, Pressable, Modal, ScrollView, Platform, ActivityIndicator, Alert, Image } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Clipboard from "expo-clipboard";
 import { VaultEntry, DecryptedVaultEntry } from "../workers/vaultWorker";
 import FractalBackground from "./FractalBackground";
+import FaviconImage from "./FaviconImage";
 
 const CLIPBOARD_CLEAR_MS = 30000;
 
@@ -84,7 +85,7 @@ export default function EntryDetailModal({
             <Pressable onPress={onClose}>
               <Ionicons name="close" size={24} color="#fff" />
             </Pressable>
-            <Text style={{ color: "#fff", fontSize: 17, fontWeight: "600" as const }}>{displayTitle}</Text>
+            <Text style={{ color: "#f0f0f0", fontSize: 17, fontWeight: "600" as const }}>{displayTitle}</Text>
             <Pressable onPress={onDelete}>
               <Ionicons name="trash-outline" size={22} color="#ff6b6b" />
             </Pressable>
@@ -97,9 +98,9 @@ export default function EntryDetailModal({
             }}
           >
             <View style={{ marginBottom: 20 }}>
-              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Username</Text>
+              <Text style={{ color: "#999", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Username</Text>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: "#fff", fontSize: 16, flex: 1 }}>{displayUsername}</Text>
+                <Text style={{ color: "#f0f0f0", fontSize: 16, flex: 1 }}>{displayUsername}</Text>
                 {decryptedEntry && (
                   <Pressable onPress={() => handleCopy(displayUsername, "username")} style={{ padding: 4 }}>
                     <Ionicons
@@ -113,17 +114,17 @@ export default function EntryDetailModal({
             </View>
 
             <View style={{ marginBottom: 20 }}>
-              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Password</Text>
+              <Text style={{ color: "#999", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Password</Text>
               {decrypting ? (
                 <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 4 }}>
                   <ActivityIndicator size="small" color="#fff" />
-                  <Text style={{ color: "#888", fontSize: 14, marginLeft: 8 }}>Authenticating...</Text>
+                  <Text style={{ color: "#999", fontSize: 14, marginLeft: 8 }}>Authenticating...</Text>
                 </View>
               ) : !decryptedEntry ? (
                 <Text style={{ color: "#ff6b6b", fontSize: 14 }}>Authentication required to view password</Text>
               ) : (
                 <View style={{ flexDirection: "row", alignItems: "center" }}>
-                  <Text style={{ color: "#fff", fontSize: 16, flex: 1 }}>
+                  <Text style={{ color: "#f0f0f0", fontSize: 16, flex: 1 }}>
                     {showPassword ? password : "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"}
                   </Text>
                   <Pressable onPress={() => handleCopy(password, "password")} style={{ padding: 4, marginRight: 4 }}>
@@ -142,9 +143,10 @@ export default function EntryDetailModal({
 
             {displayUrl && (
               <View style={{ marginBottom: 20 }}>
-                <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>URL</Text>
+                <Text style={{ color: "#999", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>URL</Text>
                 <View style={{ flexDirection: "row", alignItems: "center" }}>
-                  <Text style={{ color: "#4CAF50", fontSize: 16, flex: 1 }}>{displayUrl}</Text>
+                  <FaviconImage url={displayUrl} size={24} />
+                  <Text style={{ color: "#4a90d9", fontSize: 16, flex: 1, marginLeft: 8 }}>{displayUrl}</Text>
                   {decryptedEntry && (
                     <Pressable onPress={() => handleCopy(displayUrl, "url")} style={{ padding: 4 }}>
                       <Ionicons
@@ -160,30 +162,32 @@ export default function EntryDetailModal({
 
             {notes && (
               <View style={{ marginBottom: 20 }}>
-                <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Notes</Text>
-                <Text style={{ color: "#fff", fontSize: 16 }}>{notes}</Text>
+                <Text style={{ color: "#999", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Notes</Text>
+                <Text style={{ color: "#f0f0f0", fontSize: 16 }}>{notes}</Text>
               </View>
             )}
 
             {decryptedEntry && (
               <View style={{
-                backgroundColor: "#1a1a1a",
+                backgroundColor: "#1e1e1e",
                 borderRadius: 8,
                 padding: 10,
                 marginBottom: 20,
                 flexDirection: "row",
                 alignItems: "center",
+                borderWidth: 1,
+                borderColor: "#3a3a3a",
               }}>
                 <Ionicons name="timer-outline" size={14} color="#888" />
-                <Text style={{ color: "#888", fontSize: 11, marginLeft: 6 }}>
+                <Text style={{ color: "#999", fontSize: 11, marginLeft: 6 }}>
                   Clipboard auto-clears 30s after copy
                 </Text>
               </View>
             )}
 
             <View style={{ marginBottom: 20 }}>
-              <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Created</Text>
-              <Text style={{ color: "#fff", fontSize: 14 }}>{new Date(entry.createdAt).toLocaleString()}</Text>
+              <Text style={{ color: "#999", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Created</Text>
+              <Text style={{ color: "#f0f0f0", fontSize: 14 }}>{new Date(entry.createdAt).toLocaleString()}</Text>
             </View>
           </ScrollView>
         </View>

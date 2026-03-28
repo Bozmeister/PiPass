@@ -8,6 +8,7 @@ import { saveSecureNote, deleteSecureNote } from "../workers/storageWorker";
 import { KeyShares } from "../crypto/secureMemory";
 import { requireFreshBiometric } from "../crypto/biometricGate";
 import { sanitizeInput } from "../utils/watchman";
+import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_FOCUS, LABEL_COLOR } from "../styles/inputTheme";
 
 const CLIPBOARD_CLEAR_MS = 30000;
 
@@ -30,6 +31,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
   const [decryptedNote, setDecryptedNote] = useState<DecryptedSecureNote | null>(null);
   const [decrypting, setDecrypting] = useState(false);
   const [copiedField, setCopiedField] = useState(false);
+  const [focusedField, setFocusedField] = useState<string | null>(null);
   const clipboardTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function resetView() {
@@ -240,37 +242,43 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
 
             {view === "add" && (
               <ScrollView keyboardShouldPersistTaps="handled">
-                <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Label *</Text>
+                <Text style={{ color: LABEL_COLOR, fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Label *</Text>
                 <TextInput
                   value={label}
                   onChangeText={(t) => setLabel(sanitizeInput(t, "title"))}
                   placeholder="e.g. Bitcoin Wallet Seed"
-                  placeholderTextColor="#555"
+                  placeholderTextColor={INPUT_PLACEHOLDER}
                   autoCorrect={false}
-                  style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16 }}
+                  onFocus={() => setFocusedField("label")}
+                  onBlur={() => setFocusedField(null)}
+                  style={{ color: INPUT_TEXT, fontSize: 16, backgroundColor: INPUT_BG, borderRadius: 8, padding: 12, marginBottom: 16, borderWidth: 1, borderColor: focusedField === "label" ? INPUT_BORDER_FOCUS : INPUT_BORDER }}
                   testID="note-label-input"
                 />
 
-                <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Secret Content *</Text>
+                <Text style={{ color: LABEL_COLOR, fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Secret Content *</Text>
                 <TextInput
                   value={content}
                   onChangeText={setContent}
                   placeholder="Enter your sensitive data..."
-                  placeholderTextColor="#555"
+                  placeholderTextColor={INPUT_PLACEHOLDER}
                   multiline
                   numberOfLines={6}
                   secureTextEntry={false}
                   autoCorrect={false}
                   autoCapitalize="none"
+                  onFocus={() => setFocusedField("content")}
+                  onBlur={() => setFocusedField(null)}
                   style={{
-                    color: "#fff",
+                    color: INPUT_TEXT,
                     fontSize: 16,
-                    backgroundColor: "#1a1a1a",
+                    backgroundColor: INPUT_BG,
                     borderRadius: 8,
                     padding: 12,
                     marginBottom: 16,
                     minHeight: 140,
                     textAlignVertical: "top",
+                    borderWidth: 1,
+                    borderColor: focusedField === "content" ? INPUT_BORDER_FOCUS : INPUT_BORDER,
                   }}
                   testID="note-content-input"
                 />

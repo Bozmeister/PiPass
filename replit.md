@@ -21,7 +21,8 @@ Preferred communication style: Simple, everyday language.
   4. `VaultScreen` — main vault UI with key shares prop
 - **UI Components**: Custom modals (`AddEntryModal`, `EntryDetailModal`) for CRUD operations on vault entries
   - `AddEntryModal`: Includes double-entry password validation (confirm password field), red "Mismatch" warning, success Alert on save, try/catch error handling
-  - `FaviconImage`: Fetches website favicons from Google's favicon service, caches locally via expo-file-system on native, globe icon fallback
+  - `FaviconImage`: Fetches website favicons from Google's favicon service, caches locally via expo-file-system on native, globe icon fallback. Shown in vault list items (when keyprints are off) and next to URLs in EntryDetailModal
+- **Input Theme** (`styles/inputTheme.ts`): WCAG AA-compliant dark input styling used across all input screens. Constants: INPUT_BG (#1e1e1e), INPUT_TEXT (#f0f0f0), INPUT_PLACEHOLDER (#777), INPUT_BORDER (#3a3a3a), INPUT_BORDER_FOCUS (#4a90d9 blue), INPUT_BORDER_ERROR (#ef4444), INPUT_BORDER_SUCCESS (#4CAF50), LABEL_COLOR (#999). Applied to: UnlockScreen, SeedSetupScreen, AddEntryModal, EntryDetailModal, SecureNotesModal, VaultScreen profile password
 - **Error Handling**: Class-based `ErrorBoundary` component wraps the app with a fallback UI
 
 ### Cryptography (`crypto/` directory) — Industry-Standard Primitives

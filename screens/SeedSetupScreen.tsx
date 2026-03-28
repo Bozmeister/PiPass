@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { saveEntry, saveSecureNote } from "../workers/storageWorker";
+import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_ERROR, INPUT_BORDER_FOCUS, INPUT_BORDER_SUCCESS, LABEL_COLOR } from "../styles/inputTheme";
 
 const PROFILES = [
   { label: "Balanced", iterations: 25000, time: "~3s", desc: "Fast unlock", color: "#4CAF50", icon: "flash-outline" as const },
@@ -28,6 +29,7 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
   const [showPassword, setShowPassword] = useState(false);
   const passwordRef = useRef<TextInput>(null);
   const webTopInset = Platform.OS === "web" ? 67 : 0;
+  const [focusedField, setFocusedField] = useState<string | null>(null);
 
   const passwordsMatch = password === confirmPassword;
   const showMismatch = confirmPassword.length > 0 && !passwordsMatch;
@@ -128,22 +130,24 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
             </Text>
           </View>
 
-          <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 6 }}>
+          <Text style={{ color: LABEL_COLOR, fontSize: 12, textTransform: "uppercase" as const, marginBottom: 6 }}>
             Master Password
           </Text>
-          <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "#1a1a1a", borderRadius: 8, marginBottom: 4, borderWidth: 1, borderColor: password.length > 0 ? (passwordStrong ? "#4CAF50" : "#ff4444") : "#333" }}>
+          <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: INPUT_BG, borderRadius: 8, marginBottom: 4, borderWidth: 1, borderColor: password.length > 0 ? (passwordStrong ? INPUT_BORDER_SUCCESS : INPUT_BORDER_ERROR) : (focusedField === "password" ? INPUT_BORDER_FOCUS : INPUT_BORDER) }}>
             <TextInput
               ref={passwordRef}
               value={password}
               onChangeText={setPassword}
               placeholder="Enter master password"
-              placeholderTextColor="#555"
+              placeholderTextColor={INPUT_PLACEHOLDER}
               secureTextEntry={!showPassword}
               autoCapitalize="none"
               autoCorrect={false}
               textContentType="none"
               autoComplete="off"
-              style={{ color: "#fff", fontSize: 18, padding: 16, flex: 1 }}
+              onFocus={() => setFocusedField("password")}
+              onBlur={() => setFocusedField(null)}
+              style={{ color: INPUT_TEXT, fontSize: 18, padding: 16, flex: 1 }}
               testID="password-input"
             />
             <Pressable onPress={() => setShowPassword(!showPassword)} style={{ padding: 16 }}>
@@ -162,28 +166,30 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
           )}
           {!password.length && <View style={{ height: 12, marginBottom: 12 }} />}
 
-          <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 6 }}>
+          <Text style={{ color: LABEL_COLOR, fontSize: 12, textTransform: "uppercase" as const, marginBottom: 6 }}>
             Confirm Password
           </Text>
           <TextInput
             value={confirmPassword}
             onChangeText={setConfirmPassword}
             placeholder="Re-enter master password"
-            placeholderTextColor="#555"
+            placeholderTextColor={INPUT_PLACEHOLDER}
             secureTextEntry={!showPassword}
             autoCapitalize="none"
             autoCorrect={false}
             textContentType="none"
             autoComplete="off"
+            onFocus={() => setFocusedField("confirm")}
+            onBlur={() => setFocusedField(null)}
             style={{
-              color: "#fff",
+              color: INPUT_TEXT,
               fontSize: 18,
-              backgroundColor: "#1a1a1a",
+              backgroundColor: INPUT_BG,
               borderRadius: 8,
               padding: 16,
               marginBottom: showMismatch ? 4 : 16,
               borderWidth: 1,
-              borderColor: showMismatch ? "#ff4444" : confirmPassword.length > 0 && passwordsMatch ? "#4CAF50" : "#333",
+              borderColor: showMismatch ? INPUT_BORDER_ERROR : confirmPassword.length > 0 && passwordsMatch ? INPUT_BORDER_SUCCESS : (focusedField === "confirm" ? INPUT_BORDER_FOCUS : INPUT_BORDER),
             }}
             testID="confirm-password-input"
           />

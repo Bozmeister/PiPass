@@ -4,6 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { generateSecurePassword } from "../crypto/generateSecurePassword";
 import { sanitizeInput } from "../utils/watchman";
+import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_ERROR, INPUT_BORDER_FOCUS, LABEL_COLOR } from "../styles/inputTheme";
 
 interface AddEntryModalProps {
   visible: boolean;
@@ -27,6 +28,7 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [showGenerated, setShowGenerated] = useState(false);
+  const [focusedField, setFocusedField] = useState<string | null>(null);
 
   function handleGeneratePassword() {
     const strong = generateSecurePassword(16);
@@ -78,6 +80,12 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
     }
   }
 
+  function borderColor(field: string, hasError?: boolean) {
+    if (hasError) return INPUT_BORDER_ERROR;
+    if (focusedField === field) return INPUT_BORDER_FOCUS;
+    return INPUT_BORDER;
+  }
+
   return (
     <Modal visible={visible} animationType="slide" transparent>
       <KeyboardAvoidingView
@@ -100,31 +108,35 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
             </View>
 
             <ScrollView style={{ padding: 16 }} contentContainerStyle={{ paddingBottom: insets.bottom + (Platform.OS === "web" ? 34 : 0) + 16 }} keyboardShouldPersistTaps="handled">
-              <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Title *</Text>
+              <Text style={{ color: LABEL_COLOR, fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Title *</Text>
               <TextInput
                 value={title}
                 onChangeText={(t) => setTitle(sanitizeInput(t, "title"))}
                 placeholder="e.g. Gmail"
-                placeholderTextColor="#555"
+                placeholderTextColor={INPUT_PLACEHOLDER}
                 autoCorrect={false}
-                style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16 }}
+                onFocus={() => setFocusedField("title")}
+                onBlur={() => setFocusedField(null)}
+                style={{ color: INPUT_TEXT, fontSize: 16, backgroundColor: INPUT_BG, borderRadius: 8, padding: 12, marginBottom: 16, borderWidth: 1, borderColor: borderColor("title") }}
                 testID="title-input"
               />
 
-              <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Username *</Text>
+              <Text style={{ color: LABEL_COLOR, fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Username *</Text>
               <TextInput
                 value={username}
                 onChangeText={(t) => setUsername(sanitizeInput(t, "username"))}
                 placeholder="e.g. user@email.com"
-                placeholderTextColor="#555"
+                placeholderTextColor={INPUT_PLACEHOLDER}
                 autoCapitalize="none"
                 autoCorrect={false}
-                style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16 }}
+                onFocus={() => setFocusedField("username")}
+                onBlur={() => setFocusedField(null)}
+                style={{ color: INPUT_TEXT, fontSize: 16, backgroundColor: INPUT_BG, borderRadius: 8, padding: 12, marginBottom: 16, borderWidth: 1, borderColor: borderColor("username") }}
                 testID="username-input"
               />
 
               <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" }}>Password *</Text>
+                <Text style={{ color: LABEL_COLOR, fontSize: 12, textTransform: "uppercase" }}>Password *</Text>
                 <Pressable onPress={handleGeneratePassword} testID="generate-password-button">
                   <View style={{ flexDirection: "row", alignItems: "center" }}>
                     <Ionicons name="key-outline" size={14} color="#4CAF50" />
@@ -136,13 +148,15 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
                 value={password}
                 onChangeText={(t) => { setPassword(sanitizeInput(t, "password")); setShowGenerated(false); }}
                 placeholder="Enter password"
-                placeholderTextColor="#555"
+                placeholderTextColor={INPUT_PLACEHOLDER}
                 secureTextEntry={!showGenerated}
                 autoCapitalize="none"
                 autoCorrect={false}
                 textContentType="none"
                 autoComplete="off"
-                style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: showGenerated ? 4 : 16 }}
+                onFocus={() => setFocusedField("password")}
+                onBlur={() => setFocusedField(null)}
+                style={{ color: INPUT_TEXT, fontSize: 16, backgroundColor: INPUT_BG, borderRadius: 8, padding: 12, marginBottom: showGenerated ? 4 : 16, borderWidth: 1, borderColor: borderColor("password") }}
                 testID="password-input"
               />
               {showGenerated && (
@@ -151,26 +165,28 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
                 </Text>
               )}
 
-              <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Confirm Password *</Text>
+              <Text style={{ color: LABEL_COLOR, fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Confirm Password *</Text>
               <TextInput
                 value={confirmPassword}
                 onChangeText={(t) => { setConfirmPassword(sanitizeInput(t, "password")); setShowGenerated(false); }}
                 placeholder="Re-enter password"
-                placeholderTextColor="#555"
+                placeholderTextColor={INPUT_PLACEHOLDER}
                 secureTextEntry={!showGenerated}
                 autoCapitalize="none"
                 autoCorrect={false}
                 textContentType="none"
                 autoComplete="off"
+                onFocus={() => setFocusedField("confirm")}
+                onBlur={() => setFocusedField(null)}
                 style={{
-                  color: "#fff",
+                  color: INPUT_TEXT,
                   fontSize: 16,
-                  backgroundColor: "#1a1a1a",
+                  backgroundColor: INPUT_BG,
                   borderRadius: 8,
                   padding: 12,
                   marginBottom: showMismatch ? 4 : 16,
-                  borderWidth: showMismatch ? 1 : 0,
-                  borderColor: showMismatch ? "#ff4444" : "transparent",
+                  borderWidth: 1,
+                  borderColor: borderColor("confirm", showMismatch),
                 }}
                 testID="confirm-password-input"
               />
@@ -180,28 +196,32 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
                 </Text>
               )}
 
-              <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>URL</Text>
+              <Text style={{ color: LABEL_COLOR, fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>URL</Text>
               <TextInput
                 value={url}
                 onChangeText={(t) => setUrl(sanitizeInput(t, "url"))}
                 placeholder="e.g. https://gmail.com"
-                placeholderTextColor="#555"
+                placeholderTextColor={INPUT_PLACEHOLDER}
                 autoCapitalize="none"
                 autoCorrect={false}
                 keyboardType="url"
-                style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16 }}
+                onFocus={() => setFocusedField("url")}
+                onBlur={() => setFocusedField(null)}
+                style={{ color: INPUT_TEXT, fontSize: 16, backgroundColor: INPUT_BG, borderRadius: 8, padding: 12, marginBottom: 16, borderWidth: 1, borderColor: borderColor("url") }}
               />
 
-              <Text style={{ color: "#888", fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Notes</Text>
+              <Text style={{ color: LABEL_COLOR, fontSize: 12, marginBottom: 6, textTransform: "uppercase" }}>Notes</Text>
               <TextInput
                 value={notes}
                 onChangeText={(t) => setNotes(sanitizeInput(t, "notes"))}
                 placeholder="Optional notes"
-                placeholderTextColor="#555"
+                placeholderTextColor={INPUT_PLACEHOLDER}
                 autoCorrect={false}
                 multiline
                 numberOfLines={3}
-                style={{ color: "#fff", fontSize: 16, backgroundColor: "#1a1a1a", borderRadius: 8, padding: 12, marginBottom: 16, minHeight: 80, textAlignVertical: "top" }}
+                onFocus={() => setFocusedField("notes")}
+                onBlur={() => setFocusedField(null)}
+                style={{ color: INPUT_TEXT, fontSize: 16, backgroundColor: INPUT_BG, borderRadius: 8, padding: 12, marginBottom: 16, minHeight: 80, textAlignVertical: "top", borderWidth: 1, borderColor: borderColor("notes") }}
               />
             </ScrollView>
           </View>
