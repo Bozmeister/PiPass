@@ -50,7 +50,7 @@ import KeyprintViewer from "../components/KeyprintViewer";
 import FaviconImage from "../components/FaviconImage";
 import NuclearResetModal from "../components/NuclearResetModal";
 
-const AUTO_LOCK_MS = 60000;
+const AUTO_LOCK_MS = 120000;
 
 const PROFILES = [
   { label: "Balanced", iterations: 25000, time: "~3s", desc: "Fast unlock", color: "#4CAF50", icon: "flash-outline" as const },
@@ -59,8 +59,9 @@ const PROFILES = [
 ];
 
 interface VaultScreenProps {
-  keyShares: KeyShares;
+  keyShares: KeyShares | null;
   iterations: number;
+  locked?: boolean;
   onLock: () => void;
   onIterationsChange: (iterations: number) => void;
   onReset: () => void;
@@ -74,11 +75,11 @@ function deriveVisualSeedFromHkdf(shares: KeyShares): { seedNumber: number; fing
   return result;
 }
 
-export default function VaultScreen({ keyShares, iterations, onLock, onIterationsChange, onReset }: VaultScreenProps) {
+export default function VaultScreen({ keyShares, iterations, locked = false, onLock, onIterationsChange, onReset }: VaultScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [entries, setEntries] = useState<VaultEntry[]>([]);
-  const keySharesRef = useRef<KeyShares>(keyShares);
+  const keySharesRef = useRef<KeyShares | null>(keyShares);
   const isBiometricActive = useRef(false);
 
   const [loading, setLoading] = useState(true);
@@ -104,7 +105,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const selectTokenRef = useRef<number>(0);
 
-  const initialFractal = useRef(deriveVisualSeedFromHkdf(keyShares)).current;
+  const initialFractal = useRef(keyShares ? deriveVisualSeedFromHkdf(keyShares) : { seedNumber: 0, fingerprint: "", fractalParams: { cx: -0.7, cy: 0, zoom: 1, maxIterations: 100 } }).current;
   const [fractalSeedNumber, setFractalSeedNumber] = useState(initialFractal.seedNumber);
   const [fractalFingerprint, setFractalFingerprint] = useState(initialFractal.fingerprint);
   const [fractalParams, setFractalParams] = useState<FractalParams>(initialFractal.fractalParams);
@@ -116,6 +117,21 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   }, [keyShares]);
 
   useEffect(() => {
+    if (locked) {
+      setSelectedEntry(null);
+      setDecryptedEntry(null);
+      setDecrypting(false);
+      setShowSettings(false);
+      setShowSecureNotes(false);
+      setShowKeyprintViewer(false);
+      setShowNuclearReset(false);
+      setPendingProfileIterations(null);
+      setProfilePassword("");
+      selectTokenRef.current++;
+    }
+  }, [locked]);
+
+  useEffect(() => {
     verifyFractalFingerprint(fractalFingerprint);
   }, []);
 
@@ -124,6 +140,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   }
 
   function getLegacyFingerprint(): string {
+    if (!keySharesRef.current) return "";
     const keyHex = combineShares(keySharesRef.current);
     const legacy = deriveFractalSeedLegacy(keyHex);
     const kb = hexToBytes(keyHex);
@@ -196,10 +213,19 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
     return () => { if (Platform.OS !== "web") ScreenCapture.allowScreenCaptureAsync(); };
   }, []);
 
+  const lockedRef = useRef(locked);
+  useEffect(() => { lockedRef.current = locked; }, [locked]);
+
+  useEffect(() => {
+    if (!locked) {
+      lastActivityRef.current = Date.now();
+    }
+  }, [locked]);
+
   useEffect(() => {
     loadVault();
     const appStateSub = AppState.addEventListener("change", (state) => {
-      if ((state === "background" || state === "inactive") && !isBiometricActive.current) {
+      if ((state === "background" || state === "inactive") && !isBiometricActive.current && !lockedRef.current) {
         onLock();
       }
     });
@@ -209,7 +235,9 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
     };
   }, []);
 
-  function resetActivity() { lastActivityRef.current = Date.now(); }
+  function resetActivity() {
+    if (!lockedRef.current) lastActivityRef.current = Date.now();
+  }
 
   async function loadVault() {
     try {
@@ -222,7 +250,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
       const notes = await getAllSecureNotes();
       setSecureNotes(notes);
 
-      if (stored.length > 0) {
+      if (stored.length > 0 && keySharesRef.current) {
         try {
           decryptVaultEntry(stored[0], keySharesRef.current);
         } catch {
@@ -242,12 +270,12 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
     resetActivity();
 
     autoLockTimerRef.current = setInterval(() => {
-      if (Date.now() - lastActivityRef.current > AUTO_LOCK_MS) onLock();
+      if (!lockedRef.current && Date.now() - lastActivityRef.current > AUTO_LOCK_MS) onLock();
     }, 5000);
   }
 
   async function handleAddEntry(entry: any) {
-    if (!keySharesRef.current) return;
+    if (!keySharesRef.current || lockedRef.current) return;
 
     const { sanitized, ok, error } = sanitizeEntryFields(entry);
     if (!ok) {
@@ -263,7 +291,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   }
 
   async function handleSelectEntry(entry: VaultEntry) {
-    if (!keySharesRef.current) return;
+    if (!keySharesRef.current || lockedRef.current) return;
     const token = ++selectTokenRef.current;
     setDecrypting(true);
     setSelectedEntry(entry);
@@ -419,7 +447,11 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: "#000" }}>
+    <View
+      style={{ flex: 1, backgroundColor: "#000" }}
+      onTouchStart={resetActivity}
+      onTouchMove={resetActivity}
+    >
       <View style={{ paddingTop: insets.top + webTopInset, padding: 16, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
         <Text style={{ color: "#fff", fontSize: 28, fontWeight: "bold" as const }}>Vault</Text>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 20 }}>
@@ -471,7 +503,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
         }
       />
 
-      <AddEntryModal visible={showAddModal} onClose={() => setShowAddModal(false)} onSave={handleAddEntry} />
+      <AddEntryModal visible={showAddModal} onClose={() => setShowAddModal(false)} onSave={handleAddEntry} onActivity={resetActivity} />
 
       {selectedEntry && decryptedEntry && (
         <EntryDetailModal
@@ -483,6 +515,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
           fractalParams={fractalParams}
           onClose={handleCloseDetail}
           onDelete={() => handleDeleteEntry(selectedEntry.id)}
+          onActivity={resetActivity}
         />
       )}
 

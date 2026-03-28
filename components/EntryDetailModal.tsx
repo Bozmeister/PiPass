@@ -19,6 +19,7 @@ interface EntryDetailModalProps {
   fractalParams?: FractalParams;
   onClose: () => void;
   onDelete: () => void;
+  onActivity?: () => void;
 }
 
 export default function EntryDetailModal({
@@ -30,6 +31,7 @@ export default function EntryDetailModal({
   fractalParams,
   onClose,
   onDelete,
+  onActivity,
 }: EntryDetailModalProps) {
   const insets = useSafeAreaInsets();
   const [showPassword, setShowPassword] = useState(false);
@@ -66,7 +68,7 @@ export default function EntryDetailModal({
 
   return (
     <Modal visible={visible} animationType="slide" transparent>
-      <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
+      <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }} onTouchStart={onActivity} onTouchMove={onActivity}>
         <View style={{ backgroundColor: "#111", borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: "80%", overflow: "hidden" }}>
           <FractalBackground
             seed={visualSeed}

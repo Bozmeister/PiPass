@@ -16,9 +16,10 @@ interface AddEntryModalProps {
     url?: string;
     notes?: string;
   }) => Promise<void>;
+  onActivity?: () => void;
 }
 
-export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModalProps) {
+export default function AddEntryModal({ visible, onClose, onSave, onActivity }: AddEntryModalProps) {
   const insets = useSafeAreaInsets();
   const [title, setTitle] = useState("");
   const [username, setUsername] = useState("");
@@ -93,7 +94,7 @@ export default function AddEntryModal({ visible, onClose, onSave }: AddEntryModa
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={0}
       >
-        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }} onTouchStart={onActivity} onTouchMove={onActivity}>
           <View style={{ backgroundColor: "#111", borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: "90%" }}>
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 16, borderBottomWidth: 1, borderBottomColor: "#222" }}>
               <Pressable onPress={onClose}>

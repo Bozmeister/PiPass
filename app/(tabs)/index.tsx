@@ -45,6 +45,8 @@ export default function HomeScreen() {
   const [pendingRecoveryKey, setPendingRecoveryKey] = useState<string | null>(null);
   const [pendingRecoveryRawHex, setPendingRecoveryRawHex] = useState<string>("");
   const [pendingSetupShares, setPendingSetupShares] = useState<KeyShares | null>(null);
+  const [vaultLocked, setVaultLocked] = useState(false);
+  const lockedSharesRef = useRef<KeyShares | null>(null);
   const keySharesRef = useRef<KeyShares | null>(null);
 
   useEffect(() => {
@@ -154,7 +156,7 @@ export default function HomeScreen() {
     );
   }
 
-  if (!keyShares) {
+  if (!keyShares && !vaultLocked) {
     return (
       <UnlockScreen
         salt={masterSalt!}
@@ -169,26 +171,61 @@ export default function HomeScreen() {
   }
 
   return (
-    <VaultScreen
-      keyShares={keyShares}
-      iterations={iterations}
-      onLock={() => {
-        if (keyShares) wipeShares(keyShares);
-        setKeyShares(null);
-        setAuthenticated(false);
-      }}
-      onIterationsChange={async (iters) => {
-        const validIters = Math.max(iters || 100000, 3);
-        await saveSecurityProfile(validIters);
-        setIterations(validIters);
-      }}
-      onReset={() => {
-        if (keyShares) wipeShares(keyShares);
-        setKeyShares(null);
-        setVaultExists(false);
-        setAuthenticated(false);
-      }}
-    />
+    <>
+      {(keyShares || vaultLocked) && (
+        <VaultScreen
+          keyShares={keyShares}
+          iterations={iterations}
+          locked={vaultLocked}
+          onLock={() => {
+            if (keyShares) {
+              lockedSharesRef.current = keyShares;
+            }
+            setKeyShares(null);
+            setVaultLocked(true);
+          }}
+          onIterationsChange={async (iters) => {
+            const validIters = Math.max(iters || 100000, 3);
+            await saveSecurityProfile(validIters);
+            setIterations(validIters);
+          }}
+          onReset={() => {
+            lockedSharesRef.current = null;
+            if (keyShares) wipeShares(keyShares);
+            setKeyShares(null);
+            setVaultLocked(false);
+            setVaultExists(false);
+            setAuthenticated(false);
+          }}
+        />
+      )}
+      {vaultLocked && (
+        <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 100 }}>
+          <UnlockScreen
+            salt={masterSalt!}
+            iterations={iterations}
+            onUnlocked={(newShares) => {
+              if (lockedSharesRef.current) {
+                wipeShares(lockedSharesRef.current);
+                lockedSharesRef.current = null;
+              }
+              setKeyShares(newShares);
+              setVaultLocked(false);
+            }}
+            onReset={() => {
+              if (lockedSharesRef.current) {
+                wipeShares(lockedSharesRef.current);
+                lockedSharesRef.current = null;
+              }
+              setKeyShares(null);
+              setVaultLocked(false);
+              setVaultExists(false);
+              setAuthenticated(false);
+            }}
+          />
+        </View>
+      )}
+    </>
   );
 }
 
