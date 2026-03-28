@@ -6,16 +6,9 @@ import * as Clipboard from "expo-clipboard";
 import { VaultEntry, DecryptedVaultEntry } from "../workers/vaultWorker";
 import FractalBackground from "./FractalBackground";
 import FaviconImage from "./FaviconImage";
+import { FractalParams } from "../crypto/hkdf";
 
 const CLIPBOARD_CLEAR_MS = 30000;
-
-function seedToCoords(seed: number) {
-  const s = seed % 999999;
-  const x = ((s * 7919) % 999999) / 999999 * 4.0 - 2.0;
-  const y = ((s * 104729) % 999999) / 999999 * 4.0 - 2.0;
-  const z = Math.pow(10, 1 + ((s * 31) % 100) / 100 * 11);
-  return { x, y, zoomFactor: z };
-}
 
 interface EntryDetailModalProps {
   visible: boolean;
@@ -23,6 +16,7 @@ interface EntryDetailModalProps {
   decryptedEntry: DecryptedVaultEntry | null;
   decrypting: boolean;
   visualSeed: number;
+  fractalParams?: FractalParams;
   onClose: () => void;
   onDelete: () => void;
 }
@@ -33,6 +27,7 @@ export default function EntryDetailModal({
   decryptedEntry,
   decrypting,
   visualSeed,
+  fractalParams,
   onClose,
   onDelete,
 }: EntryDetailModalProps) {
@@ -69,17 +64,13 @@ export default function EntryDetailModal({
   const password = decryptedEntry?.password || "";
   const notes = decryptedEntry?.notes;
 
-  const fractalCoords = useMemo(() => seedToCoords(visualSeed), [visualSeed]);
-
   return (
     <Modal visible={visible} animationType="slide" transparent>
       <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
         <View style={{ backgroundColor: "#111", borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: "80%", overflow: "hidden" }}>
           <FractalBackground
-            centerX={fractalCoords.x}
-            centerY={fractalCoords.y}
-            zoom={fractalCoords.zoomFactor}
             seed={visualSeed}
+            fractalParams={fractalParams}
           />
           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 16, borderBottomWidth: 1, borderBottomColor: "#222" }}>
             <Pressable onPress={onClose}>

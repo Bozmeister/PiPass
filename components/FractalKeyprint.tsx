@@ -1,12 +1,14 @@
 import React, { useEffect, useRef, useMemo } from "react";
 import { View, Animated, Pressable, Image } from "react-native";
 import { generateFractalDataUri } from "../utils/fractalKeyprint";
+import { FractalParams } from "../crypto/hkdf";
 
 interface FractalKeyprintProps {
   seed: number;
   size?: number;
   onPress?: () => void;
   animate?: boolean;
+  fractalParams?: FractalParams;
 }
 
 export default function FractalKeyprint({
@@ -14,6 +16,7 @@ export default function FractalKeyprint({
   size = 96,
   onPress,
   animate = true,
+  fractalParams,
 }: FractalKeyprintProps) {
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
@@ -37,7 +40,7 @@ export default function FractalKeyprint({
     return () => animation.stop();
   }, [animate]);
 
-  const dataUri = useMemo(() => generateFractalDataUri(seed, size * 2, 48, 300), [seed, size]);
+  const dataUri = useMemo(() => generateFractalDataUri(seed, size * 2, 48, 300, fractalParams), [seed, size, fractalParams]);
 
   const imageContent = (
     <Animated.View

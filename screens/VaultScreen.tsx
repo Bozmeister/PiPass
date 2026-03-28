@@ -38,7 +38,7 @@ import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer } from "..
 import { hashMasterKey } from "../crypto/keyDerivation";
 import { requireFreshBiometric } from "../crypto/biometricGate";
 import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
-import { deriveFractalSeed, deriveFractalSeedLegacy } from "../crypto/hkdf";
+import { deriveFractalSeed, deriveFractalSeedLegacy, FractalParams, DEFAULT_FRACTAL_PARAMS } from "../crypto/hkdf";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_FOCUS } from "../styles/inputTheme";
 
 import AddEntryModal from "../components/AddEntryModal";
@@ -64,7 +64,7 @@ interface VaultScreenProps {
   onReset: () => void;
 }
 
-function deriveVisualSeedFromHkdf(shares: KeyShares): { seedNumber: number; fingerprint: string } {
+function deriveVisualSeedFromHkdf(shares: KeyShares): { seedNumber: number; fingerprint: string; fractalParams: FractalParams } {
   const keyHex = combineShares(shares);
   const result = deriveFractalSeed(keyHex);
   const keyBytes = hexToBytes(keyHex);
@@ -104,6 +104,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   const initialFractal = useRef(deriveVisualSeedFromHkdf(keyShares)).current;
   const [fractalSeedNumber, setFractalSeedNumber] = useState(initialFractal.seedNumber);
   const [fractalFingerprint, setFractalFingerprint] = useState(initialFractal.fingerprint);
+  const [fractalParams, setFractalParams] = useState<FractalParams>(initialFractal.fractalParams);
   const visualSeed = fractalSeedNumber;
   const [fractalTampered, setFractalTampered] = useState(false);
 
@@ -161,6 +162,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
     const result = deriveVisualSeedFromHkdf(shares);
     setFractalSeedNumber(result.seedNumber);
     setFractalFingerprint(result.fingerprint);
+    setFractalParams(result.fractalParams);
     return result;
   }
 
@@ -352,7 +354,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   const renderItem = ({ item }: { item: VaultEntry }) => (
     <Pressable onPress={() => handleSelectEntry(item)} style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#222", flexDirection: "row", alignItems: "center" }}>
       {showKeyprints ? (
-        <FractalKeyprint seed={visualSeed} size={44} animate={false} />
+        <FractalKeyprint seed={visualSeed} size={44} animate={false} fractalParams={fractalParams} />
       ) : (
         <FaviconImage url={item.url} size={32} />
       )}
@@ -366,7 +368,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   if (loading) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
-        <FractalKeyprint seed={visualSeed} size={200} />
+        <FractalKeyprint seed={visualSeed} size={200} fractalParams={fractalParams} />
         <ActivityIndicator size="large" color="#4CAF50" style={{ marginTop: 30 }} />
         <Text style={{ color: "#fff", fontSize: 20, marginTop: 20 }}>Loading Vault...</Text>
       </View>
@@ -420,7 +422,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
         renderItem={renderItem}
         ListEmptyComponent={
           <View style={{ flex: 1, justifyContent: "center", alignItems: "center", marginTop: 100 }}>
-            <FractalKeyprint seed={visualSeed} size={150} animate={true} />
+            <FractalKeyprint seed={visualSeed} size={150} animate={true} fractalParams={fractalParams} />
             <Text style={{ color: "#888", fontSize: 18, marginTop: 30 }}>Empty vault — add something!</Text>
           </View>
         }
@@ -435,6 +437,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
           decryptedEntry={decryptedEntry}
           decrypting={decrypting}
           visualSeed={visualSeed}
+          fractalParams={fractalParams}
           onClose={handleCloseDetail}
           onDelete={() => handleDeleteEntry(selectedEntry.id)}
         />
@@ -452,7 +455,7 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
         onActivity={resetActivity}
       />
 
-      <KeyprintViewer visible={showKeyprintViewer} seed={visualSeed} onClose={() => setShowKeyprintViewer(false)} />
+      <KeyprintViewer visible={showKeyprintViewer} seed={visualSeed} fractalParams={fractalParams} onClose={() => setShowKeyprintViewer(false)} />
 
       <Modal visible={showSettings} animationType="slide" transparent>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.9)", justifyContent: "flex-end" }}>

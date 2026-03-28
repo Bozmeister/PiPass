@@ -14,16 +14,19 @@ import {
   generateFractalDataUri,
   getGridPointData,
 } from "../utils/fractalKeyprint";
+import { FractalParams } from "../crypto/hkdf";
 
 interface KeyprintViewerProps {
   visible: boolean;
   seed: number;
+  fractalParams?: FractalParams;
   onClose: () => void;
 }
 
 export default function KeyprintViewer({
   visible,
   seed,
+  fractalParams,
   onClose,
 }: KeyprintViewerProps) {
   const insets = useSafeAreaInsets();
@@ -31,8 +34,8 @@ export default function KeyprintViewer({
   const webBottomInset = Platform.OS === "web" ? 34 : 0;
 
   const fractalUri = useMemo(
-    () => (visible ? generateFractalDataUri(seed, 600, 96, 500) : ""),
-    [visible, seed]
+    () => (visible ? generateFractalDataUri(seed, 600, 96, 500, fractalParams) : ""),
+    [visible, seed, fractalParams]
   );
 
   const gridData = useMemo(

@@ -1,4 +1,5 @@
 import { extractPiDigits, mapDigitsToCoordinates } from "./pi";
+import { FractalParams } from "../crypto/hkdf";
 
 const THUMBNAIL_RESOLUTION = 48;
 const THUMBNAIL_MAX_ITER = 300;
@@ -54,11 +55,22 @@ function escapeToColor(t: number, maxIter: number): string {
 export function computeFractalGrid(
   piSeed: number,
   resolution: number = THUMBNAIL_RESOLUTION,
-  maxIter: number = THUMBNAIL_MAX_ITER
+  maxIter: number = THUMBNAIL_MAX_ITER,
+  fractalParams?: FractalParams
 ): FractalGridData {
-  const digits30 = extractPiDigits(piSeed, 30);
-  const coords = mapDigitsToCoordinates(digits30);
-  const { x: centerX, y: centerY, zoomFactor } = coords;
+  let centerX: number, centerY: number, zoomFactor: number;
+  if (fractalParams) {
+    centerX = fractalParams.cx;
+    centerY = fractalParams.cy;
+    zoomFactor = fractalParams.zoom;
+    maxIter = fractalParams.maxIterations;
+  } else {
+    const digits30 = extractPiDigits(piSeed, 30);
+    const coords = mapDigitsToCoordinates(digits30);
+    centerX = coords.x;
+    centerY = coords.y;
+    zoomFactor = coords.zoomFactor;
+  }
 
   const viewSize = 4.0 / Math.pow(zoomFactor, 0.15);
   const step = viewSize / resolution;
@@ -83,9 +95,10 @@ export function generateFractalSvg(
   piSeed: number,
   size: number = 96,
   resolution: number = THUMBNAIL_RESOLUTION,
-  maxIter: number = THUMBNAIL_MAX_ITER
+  maxIter: number = THUMBNAIL_MAX_ITER,
+  fractalParams?: FractalParams
 ): string {
-  const grid = computeFractalGrid(piSeed, resolution, maxIter);
+  const grid = computeFractalGrid(piSeed, resolution, maxIter, fractalParams);
   const cellSize = size / resolution;
 
   let rects = "";
@@ -105,9 +118,10 @@ export function generateFractalDataUri(
   piSeed: number,
   size: number = 96,
   resolution: number = THUMBNAIL_RESOLUTION,
-  maxIter: number = THUMBNAIL_MAX_ITER
+  maxIter: number = THUMBNAIL_MAX_ITER,
+  fractalParams?: FractalParams
 ): string {
-  const svg = generateFractalSvg(piSeed, size, resolution, maxIter);
+  const svg = generateFractalSvg(piSeed, size, resolution, maxIter, fractalParams);
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 

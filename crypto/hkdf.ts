@@ -71,6 +71,13 @@ export interface FractalParams {
   maxIterations: number;
 }
 
+export const DEFAULT_FRACTAL_PARAMS: FractalParams = {
+  cx: -0.75,
+  cy: 0,
+  zoom: 1,
+  maxIterations: 300,
+};
+
 export function deriveFractalSeedLegacy(masterKeyHex: string): { fingerprint: string } {
   const legacySalt = "00".repeat(16);
   const prk = hkdfExtract(legacySalt, masterKeyHex);
