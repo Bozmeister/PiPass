@@ -6,12 +6,12 @@ import {
   Pressable,
   ScrollView,
   Platform,
-  Image,
 } from "react-native";
+import { SvgXml } from "react-native-svg";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
-  generateFractalDataUri,
+  generateFractalSvg,
   getGridPointData,
 } from "../utils/fractalKeyprint";
 import { FractalParams } from "../crypto/hkdf";
@@ -33,8 +33,8 @@ export default function KeyprintViewer({
   const webTopInset = Platform.OS === "web" ? 67 : 0;
   const webBottomInset = Platform.OS === "web" ? 34 : 0;
 
-  const fractalUri = useMemo(
-    () => (visible ? generateFractalDataUri(seed, 600, 96, 500, fractalParams) : ""),
+  const fractalSvg = useMemo(
+    () => (visible ? generateFractalSvg(seed, 280, 96, 500, fractalParams) : ""),
     [visible, seed, fractalParams]
   );
 
@@ -80,11 +80,7 @@ export default function KeyprintViewer({
               marginBottom: 20,
             }}
           >
-            <Image
-              source={{ uri: fractalUri }}
-              style={{ width: 280, height: 280 }}
-              resizeMode="cover"
-            />
+            <SvgXml xml={fractalSvg} width={280} height={280} />
             <View
               style={{
                 position: "absolute",

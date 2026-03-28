@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useMemo } from "react";
-import { View, Animated, Pressable, Image } from "react-native";
-import { generateFractalDataUri } from "../utils/fractalKeyprint";
+import { View, Animated, Pressable } from "react-native";
+import { SvgXml } from "react-native-svg";
+import { generateFractalSvg } from "../utils/fractalKeyprint";
 import { FractalParams } from "../crypto/hkdf";
 
 interface FractalKeyprintProps {
@@ -40,7 +41,7 @@ export default function FractalKeyprint({
     return () => animation.stop();
   }, [animate]);
 
-  const dataUri = useMemo(() => generateFractalDataUri(seed, size * 2, 48, 300, fractalParams), [seed, size, fractalParams]);
+  const svgXml = useMemo(() => generateFractalSvg(seed, size, 48, 300, fractalParams), [seed, size, fractalParams]);
 
   const imageContent = (
     <Animated.View
@@ -59,11 +60,7 @@ export default function FractalKeyprint({
         elevation: 10,
       }}
     >
-      <Image
-        source={{ uri: dataUri }}
-        style={{ width: size, height: size }}
-        resizeMode="cover"
-      />
+      <SvgXml xml={svgXml} width={size} height={size} />
       <View
         style={{
           position: "absolute",
