@@ -1,6 +1,6 @@
 import * as ExpoCrypto from "expo-crypto";
 import CryptoJS from "crypto-js";
-import { hexToBytes } from "./secureMemory";
+import { hexToBytes, wipeBuffer } from "./secureMemory";
 
 // AES-256-GCM is not natively available in crypto-js or expo-crypto in Expo Go.
 // We implement AES-256-CBC with HMAC-SHA256 for authenticated encryption (Encrypt-then-MAC).
@@ -18,6 +18,8 @@ function constantTimeEqual(a: string, b: string): boolean {
   for (let i = 0; i < aBytes.length; i++) {
     diff |= aBytes[i] ^ bBytes[i];
   }
+  wipeBuffer(aBytes);
+  wipeBuffer(bBytes);
   return diff === 0;
 }
 
@@ -30,6 +32,7 @@ export function encryptData(plaintext: string, keyHex: string): string {
   const ivHex = Array.from(ivBytes)
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+  wipeBuffer(ivBytes);
   const iv = CryptoJS.enc.Hex.parse(ivHex);
   const key = CryptoJS.enc.Hex.parse(keyHex);
 

@@ -2,6 +2,7 @@ import CryptoJS from "crypto-js";
 import * as ExpoCrypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import { Platform } from "react-native";
+import { wipeBuffer } from "./secureMemory";
 
 // Key derivation using industry-standard PBKDF2-SHA256.
 // Argon2id is attempted first (if WebAssembly is available), with PBKDF2 as fallback.
@@ -101,8 +102,9 @@ export async function deriveMasterKey(
         }
       }
 
+      const passwordBytes = new TextEncoder().encode(material);
       const keyBytes = await argon2({
-        password: new TextEncoder().encode(material),
+        password: passwordBytes,
         salt,
         iterations: timeCost,
         memorySize,
@@ -110,10 +112,15 @@ export async function deriveMasterKey(
         hashLength: 32,
         outputType: "binary" as const,
       });
-      return Array.from(keyBytes)
+      const result = Array.from(keyBytes)
         .map((b: number) => b.toString(16).padStart(2, "0"))
         .join("");
+      wipeBuffer(keyBytes);
+      wipeBuffer(passwordBytes);
+      wipeBuffer(salt);
+      return result;
     } catch {
+      wipeBuffer(salt);
       // Fall through to PBKDF2
     }
   }
