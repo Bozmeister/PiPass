@@ -258,11 +258,16 @@ export function reEncryptSecureNote(
 }
 
 function generateId(): string {
-  const bytes = ExpoCrypto.getRandomBytes(15);
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const maxValid = 256 - (256 % chars.length);
   let result = "";
-  for (let i = 0; i < 15; i++) {
-    result += chars.charAt(bytes[i] % chars.length);
+  while (result.length < 15) {
+    const bytes = ExpoCrypto.getRandomBytes(20);
+    for (let i = 0; i < bytes.length && result.length < 15; i++) {
+      if (bytes[i] < maxValid) {
+        result += chars.charAt(bytes[i] % chars.length);
+      }
+    }
   }
   return result;
 }

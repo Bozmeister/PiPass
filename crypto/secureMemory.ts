@@ -7,19 +7,11 @@ export function wipeBuffer(buffer: Uint8Array): void {
 }
 
 export function stringToBytes(str: string): Uint8Array {
-  const bytes = new Uint8Array(str.length);
-  for (let i = 0; i < str.length; i++) {
-    bytes[i] = str.charCodeAt(i);
-  }
-  return bytes;
+  return new TextEncoder().encode(str);
 }
 
 export function bytesToString(bytes: Uint8Array): string {
-  let str = "";
-  for (let i = 0; i < bytes.length; i++) {
-    str += String.fromCharCode(bytes[i]);
-  }
-  return str;
+  return new TextDecoder().decode(bytes);
 }
 
 export function hexToBytes(hex: string): Uint8Array {

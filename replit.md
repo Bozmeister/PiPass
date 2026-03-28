@@ -33,12 +33,14 @@ Preferred communication style: Simple, everyday language.
    - All iteration parameters guarded with `Math.max(iterations || 100000, 3)`
 
 2. **HKDF Subkeys** (`hkdf.ts`):
+   - RFC 5869-compliant HKDF-SHA256: expand step operates on raw byte WordArrays (`T(n-1) || info || counter`)
    - `deriveSubkey(masterKey, salt, info)`: HKDF-SHA256 for per-entry key derivation
    - `deriveEntryKey(keyShares, entryId)`: Per-entry keys from master key + entry ID
    - `generateSaltHex()`: Random salt generation
 
 3. **AES-256-CBC Encryption** (`encryption.ts`):
    - Encrypt-then-MAC: Format is `ivHex:cipherHex:macHex` (3-part)
+   - Constant-time MAC comparison to prevent timing attacks
    - Legacy 2-part format (`ivHex:cipherHex`) still decryptable for backward compatibility
    - Random IVs per encryption via expo-crypto
 
@@ -46,6 +48,7 @@ Preferred communication style: Simple, everyday language.
    - `wipeBuffer()`: Zeroes out Uint8Array buffers immediately after use
    - `splitKeyIntoShares()`: Splits key into two XOR shares (ShareA ⊕ ShareB = Key)
    - `combineShares()`: Recombines at moment of use, wiped after
+   - `stringToBytes()`/`bytesToString()`: UTF-8 aware via TextEncoder/TextDecoder
    - All sensitive data uses Uint8Array for controlled memory allocation
 
 5. **Biometric Gate** (`biometricGate.ts`):
@@ -73,7 +76,15 @@ Preferred communication style: Simple, everyday language.
   - `GET /api/vault/fetch` — Download encrypted vault blob
   - `GET /api/health` — Health check
 - **Storage** (`server/storage.ts`): In-memory storage (MemStorage) with User and VaultBlob maps
-- **Security**: Timing-safe auth hash comparison, server never sees plaintext passwords or vault data
+- **Security**:
+  - Timing-safe auth hash comparison via `node:crypto` `timingSafeEqual`
+  - AuthHash stored as SHA-256 hash server-side (not raw), mitigating pass-the-hash if DB leaks
+  - Rate limiting on all auth endpoints (10 requests/minute per IP)
+  - Username enumeration prevented: salt endpoint returns dummy salt/iterations for non-existent users
+  - Error handlers never log error objects/stack traces to prevent information leakage
+  - Request logging omits response bodies
+  - Rate limit map auto-cleaned every 5 minutes to prevent memory leaks
+  - Server never sees plaintext passwords or vault data
 - **CORS**: Configured for Replit dev/deployment domains and localhost
 - **IMPORTANT**: Server files must use `node:crypto` (not `crypto`) to avoid resolving to the local `crypto/` directory
 

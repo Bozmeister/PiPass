@@ -1,5 +1,6 @@
 import * as ExpoCrypto from "expo-crypto";
 import CryptoJS from "crypto-js";
+import { hexToBytes } from "./secureMemory";
 
 // AES-256-GCM is not natively available in crypto-js or expo-crypto in Expo Go.
 // We implement AES-256-CBC with HMAC-SHA256 for authenticated encryption (Encrypt-then-MAC).
@@ -8,6 +9,17 @@ import CryptoJS from "crypto-js";
 
 const IV_BYTES = 16;
 const MAC_KEY_OFFSET = "hmac-subkey";
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  const aBytes = hexToBytes(a);
+  const bBytes = hexToBytes(b);
+  let diff = 0;
+  for (let i = 0; i < aBytes.length; i++) {
+    diff |= aBytes[i] ^ bBytes[i];
+  }
+  return diff === 0;
+}
 
 function deriveHmacKey(encKey: string): string {
   return CryptoJS.HmacSHA256(MAC_KEY_OFFSET, encKey).toString(CryptoJS.enc.Hex);
@@ -54,7 +66,7 @@ export function decryptData(ciphertext: string, keyHex: string): string {
   const hmacKey = deriveHmacKey(keyHex);
   const expectedMac = CryptoJS.HmacSHA256(ivHex + encHex, hmacKey).toString(CryptoJS.enc.Hex);
 
-  if (mac !== expectedMac) {
+  if (!constantTimeEqual(mac, expectedMac)) {
     throw new Error("Authentication failed — data may be tampered");
   }
 

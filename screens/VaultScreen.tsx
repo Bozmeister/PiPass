@@ -33,7 +33,7 @@ import {
   saveMasterKeyHash,
 } from "../workers/storageWorker";
 
-import { KeyShares, wipeShares, combineShares } from "../crypto/secureMemory";
+import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer } from "../crypto/secureMemory";
 import { hashMasterKey } from "../crypto/keyDerivation";
 import { requireFreshBiometric } from "../crypto/biometricGate";
 import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
@@ -63,6 +63,8 @@ interface VaultScreenProps {
 function deriveVisualSeed(shares: KeyShares): number {
   const keyHex = combineShares(shares);
   const hash = CryptoJS.SHA256(keyHex).toString(CryptoJS.enc.Hex);
+  const keyBytes = hexToBytes(keyHex);
+  wipeBuffer(keyBytes);
   const seedStr = hash.slice(0, 8);
   return parseInt(seedStr, 16) % 999999;
 }

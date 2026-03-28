@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "node:http";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
 import { storage } from "./storage";
 import { validateRegister, validateLogin, validateVaultSync } from "./validation";
 
@@ -8,10 +8,48 @@ function hashForComparison(value: string): Buffer {
   return createHash("sha256").update(value).digest();
 }
 
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 10;
+
+function isRateLimited(key: string): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(key);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return false;
+  }
+  entry.count++;
+  return entry.count > RATE_LIMIT_MAX;
+}
+
+function getClientIp(req: Request): string {
+  return req.ip || req.socket.remoteAddress || "unknown";
+}
+
+const DUMMY_SECRET = randomBytes(32);
+const DUMMY_ITERATIONS = 100000;
+
+function deterministicDummySalt(username: string): string {
+  return createHash("sha256").update(DUMMY_SECRET).update(username).digest("hex");
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of rateLimitMap) {
+    if (now > entry.resetAt) rateLimitMap.delete(key);
+  }
+}, 5 * 60_000);
+
 export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/auth/register", async (req: Request, res: Response) => {
     try {
+      const clientIp = getClientIp(req);
+      if (isRateLimited(`register:${clientIp}`)) {
+        return res.status(429).json({ error: "Too many attempts. Please try again later." });
+      }
+
       const parsed = validateRegister(req.body);
       if (!parsed.ok) {
         return res.status(400).json({ error: parsed.error });
@@ -24,7 +62,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(409).json({ error: "Username already taken" });
       }
 
-      const user = await storage.createUser({ username, authHash, salt, iterations });
+      const storedAuthHash = createHash("sha256").update(authHash).digest("hex");
+      const user = await storage.createUser({ username, authHash: storedAuthHash, salt, iterations });
 
       return res.status(201).json({
         id: user.id,
@@ -33,13 +72,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         iterations: user.iterations,
       });
     } catch (err) {
-      console.error("Register error:", err);
+      console.error("Register error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });
 
   app.post("/api/auth/login", async (req: Request, res: Response) => {
     try {
+      const clientIp = getClientIp(req);
+      if (isRateLimited(`login:${clientIp}`)) {
+        return res.status(429).json({ error: "Too many attempts. Please try again later." });
+      }
+
       const parsed = validateLogin(req.body);
       if (!parsed.ok) {
         return res.status(400).json({ error: parsed.error });
@@ -49,13 +93,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const user = await storage.getUserByUsername(username);
       if (!user) {
+        hashForComparison(authHash);
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
       const providedHash = hashForComparison(authHash);
-      const storedHash = hashForComparison(user.authHash);
+      const storedHash = Buffer.from(user.authHash, "hex");
 
-      if (!timingSafeEqual(providedHash, storedHash)) {
+      if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
@@ -66,21 +111,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
         iterations: user.iterations,
       });
     } catch (err) {
-      console.error("Login error:", err);
+      console.error("Login error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });
 
   app.get("/api/auth/salt/:username", async (req: Request, res: Response) => {
     try {
-      const user = await storage.getUserByUsername(req.params.username);
-      if (!user) {
-        return res.status(404).json({ error: "User not found" });
+      const clientIp = getClientIp(req);
+      if (isRateLimited(`salt:${clientIp}`)) {
+        return res.status(429).json({ error: "Too many attempts. Please try again later." });
       }
 
+      const user = await storage.getUserByUsername(req.params.username);
+
       return res.status(200).json({
-        salt: user.salt,
-        iterations: user.iterations,
+        salt: user ? user.salt : deterministicDummySalt(req.params.username),
+        iterations: user ? user.iterations : DUMMY_ITERATIONS,
       });
     } catch (err) {
       return res.status(500).json({ error: "Internal server error" });
@@ -102,8 +149,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const providedHash = hashForComparison(authHash);
-      const storedHash = hashForComparison(user.authHash);
-      if (!timingSafeEqual(providedHash, storedHash)) {
+      const storedHash = Buffer.from(user.authHash, "hex");
+      if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
@@ -127,7 +174,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         updatedAt: blob.updatedAt,
       });
     } catch (err) {
-      console.error("Vault sync error:", err);
+      console.error("Vault sync error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -147,8 +194,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const providedHash = hashForComparison(authHash);
-      const storedHash = hashForComparison(user.authHash);
-      if (!timingSafeEqual(providedHash, storedHash)) {
+      const storedHash = Buffer.from(user.authHash, "hex");
+      if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
@@ -163,7 +210,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         updatedAt: blob.updatedAt,
       });
     } catch (err) {
-      console.error("Vault fetch error:", err);
+      console.error("Vault fetch error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });

@@ -12,21 +12,23 @@ function hkdfExtract(salt: string, ikm: string): string {
 }
 
 function hkdfExpand(prk: string, info: string, length: number): string {
-  const hashLen = 32; // SHA-256 output in bytes
+  const hashLen = 32;
   const n = Math.ceil(length / hashLen);
   let okm = "";
-  let prev = "";
+  let prevWordArray = CryptoJS.lib.WordArray.create();
+
+  const infoWords = CryptoJS.enc.Utf8.parse(info);
 
   for (let i = 1; i <= n; i++) {
-    const input = prev + info + String.fromCharCode(i);
-    prev = CryptoJS.HmacSHA256(
-      CryptoJS.enc.Utf8.parse(input),
-      CryptoJS.enc.Hex.parse(prk)
-    ).toString(CryptoJS.enc.Hex);
-    okm += prev;
+    const counterWord = CryptoJS.lib.WordArray.create(
+      new Uint8Array([i]) as any
+    );
+    const input = prevWordArray.clone().concat(infoWords).concat(counterWord);
+    prevWordArray = CryptoJS.HmacSHA256(input, CryptoJS.enc.Hex.parse(prk));
+    okm += prevWordArray.toString(CryptoJS.enc.Hex);
   }
 
-  return okm.slice(0, length * 2); // hex chars = bytes * 2
+  return okm.slice(0, length * 2);
 }
 
 export function deriveSubkey(
