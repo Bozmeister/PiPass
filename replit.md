@@ -142,6 +142,20 @@ scripts/          # Build scripts
 - `hyperbaricSanitize(raw, field)` → returns `{ clean, ok, error }`
 - `sanitizeEntryFields(entry)` → validates all fields at once
 
+### Anti-Reverse-Engineering (`crypto/integrityGuard.ts`)
+- **Debugger detection**: Checks for React DevTools hooks, timing anomalies in calibration loops, and Function constructor timing on web
+- **Emulator detection**: Uses expo-device to check `isDevice`, plus brand/model/device name matching against known emulator indicators (Genymotion, BlueStacks, Nox, etc.)
+- **Crypto self-test**: Verifies AES-CBC round-trip, HMAC-SHA256 output, SHA-256 output, and RNG non-degeneracy on every launch and periodically (30s interval)
+- **Function hook detection**: Checks if core crypto functions have been monkey-patched (Proxy wrapping, prototype tampering)
+- **Tamper response**: On detection, immediately wipes all key shares from memory and locks the vault with a non-dismissable security alert screen
+- **Production-only enforcement**: Debugger/emulator/hook checks are gated behind `!__DEV__` to avoid false positives during development; crypto self-test runs always
+- **Periodic guard**: `startPeriodicGuard(30000)` re-runs all checks every 30 seconds while the app is open
+
+### Production Build Obfuscation (`metro.config.js`)
+- **Terser minification** with `drop_console`, `drop_debugger`, toplevel mangling, and ASCII-only output
+- Comments stripped, dead code eliminated, two-pass compression
+- Obfuscation applies only to production builds; development builds remain readable for debugging
+
 ### Critical Implementation Notes
 - **Server imports**: Always use `node:crypto` prefix in server files to avoid resolving to local `crypto/` directory
 - **Iteration guard**: All iteration parameters use `Math.max(iterations || 100000, 3)` to prevent null/zero/undefined from reaching crypto

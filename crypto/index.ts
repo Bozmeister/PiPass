@@ -21,3 +21,13 @@ export {
   invalidateBiometric,
   biometricDecryptGuard,
 } from "./biometricGate";
+export {
+  runIntegrityCheck,
+  startPeriodicGuard,
+  stopPeriodicGuard,
+  setTamperCallback,
+  detectDebugger,
+  detectEmulator,
+  cryptoSelfTest,
+} from "./integrityGuard";
+export type { IntegrityReport, TamperReason } from "./integrityGuard";

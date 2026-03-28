@@ -1,4 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import { View, Text, TextInput, Pressable, Platform, Alert, ActivityIndicator } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AuthScreen from "../../screens/AuthScreen";
 import SeedSetupScreen from "../../screens/SeedSetupScreen";
 import VaultScreen from "../../screens/VaultScreen";
@@ -16,6 +19,12 @@ import {
 import { generateMasterSalt, hashMasterKey } from "../../crypto/keyDerivation";
 import { deriveMasterKeyShares } from "../../workers/vaultWorker";
 import { KeyShares, wipeShares, combineShares } from "../../crypto/secureMemory";
+import {
+  runIntegrityCheck,
+  setTamperCallback,
+  startPeriodicGuard,
+  stopPeriodicGuard,
+} from "../../crypto/integrityGuard";
 
 export default function HomeScreen() {
   const [authenticated, setAuthenticated] = useState(false);
@@ -23,6 +32,35 @@ export default function HomeScreen() {
   const [iterations, setIterations] = useState<number>(100000);
   const [keyShares, setKeyShares] = useState<KeyShares | null>(null);
   const [masterSalt, setMasterSaltState] = useState<string | null>(null);
+  const [tamperLocked, setTamperLocked] = useState(false);
+  const keySharesRef = useRef<KeyShares | null>(null);
+
+  useEffect(() => {
+    keySharesRef.current = keyShares;
+  }, [keyShares]);
+
+  useEffect(() => {
+    setTamperCallback(() => {
+      if (keySharesRef.current) {
+        wipeShares(keySharesRef.current);
+      }
+      setKeyShares(null);
+      setAuthenticated(false);
+      setTamperLocked(true);
+    });
+
+    const report = runIntegrityCheck();
+    if (report.tampered && !__DEV__) {
+      setTamperLocked(true);
+      return;
+    }
+
+    startPeriodicGuard(30000);
+
+    return () => {
+      stopPeriodicGuard();
+    };
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -36,6 +74,20 @@ export default function HomeScreen() {
       }
     })();
   }, []);
+
+  if (tamperLocked) {
+    return (
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000", padding: 24 }}>
+        <Ionicons name="warning" size={64} color="#ef4444" />
+        <Text style={{ color: "#ef4444", fontSize: 22, fontWeight: "bold" as const, marginTop: 20, textAlign: "center" }}>
+          Security Alert
+        </Text>
+        <Text style={{ color: "#aaa", fontSize: 14, marginTop: 12, textAlign: "center", lineHeight: 20 }}>
+          A potential security threat was detected. The vault has been locked to protect your data. Please restart the app in a secure environment.
+        </Text>
+      </View>
+    );
+  }
 
   if (!authenticated) {
     return <AuthScreen onAuthenticated={() => setAuthenticated(true)} />;
@@ -103,11 +155,6 @@ export default function HomeScreen() {
     />
   );
 }
-
-// Inline unlock screen for returning users
-import { View, Text, TextInput, Pressable, Platform, Alert, ActivityIndicator } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 function UnlockScreen({ salt, iterations, onUnlocked, onReset }: {
   salt: string;
