@@ -49,6 +49,15 @@ export function deriveEntryKey(
   return deriveSubkey(masterKeyHex, "pipass-entry-key:" + entryId, entrySaltHex);
 }
 
+export function deriveFractalSeed(masterKeyHex: string): { seedNumber: number; fingerprint: string } {
+  const fixedSalt = "00".repeat(16);
+  const prk = hkdfExtract(fixedSalt, masterKeyHex);
+  const seedHex = hkdfExpand(prk, "fractal", 32);
+  const fingerprint = CryptoJS.SHA256(CryptoJS.enc.Hex.parse(seedHex)).toString(CryptoJS.enc.Hex);
+  const seedNumber = parseInt(seedHex.slice(0, 8), 16) % 999999;
+  return { seedNumber, fingerprint };
+}
+
 export function generateSaltHex(bytes: number = 16): string {
   const saltBytes = ExpoCrypto.getRandomBytes(bytes);
   return Array.from(saltBytes)

@@ -161,4 +161,4 @@ scripts/          # Build scripts
 - **Iteration guard**: All iteration parameters use `Math.max(iterations || 100000, 3)` to prevent null/zero/undefined from reaching crypto
 - **PBKDF2 Fallback**: `hash-wasm` Argon2id requires WebAssembly; if unavailable, falls back to PBKDF2-SHA256 via `crypto-js`
 - **Encryption format**: New format is `ivHex:cipherHex:macHex` (3-part with HMAC); legacy `ivHex:cipherHex` (2-part) still decryptable
-- **Visual seed**: Fractal keyprints derive a visual seed from master key hash — visual-only, no security implication
+- **Fractal seed derivation**: `HKDF(master_key, info="fractal")` derives a deterministic seed for the Mandelbrot visualization — uses fixed all-zero salt, completely independent from encryption subkey derivation. SHA-256 fingerprint of the HKDF output is stored and verified on every unlock; mismatch triggers a security warning banner. Fingerprint is updated after security profile changes (re-derived key).

@@ -7,8 +7,6 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import * as ScreenCapture from "expo-screen-capture";
-import CryptoJS from "crypto-js";
-
 import { 
   VaultEntry, 
   SecureNote, 
@@ -31,12 +29,15 @@ import {
   saveShowKeyprints,
   getMasterSalt,
   saveMasterKeyHash,
+  saveFractalFingerprint,
+  getFractalFingerprint,
 } from "../workers/storageWorker";
 
 import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer } from "../crypto/secureMemory";
 import { hashMasterKey } from "../crypto/keyDerivation";
 import { requireFreshBiometric } from "../crypto/biometricGate";
 import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
+import { deriveFractalSeed } from "../crypto/hkdf";
 
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
@@ -60,13 +61,12 @@ interface VaultScreenProps {
   onReset: () => void;
 }
 
-function deriveVisualSeed(shares: KeyShares): number {
+function deriveVisualSeedFromHkdf(shares: KeyShares): { seedNumber: number; fingerprint: string } {
   const keyHex = combineShares(shares);
-  const hash = CryptoJS.SHA256(keyHex).toString(CryptoJS.enc.Hex);
+  const result = deriveFractalSeed(keyHex);
   const keyBytes = hexToBytes(keyHex);
   wipeBuffer(keyBytes);
-  const seedStr = hash.slice(0, 8);
-  return parseInt(seedStr, 16) % 999999;
+  return result;
 }
 
 export default function VaultScreen({ keyShares, iterations, onLock, onIterationsChange, onReset }: VaultScreenProps) {
@@ -97,11 +97,35 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
   const autoLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const selectTokenRef = useRef<number>(0);
 
-  const visualSeed = useRef(deriveVisualSeed(keyShares)).current;
+  const initialFractal = useRef(deriveVisualSeedFromHkdf(keyShares)).current;
+  const [fractalSeedNumber, setFractalSeedNumber] = useState(initialFractal.seedNumber);
+  const [fractalFingerprint, setFractalFingerprint] = useState(initialFractal.fingerprint);
+  const visualSeed = fractalSeedNumber;
+  const [fractalTampered, setFractalTampered] = useState(false);
 
   useEffect(() => {
     keySharesRef.current = keyShares;
   }, [keyShares]);
+
+  useEffect(() => {
+    verifyFractalFingerprint(fractalFingerprint);
+  }, []);
+
+  async function verifyFractalFingerprint(currentFingerprint: string) {
+    const stored = await getFractalFingerprint();
+    if (stored === null) {
+      await saveFractalFingerprint(currentFingerprint);
+    } else if (stored !== currentFingerprint) {
+      setFractalTampered(true);
+    }
+  }
+
+  function refreshFractalFromShares(shares: KeyShares) {
+    const result = deriveVisualSeedFromHkdf(shares);
+    setFractalSeedNumber(result.seedNumber);
+    setFractalFingerprint(result.fingerprint);
+    return result;
+  }
 
   useEffect(() => {
     if (Platform.OS !== "web") ScreenCapture.preventScreenCaptureAsync();
@@ -249,7 +273,14 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
       await saveMasterKeyHash(newKeyHash);
       await onIterationsChange(pendingProfileIterations);
 
+      const newKeyBytes = hexToBytes(newKeyHex);
+      wipeBuffer(newKeyBytes);
+
       keySharesRef.current = newShares;
+
+      const newFractal = refreshFractalFromShares(newShares);
+      await saveFractalFingerprint(newFractal.fingerprint);
+      setFractalTampered(false);
 
       setPendingProfileIterations(null);
       setProfilePassword("");
@@ -317,6 +348,30 @@ export default function VaultScreen({ keyShares, iterations, onLock, onIteration
           </Pressable>
         </View>
       </View>
+
+      {fractalTampered && (
+        <View style={{
+          backgroundColor: "#3a0a0a",
+          borderWidth: 1,
+          borderColor: "#ef4444",
+          borderRadius: 10,
+          marginHorizontal: 16,
+          marginBottom: 8,
+          padding: 14,
+          flexDirection: "row",
+          alignItems: "center",
+        }}>
+          <Ionicons name="warning" size={22} color="#ef4444" style={{ marginRight: 10 }} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: "#ef4444", fontSize: 14, fontWeight: "700" as const }}>
+              Fractal Fingerprint Changed
+            </Text>
+            <Text style={{ color: "#cc8888", fontSize: 12, marginTop: 2 }}>
+              Your vault's visual identity has changed unexpectedly. This may indicate key derivation tampering.
+            </Text>
+          </View>
+        </View>
+      )}
 
       <FlatList
         data={entries}

@@ -11,6 +11,7 @@ const NOTES_INDEX_KEY = "pipass_notes_index";
 const SECURITY_PROFILE_KEY = "pipass_security_profile";
 const SHOW_KEYPRINTS_KEY = "pipass_show_keyprints";
 const VAULT_INITIALIZED_KEY = "pipass_vault_initialized";
+const FRACTAL_FINGERPRINT_KEY = "pipass_fractal_fingerprint";
 
 async function getItem(key: string): Promise<string | null> {
   if (Platform.OS === "web") {
@@ -140,6 +141,7 @@ export async function destroyAllData(): Promise<void> {
     await deleteItem(SECURITY_PROFILE_KEY);
     await deleteItem(SHOW_KEYPRINTS_KEY);
     await deleteItem(VAULT_INITIALIZED_KEY);
+    await deleteItem(FRACTAL_FINGERPRINT_KEY);
   } catch (err) {
     console.error("Purge failed", err);
   }
@@ -220,4 +222,12 @@ export async function saveShowKeyprints(show: boolean): Promise<void> {
 export async function getShowKeyprints(): Promise<boolean> {
   const val = await getItem(SHOW_KEYPRINTS_KEY);
   return val !== "0";
+}
+
+export async function saveFractalFingerprint(fingerprint: string): Promise<void> {
+  await setItem(FRACTAL_FINGERPRINT_KEY, fingerprint);
+}
+
+export async function getFractalFingerprint(): Promise<string | null> {
+  return await getItem(FRACTAL_FINGERPRINT_KEY);
 }
