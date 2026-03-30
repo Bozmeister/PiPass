@@ -1,0 +1,181 @@
+Replit Agent Task
+Goal
+
+Upgrade the PiPass fractal keyprint so it matches the original animated icon vibe:
+subtle glow + living perimeter + gentle motion.
+
+This is a visual-only change.
+It MUST NOT modify any cryptography, security logic, storage, or seed derivation behaviour.
+
+Non-negotiable rules
+Never change anything inside /crypto, /workers, /server, or security flows.
+Do not change how deriveVisualSeed() works.
+Animation must be deterministic per seed so the same vault always shows the same motion personality.
+Performance must remain smooth on mobile (60fps target, graceful fallback to 30fps).
+Visual style = subtle, elegant, premium, never flashy or game-like.
+
+This is purely a rendering/animation upgrade.
+
+The visual target
+
+The fractal should feel like:
+
+• softly glowing coin-like circle
+• faint bloom around the perimeter
+• tiny pixels drifting around the inside edge
+• extremely slow hypnotic motion
+• unique “personality” per vault seed
+
+Think: alive but whisper-quiet.
+
+Implementation plan
+Step 1 — Add animation loop
+
+Locate Mandelbrot renderer used by:
+
+FractalFullscreenViewer
+KeyprintViewer
+mandelbrot.ts
+
+Add a perpetual animation loop driven by requestAnimationFrame.
+
+Create a tiny evolving time value:
+
+let t = 0;
+function animate(now){
+  t += 0.003; // extremely slow motion
+  renderFractal(t);
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+
+The fractal must continuously re-render using t.
+
+Step 2 — Add gentle fractal drift (micro-zoom)
+
+Inside mandelbrot renderer:
+
+Use the seed to derive deterministic motion parameters:
+
+const speed = 0.00015 + (seed % 1000) * 0.00000005;
+const zoom = baseZoom * (1 + Math.sin(t * speed) * 0.015);
+const offsetX = Math.cos(t * speed * 0.6) * 0.003;
+const offsetY = Math.sin(t * speed * 0.8) * 0.003;
+
+Apply zoom + offsets when mapping pixels → complex plane.
+
+This creates slow breathing / drifting motion.
+
+Step 3 — Animated perimeter hue rotation
+
+We want the edge pixels to feel like they are orbiting.
+
+When colouring pixels near the escape boundary:
+
+const hueShift = (t * 10 + seed % 360) % 360;
+const hue = baseHue + hueShift;
+
+Use HSL colouring for edge pixels only.
+
+Interior stays dark.
+
+This produces the “moving pixels around the perimeter” effect.
+
+Step 4 — Add particle halo (the magic dust)
+
+Create a lightweight particle system rendered on top of the fractal canvas.
+
+Requirements:
+• 40–80 particles max
+• orbit the circle edge
+• ultra-low opacity
+• additive blending
+
+Particle init (seeded RNG):
+
+particles = Array.from({length: 60}, (_,i)=>({
+  angle: seededRandom(i) * Math.PI * 2,
+  radius: 0.92 + seededRandom(i+99) * 0.05,
+  speed: 0.0004 + seededRandom(i+199) * 0.0004
+}));
+
+Animate each frame:
+
+p.angle += p.speed;
+x = centerX + cos(p.angle) * radius * canvasRadius;
+y = centerY + sin(p.angle) * radius * canvasRadius;
+
+Render as tiny blurred dots.
+
+This recreates the “pixel dance”.
+
+Step 5 — Add soft glow / bloom
+
+After fractal render, overlay glow layers.
+
+Layer 1: radial gradient glow
+
+const gradient = ctx.createRadialGradient(cx,cy,r*0.6,cx,cy,r);
+gradient.addColorStop(0,"rgba(0,255,170,0)");
+gradient.addColorStop(1,"rgba(0,255,170,0.08)");
+ctx.fillStyle = gradient;
+ctx.fillRect(0,0,width,height);
+
+Layer 2: subtle blur bloom
+
+ctx.globalCompositeOperation = "lighter";
+ctx.filter = "blur(8px)";
+ctx.drawImage(canvas,0,0);
+ctx.filter = "none";
+ctx.globalCompositeOperation = "source-over";
+
+Glow must be barely noticeable.
+
+Step 6 — Respect performance
+
+Add auto quality scaling:
+
+If FPS < 45 for 2 seconds:
+• reduce particle count by 25%
+• render fractal every 2nd frame
+
+If FPS < 30:
+• pause zoom drift
+• keep only hue rotation
+
+This ensures smooth mobile performance.
+
+Step 7 — Deterministic seeded randomness
+
+Create a tiny seeded RNG used by ALL animation randomness:
+
+function seededRandom(n){
+  const x = Math.sin(seed + n) * 10000;
+  return x - Math.floor(x);
+}
+
+Every vault gets a unique motion signature.
+
+Acceptance criteria checklist
+
+The upgrade is complete when:
+
+• Fractal slowly moves even when user does nothing
+• Edge colours subtly shift over time
+• Tiny particles orbit perimeter
+• Soft glow visible on dark background
+• Motion speed differs per vault seed
+• App performance remains smooth
+• No crypto or storage files changed
+
+Summary for the agent
+
+Implement a deterministic, seed-driven animation system for the Mandelbrot renderer including:
+
+• slow drift/zoom
+• hue-rotating edge colouring
+• orbiting particles
+• soft bloom glow
+• adaptive performance scaling
+
+All changes must remain strictly visual.
