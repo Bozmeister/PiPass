@@ -11,75 +11,34 @@ interface AnimatedFractalViewProps {
   style?: ViewStyle;
 }
 
-export default function AnimatedFractalView({
-  seed,
-  fractalParams,
+function NativeAnimatedFractal({
+  html,
   size,
   style,
-}: AnimatedFractalViewProps) {
-  const params = fractalParams || DEFAULT_FRACTAL_PARAMS;
+}: {
+  html: string;
+  size: number;
+  style?: ViewStyle;
+}) {
   const webViewRef = useRef<WebView>(null);
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
-  const html = useMemo(
-    () => generateAnimatedFractalHTML(seed, params.cx, params.cy, params.zoom, params.maxIterations),
-    [seed, params.cx, params.cy, params.zoom, params.maxIterations]
-  );
-
-  const sendMessage = useCallback((msg: string) => {
-    if (Platform.OS === "web") {
-      iframeRef.current?.contentWindow?.postMessage(msg, "*");
-    } else {
-      webViewRef.current?.injectJavaScript(`window.postMessage('${msg}','*');true;`);
-    }
+  const sendCommand = useCallback((cmd: string) => {
+    webViewRef.current?.injectJavaScript(`if(window.__fractal)window.__fractal.${cmd}();true;`);
   }, []);
 
   useEffect(() => {
-    sendMessage("resume");
     return () => {
-      sendMessage("pause");
+      sendCommand("pause");
     };
-  }, [sendMessage]);
+  }, [sendCommand]);
 
   useEffect(() => {
     const handleAppState = (nextState: AppStateStatus) => {
-      if (nextState === "active") {
-        sendMessage("resume");
-      } else {
-        sendMessage("pause");
-      }
+      sendCommand(nextState === "active" ? "resume" : "pause");
     };
     const sub = AppState.addEventListener("change", handleAppState);
     return () => sub.remove();
-  }, [sendMessage]);
-
-  if (Platform.OS === "web") {
-    return (
-      <View
-        style={[
-          {
-            width: size,
-            height: size,
-            borderRadius: size / 2,
-            overflow: "hidden",
-          },
-          style,
-        ]}
-      >
-        <iframe
-          ref={iframeRef as any}
-          srcDoc={html}
-          style={{
-            width: size,
-            height: size,
-            border: "none",
-            borderRadius: size / 2,
-          }}
-          scrolling="no"
-        />
-      </View>
-    );
-  }
+  }, [sendCommand]);
 
   return (
     <View
@@ -107,4 +66,77 @@ export default function AnimatedFractalView({
       />
     </View>
   );
+}
+
+function WebAnimatedFractal({
+  html,
+  size,
+  style,
+}: {
+  html: string;
+  size: number;
+  style?: ViewStyle;
+}) {
+  const containerRef = useRef<View>(null);
+  const iframeElRef = useRef<HTMLIFrameElement | null>(null);
+
+  useEffect(() => {
+    return () => {
+      try {
+        iframeElRef.current?.contentWindow?.postMessage("pause", "*");
+      } catch {}
+    };
+  }, []);
+
+  const setIframeRef = useCallback((node: HTMLIFrameElement | null) => {
+    iframeElRef.current = node;
+  }, []);
+
+  return (
+    <View
+      ref={containerRef}
+      style={[
+        {
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          overflow: "hidden",
+        },
+        style,
+      ]}
+    >
+      {/* @ts-ignore: iframe is valid in RN Web */}
+      <iframe
+        ref={setIframeRef}
+        srcDoc={html}
+        style={{
+          width: size,
+          height: size,
+          border: "none",
+          borderRadius: size / 2,
+        }}
+        scrolling="no"
+      />
+    </View>
+  );
+}
+
+export default function AnimatedFractalView({
+  seed,
+  fractalParams,
+  size,
+  style,
+}: AnimatedFractalViewProps) {
+  const params = fractalParams || DEFAULT_FRACTAL_PARAMS;
+
+  const html = useMemo(
+    () => generateAnimatedFractalHTML(seed, params.cx, params.cy, params.zoom, params.maxIterations),
+    [seed, params.cx, params.cy, params.zoom, params.maxIterations]
+  );
+
+  if (Platform.OS === "web") {
+    return <WebAnimatedFractal html={html} size={size} style={style} />;
+  }
+
+  return <NativeAnimatedFractal html={html} size={size} style={style} />;
 }

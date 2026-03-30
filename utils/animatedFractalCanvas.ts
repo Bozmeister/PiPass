@@ -247,28 +247,30 @@ function animate(){
 var paused=false;
 var animId=0;
 
-function start(){
+function resumeAnim(){
   if(!paused)return;
   paused=false;
   lastFrameTime=performance.now();
   animId=requestAnimationFrame(animate);
 }
 
-function stop(){
+function pauseAnim(){
   paused=true;
   if(animId)cancelAnimationFrame(animId);
   animId=0;
 }
 
+window.__fractal={pause:pauseAnim,resume:resumeAnim};
+
 document.addEventListener('visibilitychange',function(){
-  if(document.hidden)stop();else start();
+  if(document.hidden)pauseAnim();else resumeAnim();
 });
 
 animId=requestAnimationFrame(animate);
 
 window.addEventListener('message',function(e){
-  if(e.data==='pause')stop();
-  else if(e.data==='resume')start();
+  if(e.data==='pause')pauseAnim();
+  else if(e.data==='resume')resumeAnim();
 });
 })();
 </script></body></html>`;
