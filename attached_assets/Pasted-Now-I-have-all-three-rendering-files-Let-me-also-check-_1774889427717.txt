@@ -1,0 +1,84 @@
+Now I have all three rendering files. Let me also check how FractalKeyprint is sized in VaultScreen:
+
+Now I have the full picture. I need to apply rendering-only amplification to three files:
+
+utils/fractalKeyprint.ts — computeFractalGrid: amplify cx, cy, zoom, maxIterations before rendering
+components/FractalBackground.tsx — amplify the params before passing to computeMandelbrotGrid
+components/FractalKeyprint.tsx — increase sizes by ~40%
+VaultScreen — increase FractalKeyprint sizes
+Let me also check the KeyprintViewer for fractal rendering:
+
+Now I have everything. I'll apply all the rendering amplification changes in parallel:
+
+Now increase the fractal sizes in VaultScreen:
+
+Now let me also fix the SVG viewBox to use the scaled resolution properly — the generateFractalSvg function returns an SVG with a viewBox based on size, not resolution, so that part is fine. But let me verify the return value of computeFractalGrid uses the right resolution:
+
+Good — the SVG rendering uses scaledResolution for both the grid computation and the rect loop, and grid.maxIter for the color function (which now has the amplified value). This is correct.
+
+Let me verify the build:
+
+No errors. Let me check the app renders properly:
+
+Checked system logs
+App is bundling cleanly. Now let me also check the FractalKeyprint list item size — 62px might be too large for a list row. Let me check context:
+
+The 62px list item fractal is a reasonable 40% increase from 44px. It'll be slightly larger in the row but still proportional to the text next to it.
+
+Now let me run the code review:
+
+All changes pass review. Here's a summary of what was done:
+
+Rendering-only fractal amplification — all changes are purely visual, no cryptographic logic was touched:
+
+Zoom amplification (ZOOM_MULTIPLIER = 2.5): The rendered zoom level is 2.5x the raw value, creating more dramatic visual variation between different keys.
+
+Coordinate amplification (COORD_MULTIPLIER = 1.8): The cx/cy center coordinates are scaled 1.8x at render time, spreading the visual exploration across a wider region of the Mandelbrot set for more distinct patterns.
+
+Iteration depth (ITERATION_MULTIPLIER = 1.5, capped at 2000): Higher iteration counts reveal finer fractal detail and more color bands, making the fractals visually richer.
+
+Resolution scaling (RESOLUTION_SCALE = 1.5): SVG thumbnails now render at 1.5x resolution for sharper detail.
+
+Size increases (~40%) in the vault UI:
+
+List item fractals: 44px → 62px
+Loading screen: 200px → 280px
+Empty vault: 150px → 210px
+All multipliers are applied only at the rendering layer in computeFractalGrid, FractalBackground, and generateFractalSvg. Same fractalParams input always produces identical visuals — full determinism is preserved.
+
+When the user taps the green fractal in the vault entry a black screen appears but there are no visual fractals present. Absolutely nothing just a black screen.
+
+I want the fractal to be like this. When the user presses the fractal in the vault screen. Maybe make the rings a little larger so the user sees the fractal changing.
+
+Looking at your screenshot, I can see the fractal on the vault screen is just showing as a glowing green ring with a black center — no fractal detail inside. The issue is that the fractal rendering isn't producing visible detail at the current parameters. Let me look at what's happening:
+
+I see — you want the fullscreen viewer to show the fractal in that same circular glowing ring style, but much larger so the fractal detail inside is visible. Let me update the fullscreen viewer to use that same circular format with a bigger ring:
+
+Now the issue is that the fractal might appear mostly dark inside the ring because the HKDF-derived fractalParams might be landing on coordinates deep inside the Mandelbrot set. Let me check what values fractalParams typically produces and whether the multipliers are pushing the view into a mostly-black region:
+
+Now I see the real issue. Looking at your screenshot, the fractal inside the ring on the vault screen itself is also black — no fractal detail visible. That means the SVG data URI approach doesn't work on iOS at all. React Native's Image component on iOS can't render SVG data URIs. I need to fix both the FractalKeyprint component and the fullscreen viewer to use native SVG rendering via SvgXml.
+
+Now let me fix both components to use SvgXml which renders SVGs natively on iOS:
+
+Now let me also check if any other components use the data URI approach that would be broken on iOS:
+
+Now fix KeyprintViewer too — it also uses the broken Image + data URI approach:
+
+Now let me also check if the FractalBackground component or EntryDetailModal uses data URIs:
+
+Good — only the utility file itself still has generateFractalDataUri defined. All consumers now use SvgXml. Let me check the FractalBackground:
+
+Good — FractalBackground already uses react-native-svg directly (Svg + Rect elements), not data URIs. Let me verify everything bundles:
+
+Checked console and system logs
+Bundled cleanly — no errors. The fix is comprehensive. Here's what I changed:
+
+Root cause: React Native's Image component on iOS cannot render SVG data URIs (data:image/svg+xml;utf8,...). This was causing every fractal to appear as a black circle with only the green border ring visible.
+
+Fix: Switched all three fractal-rendering components from Image + data URI to SvgXml from react-native-svg, which renders SVGs natively on all platforms:
+
+FractalKeyprint — the vault list thumbnails and empty-vault fractal now use SvgXml
+FractalFullscreenViewer — the fullscreen viewer uses SvgXml in the same large circular ring style (85% of screen width)
+KeyprintViewer — the detailed keyprint viewer also fixed
+The fullscreen viewer shows your fractal in a large glowing ring with a subtle pulsing animation (0.97 → 1.03 scale). Tap anywhere to close it instantly. Your fractals should now be fully visible on your device.
+
