@@ -19,7 +19,7 @@ Preferred communication style: Simple, everyday language.
   2. `SeedSetupScreen` — master password setup (first-time only)
   3. `UnlockScreen` — password verify against stored hash (returning users)
   4. `VaultScreen` — main vault UI with key shares prop
-- **UI Components**: Custom modals (`AddEntryModal`, `EntryDetailModal`, `NuclearResetModal`, `RecoveryKeyModal`) for CRUD operations and vault lifecycle; `FractalFullscreenViewer` for immersive fractal viewing
+- **UI Components**: Custom modals (`AddEntryModal`, `EntryDetailModal`, `NuclearResetModal`, `RecoveryKeyModal`) for CRUD operations and vault lifecycle; `FractalFullscreenViewer` for immersive animated fractal viewing; `AnimatedFractalView` for WebView+Canvas animated Mandelbrot rendering
   - `AddEntryModal`: Includes double-entry password validation (confirm password field), red "Mismatch" warning, success Alert on save, try/catch error handling
   - `FaviconImage`: Fetches website favicons from Google's favicon service, caches locally via expo-file-system on native, globe icon fallback. Shown in vault list items (when keyprints are off) and next to URLs in EntryDetailModal
 - **Input Theme** (`styles/inputTheme.ts`): WCAG AA-compliant dark input styling used across all input screens. Constants: INPUT_BG (#1e1e1e), INPUT_TEXT (#f0f0f0), INPUT_PLACEHOLDER (#777), INPUT_BORDER (#3a3a3a), INPUT_BORDER_FOCUS (#4a90d9 blue), INPUT_BORDER_ERROR (#ef4444), INPUT_BORDER_SUCCESS (#4CAF50), LABEL_COLOR (#999). Applied to: UnlockScreen, SeedSetupScreen, AddEntryModal, EntryDetailModal, SecureNotesModal, VaultScreen profile password
@@ -99,9 +99,9 @@ Preferred communication style: Simple, everyday language.
 app/              # Expo Router pages (file-based routing)
   (tabs)/         # Tab navigator group
 assets/           # Images
-components/       # Reusable UI components (AddEntryModal, EntryDetailModal, FractalKeyprint, KeyprintViewer, FractalBackground)
+components/       # Reusable UI components (AddEntryModal, EntryDetailModal, FractalKeyprint, AnimatedFractalView, FractalFullscreenViewer, KeyprintViewer, FractalBackground)
 screens/          # Full-screen components (AuthScreen, VaultScreen, SeedSetupScreen)
-utils/            # Visual-only modules (pi.ts, mandelbrot.ts, fractalKeyprint.ts)
+utils/            # Visual-only modules (pi.ts, mandelbrot.ts, fractalKeyprint.ts, animatedFractalCanvas.ts)
 crypto/           # Security primitives (keyDerivation, encryption, hkdf, secureMemory, biometricGate)
 workers/          # Storage and vault encryption logic
 server/           # Express backend (routes, storage, validation, templates)
@@ -163,6 +163,7 @@ scripts/          # Build scripts
 - **PBKDF2 Fallback**: `hash-wasm` Argon2id requires WebAssembly; if unavailable, falls back to PBKDF2-SHA256 via `crypto-js`
 - **Encryption format**: New format is `ivHex:cipherHex:macHex` (3-part with HMAC); legacy `ivHex:cipherHex` (2-part) still decryptable
 - **Fractal seed derivation**: `HKDF(master_key, info="fractal")` derives a deterministic seed for the Mandelbrot visualization — uses fixed all-zero salt, completely independent from encryption subkey derivation. SHA-256 fingerprint of the HKDF output is stored and verified on every unlock; mismatch triggers a security warning banner. Fingerprint is updated after security profile changes (re-derived key).
+- **Animated Fractal Renderer**: `AnimatedFractalView` uses WebView (native) or iframe (web) with HTML Canvas for animated Mandelbrot rendering with drift, hue-rotating edges, particle halo (60 particles at radii 0.92-0.97), glow bloom, and adaptive FPS scaling (<30fps → pause drift + skip frames, <45fps → reduce particles). `FractalFullscreenViewer` opens a full-screen modal with animated fractal on tap. Static `FractalKeyprint` (Image+dataUri) remains for list item thumbnails. `animatedFractalCanvas.ts` generates the complete HTML document with seeded deterministic animation personality.
 - **Recovery Key** (`crypto/recoveryKey.ts`): 256-bit recovery key generated on vault creation via `expo-crypto`. Only SHA-256 hash is stored (`saveRecoveryKeyHash`). Key displayed once to user in `RecoveryKeyModal`, formatted as `XXXX-XXXX-...` groups. Verification uses constant-time comparison. Raw key never logged, stored, or sent over network.
 - **Shamir's Secret Sharing** (`crypto/shamir.ts`): Optional 2-of-3 split of recovery key using polynomial interpolation over GF(256). Per-byte random polynomial with secret as constant term. Shares formatted as `S01:XXXX-XXXX-...`. `combineShares()` reconstructs via Lagrange interpolation at x=0. Input validation enforces unique indices, matching lengths, valid hex. All temporary buffers wiped after use.
 - **Auto-lock behavior**: `AUTO_LOCK_MS = 120000` (2 minutes). On lock, VaultScreen stays mounted (preserving add-entry form state, entries list, scroll position) but all sensitive state is cleared (decrypted entries, settings, secure notes, profile password). An overlay `UnlockScreen` covers the vault. Activity is detected via `onTouchStart`/`onTouchMove` on root views and all modal surfaces (`AddEntryModal`, `EntryDetailModal`, `SecureNotesModal`). Timer and AppState listeners skip while already locked. Key shares are wiped from VaultScreen on lock and refreshed on unlock.

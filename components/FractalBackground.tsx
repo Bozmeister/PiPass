@@ -7,10 +7,6 @@ import { FractalParams, DEFAULT_FRACTAL_PARAMS } from "../crypto/hkdf";
 const GRID_W = 80;
 const GRID_H = 80;
 
-const ZOOM_MULTIPLIER = 2.5;
-const COORD_MULTIPLIER = 1.8;
-const ITERATION_MULTIPLIER = 1.5;
-
 interface FractalBackgroundProps {
   centerX?: number;
   centerY?: number;
@@ -79,14 +75,10 @@ export default function FractalBackground({
   seed,
   fractalParams,
 }: FractalBackgroundProps) {
-  const rawCx = fractalParams?.cx ?? centerXProp ?? DEFAULT_FRACTAL_PARAMS.cx;
-  const rawCy = fractalParams?.cy ?? centerYProp ?? DEFAULT_FRACTAL_PARAMS.cy;
-  const rawZm = fractalParams?.zoom ?? zoomProp ?? DEFAULT_FRACTAL_PARAMS.zoom;
-  const rawMaxIter = fractalParams?.maxIterations ?? 50;
-  const cx = fractalParams ? rawCx * COORD_MULTIPLIER : rawCx;
-  const cy = fractalParams ? rawCy * COORD_MULTIPLIER : rawCy;
-  const zm = fractalParams ? rawZm * ZOOM_MULTIPLIER : rawZm;
-  const maxIter = fractalParams ? Math.min(Math.floor(rawMaxIter * ITERATION_MULTIPLIER), 2000) : rawMaxIter;
+  const cx = fractalParams?.cx ?? centerXProp ?? DEFAULT_FRACTAL_PARAMS.cx;
+  const cy = fractalParams?.cy ?? centerYProp ?? DEFAULT_FRACTAL_PARAMS.cy;
+  const zm = fractalParams?.zoom ?? zoomProp ?? DEFAULT_FRACTAL_PARAMS.zoom;
+  const maxIter = fractalParams?.maxIterations ?? 50;
 
   const pixels = useMemo(() => {
     if (cacheRef.current && cacheRef.current.seed === seed) {
