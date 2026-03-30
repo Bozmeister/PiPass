@@ -51,8 +51,6 @@ var driftEnabled=true;
 var fpsHistory=[];
 var lastFrameTime=performance.now();
 var fpsCheckTimer=0;
-var LOW_FPS_45_START=0;
-var LOW_FPS_30_START=0;
 
 function resize(){
   var s=Math.min(window.innerWidth,window.innerHeight);

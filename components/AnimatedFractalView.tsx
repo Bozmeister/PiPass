@@ -1,5 +1,5 @@
-import React, { useMemo } from "react";
-import { View, Platform, ViewStyle } from "react-native";
+import React, { useMemo, useRef, useEffect, useCallback } from "react";
+import { View, Platform, ViewStyle, AppState, AppStateStatus } from "react-native";
 import { WebView } from "react-native-webview";
 import { FractalParams, DEFAULT_FRACTAL_PARAMS } from "../crypto/hkdf";
 import { generateAnimatedFractalHTML } from "../utils/animatedFractalCanvas";
@@ -18,11 +18,40 @@ export default function AnimatedFractalView({
   style,
 }: AnimatedFractalViewProps) {
   const params = fractalParams || DEFAULT_FRACTAL_PARAMS;
+  const webViewRef = useRef<WebView>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
   const html = useMemo(
     () => generateAnimatedFractalHTML(seed, params.cx, params.cy, params.zoom, params.maxIterations),
     [seed, params.cx, params.cy, params.zoom, params.maxIterations]
   );
+
+  const sendMessage = useCallback((msg: string) => {
+    if (Platform.OS === "web") {
+      iframeRef.current?.contentWindow?.postMessage(msg, "*");
+    } else {
+      webViewRef.current?.injectJavaScript(`window.postMessage('${msg}','*');true;`);
+    }
+  }, []);
+
+  useEffect(() => {
+    sendMessage("resume");
+    return () => {
+      sendMessage("pause");
+    };
+  }, [sendMessage]);
+
+  useEffect(() => {
+    const handleAppState = (nextState: AppStateStatus) => {
+      if (nextState === "active") {
+        sendMessage("resume");
+      } else {
+        sendMessage("pause");
+      }
+    };
+    const sub = AppState.addEventListener("change", handleAppState);
+    return () => sub.remove();
+  }, [sendMessage]);
 
   if (Platform.OS === "web") {
     return (
@@ -38,6 +67,7 @@ export default function AnimatedFractalView({
         ]}
       >
         <iframe
+          ref={iframeRef as any}
           srcDoc={html}
           style={{
             width: size,
@@ -64,6 +94,7 @@ export default function AnimatedFractalView({
       ]}
     >
       <WebView
+        ref={webViewRef}
         source={{ html }}
         style={{ width: size, height: size, backgroundColor: "transparent" }}
         scrollEnabled={false}
