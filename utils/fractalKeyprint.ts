@@ -27,29 +27,34 @@ function mandelbrotEscape(cReal: number, cImag: number, maxIter: number): number
   return maxIter;
 }
 
-// 🔥 ULTRA-BRIGHT CYAN + PURPLE NEON VERSION
+const FRACTAL_PALETTE = [
+  [0x00, 0x11, 0x00],
+  [0x00, 0x22, 0x00],
+  [0x00, 0x33, 0x00],
+  [0x00, 0x44, 0x00],
+  [0x00, 0x66, 0x00],
+  [0x00, 0xaa, 0x55],
+  [0x00, 0xff, 0x88],
+  [0x66, 0xff, 0xcc],
+  [0xcc, 0xff, 0xee],
+  [0xff, 0xff, 0xff],
+];
+
 function escapeToColor(t: number, maxIter: number): string {
-  if (t >= maxIter) return "#0a0a0a"; // slightly lighter black background for more pop
+  if (t >= maxIter) return "#000000";
 
   const norm = t / maxIter;
-  const intensity = Math.pow(norm, 0.22); // extremely bright early escapes
+  const scaled = Math.pow(norm, 0.35) * (FRACTAL_PALETTE.length - 1);
+  const idx = Math.min(Math.floor(scaled), FRACTAL_PALETTE.length - 2);
+  const frac = scaled - idx;
 
-  // Base = electric cyan
-  let r = Math.floor(intensity * 40);
-  let g = Math.floor(180 + intensity * 75);
-  let b = Math.floor(255);
+  const c0 = FRACTAL_PALETTE[idx];
+  const c1 = FRACTAL_PALETTE[idx + 1];
+  const r = Math.floor(c0[0] + (c1[0] - c0[0]) * frac);
+  const g = Math.floor(c0[1] + (c1[1] - c0[1]) * frac);
+  const b = Math.floor(c0[2] + (c1[2] - c0[2]) * frac);
 
-  // Purple/magenta accent bands (every 6th escape time gets a vibrant pop)
-  if (Math.floor(t) % 6 === 0) {
-    r = Math.floor(220 + intensity * 35);
-    g = Math.floor(60 + intensity * 80);
-    b = Math.floor(255);
-  }
-
-  const rh = r.toString(16).padStart(2, "0");
-  const gh = g.toString(16).padStart(2, "0");
-  const bh = b.toString(16).padStart(2, "0");
-  return `#${rh}${gh}${bh}`;
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
 }
 
 export function computeFractalGrid(
@@ -105,13 +110,13 @@ export function generateFractalSvg(
   for (let row = 0; row < resolution; row++) {
     for (let col = 0; col < resolution; col++) {
       const color = escapeToColor(grid.escapeGrid[row][col], maxIter);
-      if (color !== "#0a0a0a") {
+      if (color !== "#000000") {
         rects += `<rect x="${(col * cellSize).toFixed(1)}" y="${(row * cellSize).toFixed(1)}" width="${(cellSize + 0.5).toFixed(1)}" height="${(cellSize + 0.5).toFixed(1)}" fill="${color}"/>`;
       }
     }
   }
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#0a0a0a"/>${rects}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#000000"/>${rects}</svg>`;
 }
 
 export function generateFractalDataUri(

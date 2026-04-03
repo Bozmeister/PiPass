@@ -29,7 +29,20 @@ function seededRandom(n){
 }
 
 var driftSpeed=0.00015+((SEED%1000)*0.00000005);
-var hueBase=(SEED%360);
+
+var PALETTE=[
+  [0x00,0x11,0x00],
+  [0x00,0x22,0x00],
+  [0x00,0x33,0x00],
+  [0x00,0x44,0x00],
+  [0x00,0x66,0x00],
+  [0x00,0xaa,0x55],
+  [0x00,0xff,0x88],
+  [0x66,0xff,0xcc],
+  [0xcc,0xff,0xee],
+  [0xff,0xff,0xff]
+];
+var PLEN=PALETTE.length;
 
 var PARTICLE_COUNT=60;
 var particles=[];
@@ -63,21 +76,6 @@ function resize(){
 resize();
 window.addEventListener('resize',resize);
 
-function hslToRgb(h,s,l){
-  h=((h%360)+360)%360;
-  var c=(1-Math.abs(2*l-1))*s;
-  var x=c*(1-Math.abs((h/60)%2-1));
-  var m=l-c/2;
-  var r=0,g=0,b=0;
-  if(h<60){r=c;g=x}
-  else if(h<120){r=x;g=c}
-  else if(h<180){g=c;b=x}
-  else if(h<240){g=x;b=c}
-  else if(h<300){r=x;b=c}
-  else{r=c;b=x}
-  return[(r+m)*255|0,(g+m)*255|0,(b+m)*255|0];
-}
-
 function renderFractal(){
   var zoomAnimated=driftEnabled?ZOOM*(1+Math.sin(t*driftSpeed)*0.015):ZOOM;
   var oxAnimated=driftEnabled?Math.cos(t*driftSpeed*0.6)*0.003:0;
@@ -91,7 +89,7 @@ function renderFractal(){
   var startX=acx-viewSize/2;
   var startY=acy-viewSize/2;
 
-  var hueShift=(t*10+hueBase)%360;
+  var shimmer=Math.sin(t*0.8)*0.08;
 
   var radius=W/2;
   var cx2=W/2;
@@ -119,29 +117,23 @@ function renderFractal(){
         iter++;
       }
       if(iter>=MAX_ITER){
-        buf[idx]=10;buf[idx+1]=10;buf[idx+2]=10;buf[idx+3]=255;
+        buf[idx]=0;buf[idx+1]=0;buf[idx+2]=0;buf[idx+3]=255;
       }else{
         var norm=iter/MAX_ITER;
-        var nearBoundary=norm>0.3&&norm<0.95;
-
-        if(nearBoundary){
-          var hue=(hueShift+norm*180)%360;
-          var rgb=hslToRgb(hue,0.85,0.35+norm*0.25);
-          buf[idx]=rgb[0];buf[idx+1]=rgb[1];buf[idx+2]=rgb[2];buf[idx+3]=255;
-        }else{
-          var intensity=Math.pow(norm,0.22);
-          var r,g,b;
-          if((iter|0)%6===0){
-            r=220+intensity*35|0;
-            g=60+intensity*80|0;
-            b=255;
-          }else{
-            r=intensity*40|0;
-            g=180+intensity*75|0;
-            b=255;
-          }
-          buf[idx]=r;buf[idx+1]=g;buf[idx+2]=b;buf[idx+3]=255;
-        }
+        var scaled=Math.pow(norm,0.35)*(PLEN-1);
+        var pi=scaled|0;
+        if(pi>PLEN-2)pi=PLEN-2;
+        var frac=scaled-pi;
+        var c0=PALETTE[pi];
+        var c1=PALETTE[pi+1];
+        var bright=1.0+shimmer*(norm>0.3&&norm<0.95?1.0:0.3);
+        var r0=((c0[0]+(c1[0]-c0[0])*frac)*bright)|0;
+        var g0=((c0[1]+(c1[1]-c0[1])*frac)*bright)|0;
+        var b0=((c0[2]+(c1[2]-c0[2])*frac)*bright)|0;
+        buf[idx]=r0>255?255:r0;
+        buf[idx+1]=g0>255?255:g0;
+        buf[idx+2]=b0>255?255:b0;
+        buf[idx+3]=255;
       }
     }
   }
@@ -164,8 +156,8 @@ function renderParticles(){
     if(dx*dx+dy*dy>(radius*radius))continue;
     ctx.beginPath();
     ctx.arc(px,py,p.size,0,Math.PI*2);
-    ctx.fillStyle='rgba(0,255,170,'+p.opacity+')';
-    ctx.shadowColor='rgba(0,255,170,0.6)';
+    ctx.fillStyle='rgba(0,255,136,'+p.opacity+')';
+    ctx.shadowColor='rgba(0,255,136,0.6)';
     ctx.shadowBlur=4;
     ctx.fill();
   }
@@ -179,8 +171,8 @@ function renderGlow(){
 
   ctx.save();
   var grad=ctx.createRadialGradient(cx2,cy2,radius*0.6,cx2,cy2,radius);
-  grad.addColorStop(0,'rgba(0,255,170,0)');
-  grad.addColorStop(1,'rgba(0,255,170,0.08)');
+  grad.addColorStop(0,'rgba(0,255,136,0)');
+  grad.addColorStop(1,'rgba(0,255,136,0.08)');
   ctx.fillStyle=grad;
   ctx.beginPath();
   ctx.arc(cx2,cy2,radius,0,Math.PI*2);

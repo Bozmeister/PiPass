@@ -1,0 +1,92 @@
+PROMPT 1 — Restore ORIGINAL Fractal Colours
+Objective
+Restore the fractal keyprint colours so they match the ORIGINAL PiPass fractal style.
+The current fractal visuals are dull/incorrect and no longer resemble the original glowing green fractal aesthetic.
+
+We must reintroduce:
+• Neon green palette
+• Subtle glow effect
+• Moving/pulsing perimeter pixels
+• High contrast black background
+• Smooth gradient mapping
+• No washed-out colours
+
+This is a visual change only.
+CRYPTOGRAPHY MUST NOT BE TOUCHED.
+
+Files to Inspect
+Search the project for all fractal rendering and colour logic.
+
+Likely locations:
+
+utils/mandelbrot.ts
+
+utils/fractalKeyprint.ts
+
+components/FractalKeyprint.tsx
+
+components/FractalFullscreenViewer.tsx
+
+Colour Requirements
+The palette must be green monochrome neon similar to the original PiPass fractal.
+
+Implement gradient palette:
+
+const FRACTAL_PALETTE = [
+  "#001100",
+  "#002200",
+  "#003300",
+  "#004400",
+  "#006600",
+  "#00aa55",
+  "#00ff88",
+  "#66ffcc",
+  "#ccffee",
+  "#ffffff"
+];
+Use smooth interpolation between colours based on iteration count.
+
+Black background must be pure:
+
+#000000
+Glow Effect
+Fractal must look slightly luminous.
+
+Implement glow using one of the following:
+• Canvas shadow blur
+• Outer glow overlay layer
+• Slight bloom effect via alpha blending
+
+Glow must be subtle, not blurry.
+
+Animated Perimeter Pixels
+Re-introduce animation that makes the fractal feel alive.
+
+Add a slow time-based animation parameter:
+
+time = Date.now() * 0.001
+Use it to slightly modulate:
+• colour brightness
+• edge intensity
+• pixel shimmer
+
+The animation must be slow and hypnotic, not distracting.
+
+Rendering Quality
+Improve render clarity:
+• Increase iteration count if safe for performance
+• Ensure high contrast edges
+• Avoid muddy mid-tones
+
+Performance must remain smooth on mobile.
+
+Acceptance Criteria
+Fractal must:
+• Look neon green
+• Appear subtly glowing
+• Have gentle motion
+• Match original PiPass aesthetic
+
+Do not modify any cryptographic code.
+
+End of task.
