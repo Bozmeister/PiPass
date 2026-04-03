@@ -1,0 +1,222 @@
+Replit Agent Command — Safe Vault Entry Deletion Flow
+Objective
+Replace the current instant-delete vault entry behaviour with a multi-stage secure deletion flow suitable for a production password manager and App Store submission.
+
+The current behaviour deletes a vault entry immediately when the delete button is pressed inside EntryDetailModal. This is unacceptable and must be completely replaced.
+
+Implement a 4-stage destructive action flow + optional undo snackbar.
+
+This change must NOT break encryption, vault storage, auto-lock, or modal navigation.
+
+High Level Behaviour To Implement
+Deleting a vault entry must now require:
+
+Access via overflow menu (not visible red button)
+
+First confirmation Alert dialog
+
+Fresh biometric authentication
+
+Final “type DELETE to confirm” modal
+
+Delete entry
+
+Show 10-second UNDO snackbar
+
+The user must never be able to accidentally delete an entry.
+
+Files Likely Involved
+Search and update all relevant areas.
+
+Key files likely include:
+
+components/EntryDetailModal.tsx
+
+workers/vaultWorker.ts
+
+screens/VaultScreen.tsx
+
+biometric gate utilities in crypto/biometricGate.ts
+
+Create new component:
+
+components/DeleteEntryModal.tsx
+
+PART 1 — Remove Dangerous Immediate Delete
+Inside EntryDetailModal:
+
+• Find the existing delete button that deletes the entry immediately
+• REMOVE the direct deletion call
+• The delete button must no longer call vaultWorker.deleteEntry() directly.
+
+Replace the delete button with an overflow menu (•••).
+
+If no overflow menu exists, create a simple one using a small modal or action sheet.
+
+Menu options:
+
+Edit Entry (existing functionality)
+
+Delete Entry (new safe flow trigger)
+
+The red delete button must no longer appear in the main content area.
+
+PART 2 — First Confirmation Alert
+When user taps Delete Entry from the overflow menu:
+
+Show React Native Alert:
+
+Title:
+Delete entry?
+
+Message:
+This will permanently delete this vault item from this device and from sync.
+
+Buttons:
+
+Cancel (style: cancel)
+
+Delete (style: destructive)
+
+DO NOT delete yet.
+
+The destructive button must call a new function:
+
+beginSecureDeleteFlow(entryId)
+
+PART 3 — Require Fresh Biometric Authentication
+Inside the new beginSecureDeleteFlow function:
+
+Import the existing biometric gate:
+requireFreshBiometric()
+
+Flow:
+
+if biometric fails -> STOP
+if biometric succeeds -> open DeleteEntryModal
+Important:
+This MUST use the existing biometric gate and respect its 2-second freshness window.
+
+PART 4 — Create DeleteEntryModal Component
+Create a brand new component:
+
+components/DeleteEntryModal.tsx
+
+This modal is the final destructive confirmation.
+
+UI Requirements:
+
+Title:
+"Delete Vault Entry"
+
+Warning text:
+"This action cannot be undone."
+
+Instruction text:
+"Type DELETE to confirm."
+
+Include:
+• Text input field
+• Red destructive button labelled "Permanently Delete"
+• Cancel button
+
+Behaviour:
+
+State:
+confirmText
+
+Delete button must be disabled unless:
+
+confirmText === "DELETE"
+This comparison must be case sensitive.
+
+PART 5 — Final Deletion Execution
+When user presses "Permanently Delete":
+
+Call a new handler passed via props:
+onConfirmDelete(entryId)
+
+Close the modal afterwards.
+
+Error handling must use try/catch and show an Alert on failure.
+
+PART 6 — Implement Deletion + Undo Snackbar (VaultScreen)
+Inside VaultScreen.tsx implement a temporary undo system.
+
+Add state:
+
+recentlyDeletedEntryRef
+undoTimerRef
+showUndoSnackbar
+Deletion flow must now be:
+
+Store deleted entry in memory temporarily
+
+Remove entry from vault state immediately
+
+Show snackbar at bottom:
+
+Text:
+"Entry deleted"
+
+Button:
+"UNDO"
+
+Start 10 second timer
+
+After 10 seconds permanently commit deletion
+
+If user taps UNDO before timer:
+
+Restore entry to vault
+
+Cancel timer
+
+Hide snackbar
+
+Important:
+Actual permanent deletion in storage must happen ONLY after timer expires.
+
+PART 7 — Storage Worker Update
+Add a new method in vaultWorker.ts:
+
+permanentlyDeleteEntry(entryId)
+
+This performs the real encrypted storage deletion.
+
+The existing delete logic should be moved here if needed.
+
+VaultScreen should call this ONLY after undo window expires.
+
+PART 8 — Edge Cases To Handle
+Ensure the following are safe:
+
+• App auto-locks during undo window → cancel undo and permanently delete
+• App closes during undo window → permanently delete on next launch
+• Multiple rapid deletions → only track last deleted entry
+• No crashes if biometric not available (web fallback already exists)
+
+PART 9 — UX Polish Requirements
+Ensure:
+
+• All destructive buttons use red color #ef4444
+• Delete modal matches existing dark theme input styles
+• All new code uses try/catch error handling
+• No console logs in production code
+• TypeScript types must be correct
+
+FINAL GOAL
+After this change the delete journey must be:
+
+EntryDetailModal
+→ tap •••
+→ tap Delete
+→ confirmation alert
+→ biometric prompt
+→ type DELETE modal
+→ entry disappears
+→ snackbar with UNDO appears
+
+Accidental deletion must be practically impossible.
+
+End of task.

@@ -18,7 +18,7 @@ interface EntryDetailModalProps {
   visualSeed: number;
   fractalParams?: FractalParams;
   onClose: () => void;
-  onDelete: () => void;
+  onRequestDelete: (entryId: string) => void;
   onActivity?: () => void;
 }
 
@@ -30,12 +30,13 @@ export default function EntryDetailModal({
   visualSeed,
   fractalParams,
   onClose,
-  onDelete,
+  onRequestDelete,
   onActivity,
 }: EntryDetailModalProps) {
   const insets = useSafeAreaInsets();
   const [showPassword, setShowPassword] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [showOverflowMenu, setShowOverflowMenu] = useState(false);
   const clipboardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -60,6 +61,11 @@ export default function EntryDetailModal({
     } catch {}
   }
 
+  function handleDeleteTap() {
+    setShowOverflowMenu(false);
+    onRequestDelete(entry.id);
+  }
+
   const displayTitle = decryptedEntry?.title || entry.title;
   const displayUsername = decryptedEntry?.username || entry.username;
   const displayUrl = decryptedEntry?.url || entry.url;
@@ -78,9 +84,9 @@ export default function EntryDetailModal({
             <Pressable onPress={onClose}>
               <Ionicons name="close" size={24} color="#fff" />
             </Pressable>
-            <Text style={{ color: "#f0f0f0", fontSize: 17, fontWeight: "600" as const }}>{displayTitle}</Text>
-            <Pressable onPress={onDelete}>
-              <Ionicons name="trash-outline" size={22} color="#ff6b6b" />
+            <Text style={{ color: "#f0f0f0", fontSize: 17, fontWeight: "600" as const, flex: 1, textAlign: "center" }}>{displayTitle}</Text>
+            <Pressable onPress={() => setShowOverflowMenu(true)} hitSlop={8}>
+              <Ionicons name="ellipsis-horizontal" size={22} color="#fff" />
             </Pressable>
           </View>
 
@@ -185,6 +191,57 @@ export default function EntryDetailModal({
           </ScrollView>
         </View>
       </View>
+
+      <Modal visible={showOverflowMenu} animationType="fade" transparent statusBarTranslucent>
+        <Pressable
+          onPress={() => setShowOverflowMenu(false)}
+          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}
+        >
+          <View
+            style={{
+              backgroundColor: "#1a1a1a",
+              borderTopLeftRadius: 16,
+              borderTopRightRadius: 16,
+              paddingBottom: insets.bottom + (Platform.OS === "web" ? 34 : 0) + 12,
+              paddingTop: 8,
+            }}
+          >
+            <View style={{ width: 36, height: 4, backgroundColor: "#444", borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
+
+            <Pressable
+              onPress={handleDeleteTap}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                paddingVertical: 16,
+                paddingHorizontal: 20,
+              }}
+            >
+              <Ionicons name="trash-outline" size={22} color="#ef4444" />
+              <Text style={{ color: "#ef4444", fontSize: 17, marginLeft: 14, fontWeight: "500" as const }}>
+                Delete Entry
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => setShowOverflowMenu(false)}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                paddingVertical: 16,
+                paddingHorizontal: 20,
+                borderTopWidth: 1,
+                borderTopColor: "#2a2a2a",
+              }}
+            >
+              <Ionicons name="close-circle-outline" size={22} color="#888" />
+              <Text style={{ color: "#888", fontSize: 17, marginLeft: 14 }}>
+                Cancel
+              </Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
     </Modal>
   );
 }

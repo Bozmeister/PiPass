@@ -44,6 +44,7 @@ import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_FOC
 
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
+import DeleteEntryModal from "../components/DeleteEntryModal";
 import SecureNotesModal from "../components/SecureNotesModal";
 import FractalKeyprint from "../components/FractalKeyprint";
 import AnimatedFractalView from "../components/AnimatedFractalView";
@@ -100,6 +101,13 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   const [profilePasswordFocused, setProfilePasswordFocused] = useState(false);
   const [showNuclearReset, setShowNuclearReset] = useState(false);
   const [showFullscreenFractal, setShowFullscreenFractal] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [deleteTargetTitle, setDeleteTargetTitle] = useState("");
+  const [showUndoSnackbar, setShowUndoSnackbar] = useState(false);
+
+  const recentlyDeletedEntryRef = useRef<VaultEntry | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const settingsTapCountRef = useRef(0);
   const settingsTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -129,6 +137,10 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       setShowKeyprintViewer(false);
       setShowNuclearReset(false);
       setShowFullscreenFractal(false);
+      setShowDeleteModal(false);
+      setDeleteTargetId(null);
+      setDeleteTargetTitle("");
+      commitPendingDeletion();
       setPendingProfileIterations(null);
       setProfilePassword("");
       selectTokenRef.current++;
@@ -235,6 +247,13 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     });
     return () => {
       if (autoLockTimerRef.current) clearInterval(autoLockTimerRef.current);
+      if (undoTimerRef.current) {
+        clearTimeout(undoTimerRef.current);
+        if (recentlyDeletedEntryRef.current) {
+          deleteStoredEntry(recentlyDeletedEntryRef.current.id).catch(() => {});
+          recentlyDeletedEntryRef.current = null;
+        }
+      }
       appStateSub.remove();
     };
   }, []);
@@ -334,12 +353,93 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     }
   }
 
-  async function handleDeleteEntry(id: string) {
-    await deleteStoredEntry(id);
+  async function commitPendingDeletion() {
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+    const pending = recentlyDeletedEntryRef.current;
+    if (pending) {
+      recentlyDeletedEntryRef.current = null;
+      setShowUndoSnackbar(false);
+      try {
+        await deleteStoredEntry(pending.id);
+      } catch {
+        setEntries(prev => [...prev, pending].sort((a, b) => b.createdAt - a.createdAt));
+        Alert.alert("Delete Failed", "Could not permanently delete the entry. It has been restored to your vault.");
+      }
+    }
+  }
+
+  function handleRequestDelete(entryId: string) {
+    const target = entries.find(e => e.id === entryId);
+    if (!target) return;
+
+    Alert.alert(
+      "Delete entry?",
+      "This will permanently delete this vault item from this device and from sync.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => beginSecureDeleteFlow(entryId, target.title),
+        },
+      ]
+    );
+  }
+
+  async function beginSecureDeleteFlow(entryId: string, entryTitle: string) {
+    try {
+      isBiometricActive.current = true;
+      const authenticated = await requireFreshBiometric();
+      isBiometricActive.current = false;
+
+      if (!authenticated) return;
+      if (lockedRef.current) return;
+
+      setDeleteTargetId(entryId);
+      setDeleteTargetTitle(entryTitle);
+      setShowDeleteModal(true);
+    } catch {
+      isBiometricActive.current = false;
+    }
+  }
+
+  function handleConfirmDelete() {
+    if (!deleteTargetId) return;
+
+    const targetEntry = entries.find(e => e.id === deleteTargetId);
+    if (!targetEntry) return;
+
+    commitPendingDeletion();
+
+    recentlyDeletedEntryRef.current = targetEntry;
+    setEntries(prev => prev.filter(e => e.id !== deleteTargetId));
     setSelectedEntry(null);
     setDecryptedEntry(null);
-    const stored = await getAllEntries();
-    setEntries(stored);
+    setShowDeleteModal(false);
+    setDeleteTargetId(null);
+    setDeleteTargetTitle("");
+    setShowUndoSnackbar(true);
+
+    undoTimerRef.current = setTimeout(() => {
+      commitPendingDeletion();
+    }, 10000);
+  }
+
+  function handleUndoDelete() {
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+    const restored = recentlyDeletedEntryRef.current;
+    recentlyDeletedEntryRef.current = null;
+    setShowUndoSnackbar(false);
+
+    if (restored) {
+      setEntries(prev => [...prev, restored].sort((a, b) => b.createdAt - a.createdAt));
+    }
   }
 
   function handleCloseDetail() {
@@ -522,10 +622,18 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
           visualSeed={visualSeed}
           fractalParams={fractalParams}
           onClose={handleCloseDetail}
-          onDelete={() => handleDeleteEntry(selectedEntry.id)}
+          onRequestDelete={handleRequestDelete}
           onActivity={resetActivity}
         />
       )}
+
+      <DeleteEntryModal
+        visible={showDeleteModal}
+        entryTitle={deleteTargetTitle}
+        onConfirmDelete={handleConfirmDelete}
+        onCancel={() => { setShowDeleteModal(false); setDeleteTargetId(null); setDeleteTargetTitle(""); }}
+        onActivity={resetActivity}
+      />
 
       <SecureNotesModal
         visible={showSecureNotes}
@@ -666,6 +774,42 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         seed={visualSeed}
         fractalParams={fractalParams}
       />
+
+      {showUndoSnackbar && (
+        <View
+          style={{
+            position: "absolute",
+            bottom: insets.bottom + (Platform.OS === "web" ? 34 : 0) + 16,
+            left: 16,
+            right: 16,
+            backgroundColor: "#1a1a1a",
+            borderRadius: 12,
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            paddingVertical: 14,
+            paddingHorizontal: 16,
+            borderWidth: 1,
+            borderColor: "#333",
+          }}
+        >
+          <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
+            <Ionicons name="trash-outline" size={18} color="#ef4444" style={{ marginRight: 10 }} />
+            <Text style={{ color: "#fff", fontSize: 15 }}>Entry deleted</Text>
+          </View>
+          <Pressable
+            onPress={handleUndoDelete}
+            style={{
+              paddingVertical: 6,
+              paddingHorizontal: 14,
+              borderRadius: 6,
+              backgroundColor: "#2a2a2a",
+            }}
+          >
+            <Text style={{ color: "#4CAF50", fontSize: 15, fontWeight: "700" as const }}>UNDO</Text>
+          </Pressable>
+        </View>
+      )}
     </View>
   );
 }
