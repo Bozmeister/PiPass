@@ -288,3 +288,12 @@ export async function getFractalFingerprint(): Promise<FractalFingerprintRecord 
   } catch {}
   return raw;
 }
+
+export async function setAutofillEnabled(value: boolean): Promise<void> {
+  await setItem("pipass_autofill_enabled", value ? "1" : "0");
+}
+
+export async function getAutofillEnabled(): Promise<boolean> {
+  const v = await getItem("pipass_autofill_enabled");
+  return v === "1";
+}
