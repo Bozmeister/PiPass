@@ -1,6 +1,7 @@
 import { Platform } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { VaultEntry, SecureNote } from "./vaultWorker";
+import { saveSharedVaultBlob, getSharedVaultBlob, clearSharedVault } from "./sharedVaultStorage";
 
 const VAULT_KEY_PREFIX = "pipass_vault_";
 const VAULT_INDEX_KEY = "pipass_vault_index";
@@ -13,6 +14,7 @@ const SHOW_KEYPRINTS_KEY = "pipass_show_keyprints";
 const VAULT_INITIALIZED_KEY = "pipass_vault_initialized";
 const FRACTAL_FINGERPRINT_KEY = "pipass_fractal_fingerprint";
 const RECOVERY_KEY_HASH_KEY = "pipass_recovery_key_hash";
+const MIGRATION_DONE_KEY = "pipass_shared_migration_done";
 
 async function getItem(key: string): Promise<string | null> {
   if (Platform.OS === "web") {
@@ -55,6 +57,35 @@ async function setVaultIndex(ids: string[]): Promise<void> {
   await setItem(VAULT_INDEX_KEY, JSON.stringify(ids));
 }
 
+async function syncSharedVaultBlob(): Promise<void> {
+  const entries = await getAllEntries();
+  await saveSharedVaultBlob({
+    encryptedBlob: JSON.stringify(entries),
+    version: 1,
+    updatedAt: Date.now(),
+  });
+}
+
+export async function migrateToSharedStorage(): Promise<void> {
+  const migrated = await getItem(MIGRATION_DONE_KEY);
+  if (migrated === "1") return;
+
+  const entries = await getAllEntries();
+  if (entries.length > 0) {
+    const existing = await getSharedVaultBlob();
+    const now = Date.now();
+    if (!existing || existing.updatedAt < now) {
+      await saveSharedVaultBlob({
+        encryptedBlob: JSON.stringify(entries),
+        version: 1,
+        updatedAt: now,
+      });
+    }
+  }
+
+  await setItem(MIGRATION_DONE_KEY, "1");
+}
+
 export async function saveEntry(entry: VaultEntry): Promise<void> {
   const entryKey = VAULT_KEY_PREFIX + entry.id;
   await setItem(entryKey, JSON.stringify(entry));
@@ -64,6 +95,7 @@ export async function saveEntry(entry: VaultEntry): Promise<void> {
     index.push(entry.id);
     await setVaultIndex(index);
   }
+  await syncSharedVaultBlob();
 }
 
 export async function getEntry(id: string): Promise<VaultEntry | null> {
@@ -93,11 +125,13 @@ export async function deleteEntry(id: string): Promise<void> {
   const index = await getVaultIndex();
   const newIndex = index.filter((i) => i !== id);
   await setVaultIndex(newIndex);
+  await syncSharedVaultBlob();
 }
 
 export async function updateEntry(entry: VaultEntry): Promise<void> {
   const entryKey = VAULT_KEY_PREFIX + entry.id;
   await setItem(entryKey, JSON.stringify(entry));
+  await syncSharedVaultBlob();
 }
 
 export async function saveMasterKeyHash(hash: string): Promise<void> {
@@ -132,6 +166,7 @@ export async function clearVault(): Promise<void> {
   }
   await deleteItem(VAULT_INDEX_KEY);
   await deleteItem(MASTER_KEY_HASH_KEY);
+  await clearSharedVault();
 }
 
 export async function saveRecoveryKeyHash(hash: string): Promise<void> {
@@ -151,6 +186,7 @@ export async function destroyAllData(): Promise<void> {
   await deleteItem(VAULT_INITIALIZED_KEY);
   await deleteItem(FRACTAL_FINGERPRINT_KEY);
   await deleteItem(RECOVERY_KEY_HASH_KEY);
+  await deleteItem(MIGRATION_DONE_KEY);
 }
 
 async function getNotesIndex(): Promise<string[]> {

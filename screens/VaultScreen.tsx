@@ -33,6 +33,7 @@ import {
   saveFractalFingerprint,
   getFractalFingerprint,
   FractalFingerprintRecord,
+  migrateToSharedStorage,
 } from "../workers/storageWorker";
 
 import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer } from "../crypto/secureMemory";
@@ -264,6 +265,8 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
 
   async function loadVault() {
     try {
+      await migrateToSharedStorage();
+
       const keyprintPref = await getShowKeyprints();
       setShowKeyprints(keyprintPref);
 

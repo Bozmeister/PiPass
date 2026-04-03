@@ -1,0 +1,115 @@
+Global Rules (MANDATORY)
+Do NOT alter cryptographic primitives
+Do NOT modify:
+crypto/encryption.ts
+crypto/keyDerivation.ts
+crypto/hkdf.ts
+crypto/secureMemory.ts
+Autofill must reuse existing crypto exactly as-is
+Encrypted data only leaves storage
+Extensions MUST only read:
+encryptedBlob
+salt
+iterations
+Extensions MUST derive keys locally : 
+No decrypted persistence
+Decrypted vault data MUST:
+exist only in memory
+be wiped immediately after use
+Biometric requirement
+Autofill MUST require fresh biometric authentication
+No reuse of previous auth sessions
+No logging of sensitive data
+Never log:
+passwords
+decrypted entries
+keys
+blobs
+Do NOT break existing app
+All current functionality must continue working
+Migration must be seamless and automatic
+
+PROMPT 1 (REWRITTEN — ZERO AMBIGUITY)
+Phase 1 & 2 — Shared Vault Storage + Migration
+🔥 Mission Clarification
+
+We are NOT changing encryption logic.
+We are only changing where the encrypted vault blob is stored so native extensions can access it.
+
+✅ Task 1A — Create Shared Storage Layer
+
+Create file:
+workers/sharedVaultStorage.ts
+saveSharedVaultBlob(blob: {
+  encryptedBlob: string;
+  version: number;
+  updatedAt: number;
+}): Promise<void>
+
+getSharedVaultBlob(): Promise<{
+  encryptedBlob: string;
+  version: number;
+  updatedAt: number;
+} | null>
+
+clearSharedVault(): Promise<void>
+
+Platform Implementation Details (STRICT)
+iOS (React Native side)
+Use Keychain via Expo SecureStore WITH shared access group
+Add config placeholder:
+keychainService: "group.com.pipass.shared" This MUST match the future extension entitlement.
+
+Android
+Use:
+EncryptedSharedPreferences
+Store JSON string under key:
+"pipass_shared_vault"
+
+Storage Rules
+Store ONLY:
+encryptedBlob
+version
+updatedAt
+DO NOT store:
+decrypted entries
+master key
+key shares
+
+Task 1B — Refactor vaultWorker
+
+Modify:workers/vaultWorker.ts
+
+REQUIRED CHANGES:
+Replace ALL storage calls:
+❌ SecureStore vault storage
+✅ sharedVaultStorage
+Keep:
+encryption
+HKDF logic
+key splitting
+
+UNCHANGED
+
+
+Task 1C — Migration (CRITICAL)
+On first load:
+1. Attempt:getSharedVaultBlob()
+2. If NULL:
+
+Read from old SecureStore
+If exists:
+Write to shared storage
+DELETE old storage
+
+3. Migration must:
+
+run once
+never overwrite newer shared data
+
+
+🧪 Acceptance Criteria
+Existing users retain vault
+New entries stored in shared storage
+No plaintext ever stored
+No crashes on upgrade
