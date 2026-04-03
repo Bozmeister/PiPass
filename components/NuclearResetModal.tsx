@@ -7,6 +7,8 @@ import {
   TextInput,
   Platform,
   ActivityIndicator,
+  KeyboardAvoidingView,
+  ScrollView,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -172,7 +174,15 @@ export default function NuclearResetModal({
           </View>
         )}
 
-        <View style={{ flex: 1, justifyContent: "center", paddingHorizontal: 24 }}>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
+        <ScrollView
+          contentContainerStyle={{ flexGrow: 1, justifyContent: "center", paddingHorizontal: 24 }}
+          keyboardShouldPersistTaps="handled"
+          bounces={false}
+        >
           {step === "warning" && (
             <View style={{ alignItems: "center" }}>
               <Ionicons name="nuclear-outline" size={64} color="#ef4444" />
@@ -384,7 +394,8 @@ export default function NuclearResetModal({
               )}
             </View>
           )}
-        </View>
+        </ScrollView>
+        </KeyboardAvoidingView>
       </View>
     </Modal>
   );
