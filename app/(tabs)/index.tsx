@@ -81,14 +81,16 @@ export default function HomeScreen() {
 
   useEffect(() => {
     (async () => {
-      const exists = await isVaultInitialized();
-      setVaultExists(exists);
-      if (exists) {
-        const savedProfile = await getSecurityProfile();
-        setIterations(Math.max(savedProfile || 100000, 3));
-        const salt = await getMasterSalt();
-        setMasterSaltState(salt);
-      }
+      try {
+        const exists = await isVaultInitialized();
+        setVaultExists(exists);
+        if (exists) {
+          const savedProfile = await getSecurityProfile();
+          setIterations(Math.max(savedProfile || 100000, 3));
+          const salt = await getMasterSalt();
+          setMasterSaltState(salt);
+        }
+      } catch {}
     })();
   }, []);
 

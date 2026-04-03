@@ -283,7 +283,6 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         }
       }
     } catch (err) {
-      console.error("Vault load error:", err);
       Alert.alert("Error", "Failed to load vault.", [
         { text: "Try Again", onPress: () => loadVault() },
         { text: "Wipe Data", style: "destructive", onPress: async () => { await destroyAllData(); onReset(); } },

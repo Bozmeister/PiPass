@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   View,
   Text,
@@ -38,6 +38,7 @@ export default function RecoveryKeyModal({
   const [currentShareIdx, setCurrentShareIdx] = useState(0);
   const [sharesSaved, setSharesSaved] = useState<boolean[]>([]);
   const [shareCopied, setShareCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!visible) {
@@ -48,6 +49,7 @@ export default function RecoveryKeyModal({
       setCurrentShareIdx(0);
       setSharesSaved([]);
       setShareCopied(false);
+      if (copyTimerRef.current) { clearTimeout(copyTimerRef.current); copyTimerRef.current = null; }
     }
   }, [visible]);
 
@@ -62,7 +64,8 @@ export default function RecoveryKeyModal({
     try {
       await Clipboard.setStringAsync(text);
       setSt(true);
-      setTimeout(() => setSt(false), 2000);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => { setSt(false); copyTimerRef.current = null; }, 2000);
     } catch {}
   }, []);
 

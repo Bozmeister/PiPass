@@ -1,0 +1,145 @@
+PROMPT 2 — FULL PROFESSIONAL QA + BUG FIXING MISSION
+This is the big one. Drop this into Replit after the delete flow + fractal work are complete.
+
+Replit Agent Mission — PiPass Professional QA & Stabilisation
+Role
+You are now acting as a senior mobile QA engineer and security tester preparing PiPass for App Store submission.
+
+Your mission is to:
+
+Create a full professional testing plan
+
+Execute rigorous testing across the entire codebase
+
+Fix all discovered bugs
+
+Produce a final testing report
+
+You must behave like a real QA engineer. Be paranoid, thorough and methodical.
+
+Phase 1 — Generate Professional Test Plan
+Create a document in the project root:
+
+TEST_PLAN.md
+
+This must include:
+
+Test Categories
+Functional Testing
+Authentication flow
+Vault CRUD operations
+Auto-lock behaviour
+Biometric gate behaviour
+Recovery key flow
+Nuclear reset flow
+Server sync
+Offline mode
+Undo delete flow
+Fractal viewer
+
+Security Testing
+Key derivation integrity
+Encryption/decryption failures
+Memory wiping behaviour
+Tamper detection guard
+Biometric freshness enforcement
+Secure storage fallback logic
+
+Edge Case Testing
+App background/foreground transitions
+Device lock/unlock cycles
+Network loss during sync
+Multiple rapid user actions
+App restart mid-operation
+Corrupted storage scenarios
+
+UX Testing
+Destructive actions require friction
+Error messaging clarity
+Loading states
+Input validation
+Accessibility basics
+
+Phase 2 — Execute Rigorous Code Audit
+Search entire project and check for:
+
+• Unhandled promises
+• Missing try/catch blocks
+• Console logs in production code
+• Unsafe async flows
+• Race conditions
+• Memory leaks (timers, listeners)
+• Incorrect React hook usage
+• Unmounted component state updates
+• Weak error handling in crypto flows
+• Broken TypeScript types
+
+Fix all issues found.
+
+Phase 3 — Simulated User Journey Testing
+Mentally simulate full user journeys:
+
+First install → create vault → add entries → lock/unlock
+
+Returning user unlock flow
+
+Add / edit / delete entries repeatedly
+
+Trigger auto-lock during operations
+
+Perform nuclear reset
+
+Perform recovery key verification
+
+Sync vault to server and fetch again
+
+Fix any discovered issues.
+
+Phase 4 — Stability Improvements
+Improve robustness by:
+
+• Adding missing loading states
+• Adding missing error alerts
+• Preventing double taps / race conditions
+• Ensuring all async flows are guarded
+• Ensuring modals cannot stack incorrectly
+
+Phase 5 — Production Readiness Sweep
+Ensure:
+
+• No dev-only code runs in production
+• No debug logs remain
+• All destructive actions are guarded
+• All sensitive state wiped on lock
+• No crashes from null/undefined values
+• App handles storage failures gracefully
+
+Phase 6 — Generate Final QA Report
+Create:
+
+QA_REPORT.md
+
+Include:
+
+Sections:
+
+Executive Summary
+Test Coverage
+Bugs Found and Fixed
+Security Review Notes
+Remaining Risks (if any)
+App Store Readiness Verdict
+
+The report must conclude with one of:
+
+• READY FOR APP STORE SUBMISSION
+or
+• NOT READY (with reasons)
+
+Final Instruction
+Continue working until:
+• All major bugs are fixed
+• Both documents are generated
+• The app is stable and production ready
+
+End of mission.

@@ -14,7 +14,10 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [biometricType, setBiometricType] = useState<string>("Biometric");
 
   useEffect(() => {
-    checkBiometricSupport();
+    checkBiometricSupport().catch(() => {
+      setError("Failed to check biometric support. Tap to retry.");
+      setChecking(false);
+    });
   }, []);
 
   async function checkBiometricSupport() {

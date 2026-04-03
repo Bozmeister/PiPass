@@ -33,6 +33,14 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
   const [copiedField, setCopiedField] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const clipboardTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyFeedbackTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  React.useEffect(() => {
+    return () => {
+      if (clipboardTimerRef.current) clearTimeout(clipboardTimerRef.current);
+      if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current);
+    };
+  }, []);
 
   function resetView() {
     setView("list");
@@ -70,7 +78,6 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
       setView("list");
       if (Platform.OS === "web") { alert("Secure note saved."); } else { Alert.alert("Saved", "Secure note encrypted and stored."); }
     } catch (err) {
-      console.error("Save note failed:", err);
       const msg = "Failed to save note.";
       if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Error", msg); }
     } finally {
@@ -97,8 +104,9 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
       const decrypted = decryptSecureNote(note, keyShares);
       setDecryptedNote(decrypted);
     } catch (err) {
-      console.error("Decrypt note failed:", err);
       setDecryptedNote(null);
+      const msg = "Failed to decrypt note.";
+      if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Error", msg); }
     }
     setDecrypting(false);
   }
@@ -106,11 +114,16 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
   async function handleDelete(id: string) {
     onActivity();
     const doDelete = async () => {
-      await deleteSecureNote(id);
-      onNotesChanged();
-      setView("list");
-      setSelectedNote(null);
-      setDecryptedNote(null);
+      try {
+        await deleteSecureNote(id);
+        onNotesChanged();
+        setView("list");
+        setSelectedNote(null);
+        setDecryptedNote(null);
+      } catch {
+        const msg = "Failed to delete note.";
+        if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Error", msg); }
+      }
     };
 
     if (Platform.OS === "web") {
@@ -127,7 +140,8 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
     try {
       await Clipboard.setStringAsync(value);
       setCopiedField(true);
-      setTimeout(() => setCopiedField(false), 2000);
+      if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current);
+      copyFeedbackTimerRef.current = setTimeout(() => { setCopiedField(false); copyFeedbackTimerRef.current = null; }, 2000);
       if (clipboardTimerRef.current) clearTimeout(clipboardTimerRef.current);
       clipboardTimerRef.current = setTimeout(async () => {
         try { await Clipboard.setStringAsync(""); } catch {}

@@ -38,10 +38,12 @@ export default function EntryDetailModal({
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [showOverflowMenu, setShowOverflowMenu] = useState(false);
   const clipboardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
       if (clipboardTimerRef.current) clearTimeout(clipboardTimerRef.current);
+      if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current);
     };
   }, []);
 
@@ -49,7 +51,8 @@ export default function EntryDetailModal({
     try {
       await Clipboard.setStringAsync(value);
       setCopiedField(fieldName);
-      setTimeout(() => setCopiedField(null), 2000);
+      if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current);
+      copyFeedbackTimerRef.current = setTimeout(() => { setCopiedField(null); copyFeedbackTimerRef.current = null; }, 2000);
 
       if (clipboardTimerRef.current) clearTimeout(clipboardTimerRef.current);
       clipboardTimerRef.current = setTimeout(async () => {

@@ -70,7 +70,6 @@ export default function AddEntryModal({ visible, onClose, onSave, onActivity }: 
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error("AddEntryModal save error:", message);
       if (Platform.OS === "web") {
         alert("Failed to save entry: " + message);
       } else {

@@ -143,18 +143,14 @@ export async function getRecoveryKeyHash(): Promise<string | null> {
 }
 
 export async function destroyAllData(): Promise<void> {
-  try {
-    await clearVault();
-    await clearAllNotes();
-    await deleteItem(MASTER_SALT_KEY);
-    await deleteItem(SECURITY_PROFILE_KEY);
-    await deleteItem(SHOW_KEYPRINTS_KEY);
-    await deleteItem(VAULT_INITIALIZED_KEY);
-    await deleteItem(FRACTAL_FINGERPRINT_KEY);
-    await deleteItem(RECOVERY_KEY_HASH_KEY);
-  } catch (err) {
-    console.error("Purge failed", err);
-  }
+  await clearVault();
+  await clearAllNotes();
+  await deleteItem(MASTER_SALT_KEY);
+  await deleteItem(SECURITY_PROFILE_KEY);
+  await deleteItem(SHOW_KEYPRINTS_KEY);
+  await deleteItem(VAULT_INITIALIZED_KEY);
+  await deleteItem(FRACTAL_FINGERPRINT_KEY);
+  await deleteItem(RECOVERY_KEY_HASH_KEY);
 }
 
 async function getNotesIndex(): Promise<string[]> {
