@@ -36,6 +36,7 @@ import {
   migrateToSharedStorage,
   getAutofillEnabled,
   setAutofillEnabled,
+  storeMasterKeySecurely,
 } from "../workers/storageWorker";
 
 import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer } from "../crypto/secureMemory";
@@ -476,6 +477,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
 
       await saveMasterKeyHash(newKeyHash);
       await onIterationsChange(pendingProfileIterations);
+      await storeMasterKeySecurely(newKeyHex);
 
       const newKeyBytes = hexToBytes(newKeyHex);
       wipeBuffer(newKeyBytes);

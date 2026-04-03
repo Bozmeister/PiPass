@@ -18,6 +18,7 @@ import {
   saveSecurityProfile,
   destroyAllData,
   saveRecoveryKeyHash,
+  storeMasterKeySecurely,
 } from "../../workers/storageWorker";
 import { generateMasterSalt, hashMasterKey } from "../../crypto/keyDerivation";
 import { deriveMasterKeyShares } from "../../workers/vaultWorker";
@@ -151,6 +152,7 @@ export default function HomeScreen() {
         await saveMasterKeyHash(keyHash);
         await saveSecurityProfile(validIters);
         await saveRecoveryKeyHash(keyHashRecovery);
+        await storeMasterKeySecurely(keyHex);
 
         setMasterSaltState(salt);
         setIterations(validIters);
@@ -305,6 +307,7 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
         return;
       }
 
+      await storeMasterKeySecurely(keyHex);
       onUnlocked(shares);
     } catch (err) {
       setError("Failed to derive key. Please try again.");

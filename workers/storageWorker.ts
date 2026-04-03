@@ -187,6 +187,7 @@ export async function destroyAllData(): Promise<void> {
   await deleteItem(FRACTAL_FINGERPRINT_KEY);
   await deleteItem(RECOVERY_KEY_HASH_KEY);
   await deleteItem(MIGRATION_DONE_KEY);
+  await clearMasterKeySecurely();
 }
 
 async function getNotesIndex(): Promise<string[]> {
@@ -287,6 +288,37 @@ export async function getFractalFingerprint(): Promise<FractalFingerprintRecord 
     }
   } catch {}
   return raw;
+}
+
+const KEYCHAIN_KEY = "pipass_master_key";
+
+export async function storeMasterKeySecurely(keyHex: string): Promise<void> {
+  if (Platform.OS === "web") {
+    return;
+  }
+  await SecureStore.setItemAsync(KEYCHAIN_KEY, keyHex, {
+    keychainService: "group.com.pipass.shared",
+    requireAuthentication: true,
+  });
+}
+
+export async function getMasterKeySecurely(): Promise<string | null> {
+  if (Platform.OS === "web") {
+    return null;
+  }
+  return SecureStore.getItemAsync(KEYCHAIN_KEY, {
+    keychainService: "group.com.pipass.shared",
+    requireAuthentication: true,
+  });
+}
+
+export async function clearMasterKeySecurely(): Promise<void> {
+  if (Platform.OS === "web") {
+    return;
+  }
+  await SecureStore.deleteItemAsync(KEYCHAIN_KEY, {
+    keychainService: "group.com.pipass.shared",
+  });
 }
 
 export async function setAutofillEnabled(value: boolean): Promise<void> {
