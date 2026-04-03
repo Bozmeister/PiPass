@@ -1,0 +1,117 @@
+Follow ALL previously defined Global Rules.
+Security constraints are strict and must not be violated.
+
+Do NOT modify unrelated files.
+Do NOT modify any TypeScript crypto files.
+Do NOT alter existing encryption format.
+
+GOAL:
+Implement full iOS Autofill Extension logic:
+- Read encrypted vault blob from shared Keychain
+- Require biometric authentication
+- Derive master key (PBKDF2 fallback)
+- Decrypt vault blob
+- Match credentials by domain
+- Return username/password to iOS Autofill
+
+-----------------------------------
+STEP 1 — ADD CRYPTO HELPERS (SWIFT)
+-----------------------------------
+
+Create file:
+
+ios/AutoFillExtension/CryptoHelper.swift
+
+Add:
+
+import Foundation
+import CommonCrypto
+
+class CryptoHelper {
+
+    static func pbkdf2(
+        password: String,
+        salt: Data,
+        iterations: Int,
+        keyLength: Int = 32
+    ) -> Data? {
+
+        let passwordData = password.data(using: .utf8)!
+        var derivedKey = Data(count: keyLength)
+
+        let result = derivedKey.withUnsafeMutableBytes { derivedBytes in
+            salt.withUnsafeBytes { saltBytes in
+                CCKeyDerivationPBKDF(
+                    CCPBKDFAlgorithm(kCCPBKDF2),
+                    password,
+                    passwordData.count,
+                    saltBytes.bindMemory(to: UInt8.self).baseAddress!,
+                    salt.count,
+                    CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                    UInt32(iterations),
+                    derivedBytes.bindMemory(to: UInt8.self).baseAddress!,
+                    keyLength
+                )
+            }
+        }
+
+        return result == kCCSuccess ? derivedKey : nil
+    }
+
+    static func hmacSHA256(key: Data, data: Data) -> Data {
+        var mac = Data(count: Int(CC_SHA256_DIGEST_LENGTH))
+
+        mac.withUnsafeMutableBytes { macBytes in
+            data.withUnsafeBytes { dataBytes in
+                key.withUnsafeBytes { keyBytes in
+                    CCHmac(
+                        CCHmacAlgorithm(kCCHmacAlgSHA256),
+                        keyBytes.baseAddress,
+                        key.count,
+                        dataBytes.baseAddress,
+                        data.count,
+                        macBytes.baseAddress
+                    )
+                }
+            }
+        }
+
+        return mac
+    }
+
+    static func aesDecrypt(
+        cipherData: Data,
+        key: Data,
+        iv: Data
+    ) -> Data? {
+
+        var outLength = Int(0)
+        var outData = Data(count: cipherData.count + kCCBlockSizeAES128)
+
+        let result = outData.withUnsafeMutableBytes { outBytes in
+            cipherData.withUnsafeBytes { cipherBytes in
+                key.withUnsafeBytes { keyBytes in
+                    iv.withUnsafeBytes { ivBytes in
+                        CCCrypt(
+                            CCOperation(kCCDecrypt),
+                            CCAlgorithm(kCCAlgorithmAES),
+                            CCOptions(kCCOptionPKCS7Padding),
+                            keyBytes.baseAddress,
+                            key.count,
+                            ivBytes.baseAddress,
+                            cipherBytes.baseAddress,
+                            cipherData.count,
+                            outBytes.baseAddress,
+                            outData.count,
+                            &outLength
+                        )
+                    }
+                }
+            }
+        }
+
+        guard result == kCCSuccess else { return nil }
+
+        return outData.prefix(outLength)
+    }
+}
