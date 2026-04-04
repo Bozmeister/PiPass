@@ -1,0 +1,158 @@
+Follow ALL previously defined Global Rules.
+Do NOT modify cryptographic primitives or security architecture.
+
+PROMPT 9
+Phase 8 — Per-entry HKDF Decryption (FULL PARITY WITH TYPESCRIPT)
+
+GOAL:
+Replace placeholder password usage in iOS autofill extension with full per-entry HKDF decryption matching the TypeScript vaultWorker implementation EXACTLY.
+
+CRITICAL
+You MUST mirror the logic from:
+
+* crypto/hkdf.ts
+* workers/vaultWorker.ts
+
+DO NOT invent new crypto. Match existing implementation byte-for-byte.
+
+---
+
+REQUIREMENTS
+
+1. MASTER KEY SOURCE
+
+Retrieve the already-derived master key from Keychain.
+
+DO NOT:
+
+* Ask for password
+* Use PBKDF2 here
+* Use salt/iterations
+
+The extension must use the FINAL derived key stored by the app.
+
+---
+
+2. HKDF DERIVATION (MATCH TS)
+
+For each entry:
+
+entryKey = HKDF(
+masterKey,
+entry.salt,
+"pipass-entry-key:" + entry.id
+)
+
+This MUST match:
+deriveEntryKey() in vaultWorker.ts
+
+---
+
+3. ENTRY FORMAT
+
+Each vault entry contains:
+{
+id: string,
+url: string,
+username: string,
+password: string, // encrypted (iv:cipher:mac)
+salt: string
+}
+
+---
+
+4. DECRYPTION PIPELINE (STRICT ORDER)
+
+For EACH entry:
+
+A) Parse encrypted password:
+iv:cipher:mac
+
+B) Convert hex → Data
+
+C) Compute:
+computedMac = HMAC(entryKey, iv + cipher)
+
+D) Constant-time compare:
+computedMac == mac
+
+If mismatch → SKIP entry
+
+E) AES-256-CBC decrypt:
+plaintext = AES_DECRYPT(cipher, entryKey, iv)
+
+F) Convert to UTF-8 string
+
+---
+
+5. DOMAIN MATCHING
+
+Use existing:
+normalizeDomain()
+
+Match against:
+self.extensionContext.inputItems
+
+Return FIRST valid match only.
+
+---
+
+6. RETURN CREDENTIAL
+
+ASPasswordCredential(user: username, password: decryptedPassword)
+
+Call:
+completeRequest(withSelectedCredential:)
+
+---
+
+7. MEMORY SECURITY (MANDATORY)
+
+Use wipeData() for ALL:
+
+* masterKey
+* entryKey
+* iv
+* cipher
+* mac
+* computedMac
+* decrypted
+
+Use defer blocks to guarantee wiping on ALL exit paths.
+
+---
+
+8. FAILURE RULES
+
+If:
+
+* Key retrieval fails
+* HKDF fails
+* MAC fails
+* Decryption fails
+
+→ DO NOT crash
+→ SKIP entry or cancel cleanly
+
+---
+
+ACCEPTANCE CRITERIA
+
+* No password prompt
+* No PBKDF2 usage in extension
+* HKDF matches TypeScript output exactly
+* Valid entries decrypt correctly
+* Invalid MAC entries rejected
+* Credentials autofill successfully
+* All sensitive memory wiped
+
+---
+
+IMPORTANT
+
+This phase establishes FULL crypto parity between:
+
+* iOS extension
+* TypeScript vaultWorker
+
+This is REQUIRED before production readiness.
