@@ -17,7 +17,12 @@
     "ios": {
        "jsEngine": "jsc",
       "supportsTablet": false,
-      "bundleIdentifier": "com.myapp"
+      "bundleIdentifier": "com.myapp",
+      "entitlements": {
+        "keychain-access-groups": [
+          "group.com.pipass.shared"
+        ]
+      }
     },
     "android": {
       "package": "com.myapp",
