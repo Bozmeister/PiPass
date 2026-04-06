@@ -12,6 +12,7 @@ function withAutofillService(config) {
   config = withAutofillResources(config);
   config = withAutofillKotlinSource(config);
   config = withAutofillDependencies(config);
+  config = withAutofillProguardRules(config);
   return config;
 }
 
@@ -24,38 +25,41 @@ function withAutofillManifest(config) {
       application.service = [];
     }
 
-    const serviceExists = application.service.some(
+    const existingIndex = application.service.findIndex(
       (s) => s.$["android:name"] === AUTOFILL_FQCN
     );
 
-    if (!serviceExists) {
-      application.service.push({
-        $: {
-          "android:name": AUTOFILL_FQCN,
-          "android:exported": "true",
-          "android:permission": "android.permission.BIND_AUTOFILL_SERVICE",
-        },
-        "intent-filter": [
-          {
-            action: [
-              {
-                $: {
-                  "android:name": "android.service.autofill.AutofillService",
-                },
-              },
-            ],
-          },
-        ],
-        "meta-data": [
-          {
-            $: {
-              "android:name": "android.autofill",
-              "android:resource": "@xml/autofill_service_config",
-            },
-          },
-        ],
-      });
+    if (existingIndex !== -1) {
+      application.service.splice(existingIndex, 1);
     }
+
+    application.service.push({
+      $: {
+        "android:name": AUTOFILL_FQCN,
+        "android:label": "PiPass Autofill",
+        "android:exported": "true",
+        "android:permission": "android.permission.BIND_AUTOFILL_SERVICE",
+      },
+      "intent-filter": [
+        {
+          action: [
+            {
+              $: {
+                "android:name": "android.service.autofill.AutofillService",
+              },
+            },
+          ],
+        },
+      ],
+      "meta-data": [
+        {
+          $: {
+            "android:name": "android.autofill",
+            "android:resource": "@xml/autofill_service_config",
+          },
+        },
+      ],
+    });
 
     return config;
   });
@@ -95,7 +99,7 @@ function withAutofillResources(config) {
       } else if (!fs.existsSync(destXml)) {
         fs.writeFileSync(
           destXml,
-          '<?xml version="1.0" encoding="utf-8"?>\n<autofill-service xmlns:android="http://schemas.android.com/apk/res/android"\n    android:settingsActivity="" />\n'
+          '<?xml version="1.0" encoding="utf-8"?>\n<autofill-service xmlns:android="http://schemas.android.com/apk/res/android"\n    android:settingsActivity=""\n    android:supportsInlineSuggestions="true" />\n'
         );
       }
 
@@ -190,6 +194,44 @@ function withAutofillDependencies(config) {
     config.modResults.contents = contents;
     return config;
   });
+}
+
+function withAutofillProguardRules(config) {
+  return withDangerousMod(config, [
+    "android",
+    async (config) => {
+      const proguardPath = path.join(
+        config.modRequest.platformProjectRoot,
+        "app",
+        "proguard-rules.pro"
+      );
+
+      const marker = "# --- PiPass Autofill Service ---";
+
+      const rules = [
+        marker,
+        `-keep class ${AUTOFILL_FQCN} { *; }`,
+        `-keep class ${AUTOFILL_PACKAGE}.CryptoHelper { *; }`,
+        `-keepclassmembers class ${AUTOFILL_FQCN} {`,
+        "    public void onFillRequest(...);",
+        "    public void onSaveRequest(...);",
+        "}",
+        "# --- End PiPass Autofill ---",
+        "",
+      ].join("\n");
+
+      let existing = "";
+      if (fs.existsSync(proguardPath)) {
+        existing = fs.readFileSync(proguardPath, "utf8");
+      }
+
+      if (!existing.includes(marker)) {
+        fs.writeFileSync(proguardPath, existing + "\n" + rules);
+      }
+
+      return config;
+    },
+  ]);
 }
 
 module.exports = withAutofillService;
