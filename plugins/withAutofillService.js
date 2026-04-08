@@ -2,7 +2,7 @@ const { withAndroidManifest, withDangerousMod, withAppBuildGradle } = require("@
 const path = require("path");
 const fs = require("fs");
 
-const AUTOFILL_PACKAGE = "com.pipass.autofill";
+const AUTOFILL_PACKAGE = "com.pipass.app.autofill";
 const AUTOFILL_SERVICE_CLASS = "PiPassAutofillService";
 const AUTOFILL_FQCN = `${AUTOFILL_PACKAGE}.${AUTOFILL_SERVICE_CLASS}`;
 const AUTOFILL_PACKAGE_PATH = AUTOFILL_PACKAGE.replace(/\./g, path.sep);
