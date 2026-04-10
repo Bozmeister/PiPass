@@ -45,7 +45,8 @@
       ],
       "expo-font",
       "expo-web-browser",
-      "./plugins/withAutofillService"
+      "./plugins/withAutofillService",
+      "./plugins/withFlagSecure"
     ],
     "experiments": {
       "typedRoutes": true,

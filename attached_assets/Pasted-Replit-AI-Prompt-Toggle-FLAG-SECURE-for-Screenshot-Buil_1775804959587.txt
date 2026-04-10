@@ -1,0 +1,191 @@
+Replit AI Prompt — Toggle FLAG_SECURE for Screenshot Builds
+
+
+
+I need to modify my Android app so screenshots are blocked in production but allowed in special “store asset” builds.
+
+
+
+Goal
+
+
+
+Implement a clean, professional toggle for Android FLAG_SECURE so I can easily switch between:
+
+
+
+• Production build → screenshots disabled
+
+• Screenshot / store listing build → screenshots allowed
+
+
+
+This must be controlled via BuildConfig flag, not manual commenting.
+
+
+
+⸻
+
+
+
+Step 1 — Add a BuildConfig flag
+
+
+
+Edit the app level build.gradle (Module: app) and add a custom boolean BuildConfig field inside the buildTypes section.
+
+
+
+Add this inside the existing buildTypes block: buildTypes {
+
+    debug {
+
+        buildConfigField "boolean", "ALLOW_SCREENSHOTS", "true"
+
+    }
+
+
+
+    release {
+
+        buildConfigField "boolean", "ALLOW_SCREENSHOTS", "false"
+
+        minifyEnabled true
+
+        shrinkResources true
+
+    }
+
+}
+
+
+
+If buildTypes already exist, merge safely without removing existing config.
+
+
+
+⸻
+
+
+
+Step 2 — Modify MainActivity to respect the flag
+
+
+
+Find where FLAG_SECURE is currently enabled. It will look similar to:
+
+
+
+window.setFlags(
+
+    WindowManager.LayoutParams.FLAG_SECURE,
+
+    WindowManager.LayoutParams.FLAG_SECURE
+
+)
+
+
+
+Replace the implementation with a conditional check using BuildConfig.ALLOW_SCREENSHOTS.
+
+
+
+Kotlin version:
+
+
+
+import android.os.Bundle
+
+import android.view.WindowManager
+
+
+
+override fun onCreate(savedInstanceState: Bundle?) {
+
+    super.onCreate(savedInstanceState)
+
+
+
+    if (!BuildConfig.ALLOW_SCREENSHOTS) {
+
+        window.setFlags(
+
+            WindowManager.LayoutParams.FLAG_SECURE,
+
+            WindowManager.LayoutParams.FLAG_SECURE
+
+        )
+
+    }
+
+}
+
+
+
+If the project uses Java, implement the same logic in Java.
+
+
+
+⸻
+
+
+
+Step 3 — Add clear comments for future maintenance
+
+
+
+Add comments explaining:
+
+
+
+• Why password managers block screenshots
+
+• Why screenshots are temporarily allowed in debug builds
+
+• That release builds MUST keep FLAG_SECURE enabled
+
+
+
+⸻
+
+
+
+Step 4 — Confirm build variants
+
+
+
+Ensure the project now supports two variants:
+
+
+
+• Debug → screenshots allowed (used for Play Store screenshots)
+
+• Release → screenshots blocked (production security)
+
+
+
+⸻
+
+
+
+Step 5 — Do not change any other security features
+
+
+
+Do not remove any encryption, biometrics, or autofill security.
+
+Only implement a safe toggle for FLAG_SECURE.
+
+
+
+⸻
+
+
+
+Expected Result
+
+
+
+When I install a debug build, screenshots work.
+
+When I install a release build, screenshots are blocked.
