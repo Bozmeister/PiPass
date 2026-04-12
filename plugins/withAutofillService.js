@@ -103,6 +103,33 @@ function withAutofillResources(config) {
         );
       }
 
+      const resLayoutDir = path.join(
+        config.modRequest.platformProjectRoot,
+        "app",
+        "src",
+        "main",
+        "res",
+        "layout"
+      );
+
+      const sourceLayout = path.join(
+        projectRoot,
+        "android",
+        "app",
+        "src",
+        "main",
+        "res",
+        "layout",
+        "autofill_item.xml"
+      );
+
+      const destLayout = path.join(resLayoutDir, "autofill_item.xml");
+
+      if (fs.existsSync(sourceLayout) && sourceLayout !== destLayout) {
+        fs.mkdirSync(resLayoutDir, { recursive: true });
+        fs.copyFileSync(sourceLayout, destLayout);
+      }
+
       return config;
     },
   ]);

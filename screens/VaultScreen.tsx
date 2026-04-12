@@ -766,6 +766,8 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
               secureTextEntry
               autoCapitalize="none"
               autoCorrect={false}
+              autoComplete="off"
+              textContentType="none"
               onFocus={() => setProfilePasswordFocused(true)}
               onBlur={() => setProfilePasswordFocused(false)}
               style={{ color: INPUT_TEXT, fontSize: 16, padding: 14, backgroundColor: INPUT_BG, borderRadius: 8, borderWidth: 1, borderColor: profilePasswordFocused ? INPUT_BORDER_FOCUS : INPUT_BORDER, marginBottom: 16 }}

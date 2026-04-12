@@ -1,0 +1,134 @@
+You are an expert Android + React Native + Expo developer.
+
+I am building a password manager app (PiPass) using Expo with a custom Android AutofillService written in Kotlin.
+
+The AutofillService is already registered in AndroidManifest and loads, but the app crashes or fails when autofill is triggered.
+
+Your task is to FIX and COMPLETE the Autofill implementation so it works reliably on a real Android device (Google Pixel).
+
+---
+
+REQUIREMENTS (STRICT):
+
+1. Implement a FULL working AutofillService in Kotlin:
+
+   * Class: PiPassAutofillService
+   * Override:
+
+     * onFillRequest()
+     * onSaveRequest()
+   * MUST:
+
+     * Never crash (null-safe)
+     * Always call callback.onSuccess() or onFailure()
+
+---
+
+2. In onFillRequest():
+
+* Extract AssistStructure safely:
+
+  * Loop through view nodes
+  * Identify fields using:
+
+    * autofillHints
+    * viewId
+    * text hints (username, email, password)
+
+* Detect:
+
+  * username/email field
+  * password field
+
+* Build a Dataset:
+
+  * Use Dataset.Builder
+  * Fill username + password values
+  * Attach RemoteViews presentation
+
+* Return FillResponse with dataset
+
+---
+
+3. Add SAFE null handling everywhere:
+
+   * request.fillContexts may be empty
+   * structure may be null
+   * nodes may not contain expected fields
+
+The service must NEVER crash under any condition.
+
+---
+
+4. Implement onSaveRequest():
+
+* Extract entered username/password from structure
+* Log them (for now)
+* Return callback.onSuccess()
+
+---
+
+5. Fix Android UI Autofill compatibility:
+
+In React Native inputs, ensure:
+
+* username field:
+  autoComplete="username"
+
+* password field:
+  autoComplete="password"
+
+* Also ensure native Android:
+  android:autofillHints="username"
+  android:autofillHints="password"
+
+---
+
+6. Ensure Autofill triggers correctly:
+
+* Only trigger on EditText fields
+* Do NOT block autofill with FLAG_SECURE in debug builds
+* Ensure fields are NOT:
+  importantForAutofill="no"
+
+---
+
+7. Add logging for debugging:
+
+Log:
+
+* when onFillRequest is triggered
+* detected fields
+* dataset creation
+* errors
+
+---
+
+8. DO NOT:
+
+* Access React Native context inside AutofillService
+* Launch activities unnecessarily
+* Assume any field exists
+
+---
+
+9. Output:
+
+* Full working PiPassAutofillService.kt
+* Any required XML (RemoteViews layout)
+* Any fixes to AndroidManifest if needed
+
+---
+
+GOAL:
+
+When I tap a login field in another app:
+→ PiPass appears as autofill option
+→ I select it
+→ Username + password are filled
+→ No crashes
+
+---
+
+Follow Android Autofill best practices strictly.
+Make the implementation production-safe and robust.
