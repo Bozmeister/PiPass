@@ -83,10 +83,8 @@ function withAutofillResources(config) {
 
       const sourceXml = path.join(
         projectRoot,
+        "native",
         "android",
-        "app",
-        "src",
-        "main",
         "res",
         "xml",
         "autofill_service_config.xml"
@@ -114,10 +112,8 @@ function withAutofillResources(config) {
 
       const sourceLayout = path.join(
         projectRoot,
+        "native",
         "android",
-        "app",
-        "src",
-        "main",
         "res",
         "layout",
         "autofill_item.xml"
@@ -144,10 +140,8 @@ function withAutofillKotlinSource(config) {
 
       const sourceDir = path.join(
         projectRoot,
+        "native",
         "android",
-        "app",
-        "src",
-        "main",
         "java",
         AUTOFILL_PACKAGE_PATH
       );
