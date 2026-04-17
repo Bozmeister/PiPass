@@ -95,9 +95,30 @@ function withAutofillResources(config) {
       if (fs.existsSync(sourceXml) && sourceXml !== destXml) {
         fs.copyFileSync(sourceXml, destXml);
       } else if (!fs.existsSync(destXml)) {
+        // Inline fallback used only when the source file is missing entirely.
+        // Mirrors native/android/res/xml/autofill_service_config.xml so the
+        // generation path cannot silently downgrade browser compat support.
+        const browsers = [
+          "com.android.chrome",
+          "com.chrome.beta",
+          "com.chrome.dev",
+          "com.chrome.canary",
+          "org.mozilla.firefox",
+          "org.mozilla.firefox_beta",
+          "com.brave.browser",
+          "com.opera.browser",
+          "com.microsoft.emmx",
+          "com.duckduckgo.mobile.android",
+        ];
+        const compat = browsers
+          .map(
+            (n) =>
+              `    <compatibility-package android:name="${n}" android:maxLongVersionCode="1000000000000" />`
+          )
+          .join("\n");
         fs.writeFileSync(
           destXml,
-          '<?xml version="1.0" encoding="utf-8"?>\n<autofill-service xmlns:android="http://schemas.android.com/apk/res/android"\n    android:settingsActivity=""\n    android:supportsInlineSuggestions="true" />\n'
+          `<?xml version="1.0" encoding="utf-8"?>\n<autofill-service xmlns:android="http://schemas.android.com/apk/res/android"\n    android:settingsActivity=""\n    android:supportsInlineSuggestions="true">\n${compat}\n</autofill-service>\n`
         );
       }
 
@@ -197,6 +218,7 @@ function withAutofillKotlinSource(config) {
 function withAutofillDependencies(config) {
   return withAppBuildGradle(config, (config) => {
     const deps = [
+      "implementation 'androidx.autofill:autofill:1.1.0'",
       "implementation 'androidx.biometric:biometric:1.1.0'",
       "implementation 'androidx.security:security-crypto:1.1.0-alpha06'",
     ];

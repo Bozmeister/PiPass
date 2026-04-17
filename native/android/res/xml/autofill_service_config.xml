@@ -1,4 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
-<autofill-service xmlns:android="http://schemas.android.com/apk/res/android"
+<!--
+    PiPass Autofill Service configuration.
+
+    - settingsActivity: placeholder; replace with a fully-qualified activity
+      name (e.g. "com.pipass.app.autofill.AutofillSettingsActivity") once a
+      settings screen is implemented.
+    - supportsInlineSuggestions: enables inline (in-keyboard) autofill chips.
+    - compatibility-package: opts well-known browsers into the legacy
+      "compatibility mode" so this service can autofill them without those
+      browsers needing to integrate the modern Autofill APIs themselves.
+-->
+<autofill-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
     android:settingsActivity=""
-    android:supportsInlineSuggestions="true" />
+    android:supportsInlineSuggestions="true">
+
+    <compatibility-package
+        android:name="com.android.chrome"
+        android:maxLongVersionCode="1000000000000" />
+    <compatibility-package
+        android:name="com.chrome.beta"
+        android:maxLongVersionCode="1000000000000" />
+    <compatibility-package
+        android:name="com.chrome.dev"
+        android:maxLongVersionCode="1000000000000" />
+    <compatibility-package
+        android:name="com.chrome.canary"
+        android:maxLongVersionCode="1000000000000" />
+    <compatibility-package
+        android:name="org.mozilla.firefox"
+        android:maxLongVersionCode="1000000000000" />
+    <compatibility-package
+        android:name="org.mozilla.firefox_beta"
+        android:maxLongVersionCode="1000000000000" />
+    <compatibility-package
+        android:name="com.brave.browser"
+        android:maxLongVersionCode="1000000000000" />
+    <compatibility-package
+        android:name="com.opera.browser"
+        android:maxLongVersionCode="1000000000000" />
+    <compatibility-package
+        android:name="com.microsoft.emmx"
+        android:maxLongVersionCode="1000000000000" />
+    <compatibility-package
+        android:name="com.duckduckgo.mobile.android"
+        android:maxLongVersionCode="1000000000000" />
+</autofill-service>
