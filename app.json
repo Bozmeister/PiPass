@@ -46,6 +46,7 @@
       "expo-font",
       "expo-web-browser",
       "./plugins/withAutofillService",
+      "./plugins/withAutofillModule",
       "./plugins/withFlagSecure"
     ],
     "experiments": {
