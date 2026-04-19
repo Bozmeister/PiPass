@@ -34,8 +34,6 @@ import {
   getFractalFingerprint,
   FractalFingerprintRecord,
   migrateToSharedStorage,
-  getAutofillEnabled,
-  setAutofillEnabled,
   storeMasterKeySecurely,
 } from "../workers/storageWorker";
 
@@ -99,7 +97,6 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   const [secureNotes, setSecureNotes] = useState<SecureNote[]>([]);
   const [showSecureNotes, setShowSecureNotes] = useState(false);
   const [showKeyprints, setShowKeyprints] = useState(true);
-  const [autofillEnabled, setAutofillEnabledState] = useState(false);
   const [showKeyprintViewer, setShowKeyprintViewer] = useState(false);
   const [pendingProfileIterations, setPendingProfileIterations] = useState<number | null>(null);
   const [profilePassword, setProfilePassword] = useState("");
@@ -273,9 +270,6 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
 
       const keyprintPref = await getShowKeyprints();
       setShowKeyprints(keyprintPref);
-
-      const autofillPref = await getAutofillEnabled();
-      setAutofillEnabledState(autofillPref);
 
       const stored = await getAllEntries();
       setEntries(stored);
@@ -520,11 +514,6 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     await saveShowKeyprints(value);
   }
 
-  async function toggleAutofill(value: boolean) {
-    setAutofillEnabledState(value);
-    await setAutofillEnabled(value);
-  }
-
   function handleSettingsIconTap() {
     settingsTapCountRef.current += 1;
     if (settingsTapTimerRef.current) clearTimeout(settingsTapTimerRef.current);
@@ -710,28 +699,6 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
                 thumbColor={showKeyprints ? "#fff" : "#888"}
               />
             </View>
-
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 12 }}>
-              <Text style={{ color: "#fff", fontSize: 18 }}>Enable Autofill</Text>
-              <Switch
-                value={autofillEnabled}
-                onValueChange={toggleAutofill}
-                trackColor={{ false: "#333", true: "#00ff9f" }}
-                thumbColor={autofillEnabled ? "#fff" : "#888"}
-              />
-            </View>
-            {autofillEnabled && (
-              <View style={{ backgroundColor: "#1a1a1a", borderRadius: 12, padding: 16, marginTop: 4 }}>
-                <Text style={{ color: "#00ff9f", fontSize: 14, fontWeight: "600" as const, marginBottom: 8 }}>
-                  {Platform.OS === "android" ? "Android Setup" : "iOS Setup"}
-                </Text>
-                <Text style={{ color: "#aaa", fontSize: 14, lineHeight: 22 }}>
-                  {Platform.OS === "android"
-                    ? "Go to Settings → System → Autofill Service and select PiPass"
-                    : "Go to Settings → Passwords → AutoFill Passwords and enable PiPass"}
-                </Text>
-              </View>
-            )}
 
             <Pressable onPress={onLock} style={{ backgroundColor: "#1a1a1a", padding: 16, borderRadius: 12, alignItems: "center", marginTop: 30 }}>
               <Ionicons name="lock-closed-outline" size={20} color="#ef4444" style={{ marginBottom: 6 }} />
