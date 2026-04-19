@@ -1,0 +1,86 @@
+# Prompt for Replit
+
+I am getting this Expo iOS error when saving to SecureStore:
+
+```text
+Error: Calling the 'setValueWithKeyAsync' function has failed
+Caused by: You must set `NSFaceIDUsageDescription` in your Info.plist file to use the `requireAuthentication` option
+```
+
+Please fix this properly for an Expo app.
+
+Requirements:
+
+* Find every place where `SecureStore.setItemAsync` uses `requireAuthentication: true`
+* Ensure the iOS config includes `NSFaceIDUsageDescription`
+* If this is an Expo managed app, add it in `app.json` or `app.config.js` under `ios.infoPlist`
+* Use a user-friendly description such as:
+
+  * "PiPass uses Face ID to securely unlock your vault."
+* Make sure the app still works on devices without Face ID
+* Add graceful fallback behavior if biometric authentication is unavailable or denied
+* Prevent the app from crashing if SecureStore biometric auth fails
+* Wrap SecureStore calls in try/catch and show a readable error message to the user
+
+Example config expected:
+
+```json
+{
+  "expo": {
+    "ios": {
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "PiPass uses Face ID to securely unlock your vault."
+      }
+    }
+  }
+}
+```
+
+Also update any biometric auth logic so that:
+
+* If Face ID is unavailable, the app falls back to master password only
+* If SecureStore with `requireAuthentication: true` fails, retry without biometric requirement if appropriate
+* Log useful debug messages in development mode
+
+After making the changes, tell me exactly which files were modified.
+
+---
+
+# Prompt if using app.config.js
+
+Please update `app.config.js` to include:
+
+```js
+export default {
+  expo: {
+    ios: {
+      infoPlist: {
+        NSFaceIDUsageDescription:
+          'PiPass uses Face ID to securely unlock your vault.',
+      },
+    },
+  },
+};
+```
+
+---
+
+# After Replit finishes
+
+Run:
+
+```bash
+npx expo start --clear
+```
+
+If using a custom dev build, also rebuild iOS after changing Info.plist settings because those native settings do not always refresh live:
+
+```bash
+npx expo run:ios
+```
+
+Or if using EAS:
+
+```bash
+eas build --platform ios
+```

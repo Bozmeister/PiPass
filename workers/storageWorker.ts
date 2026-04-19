@@ -291,33 +291,92 @@ export async function getFractalFingerprint(): Promise<FractalFingerprintRecord 
 }
 
 const KEYCHAIN_KEY = "pipass_master_key";
+const KEYCHAIN_SERVICE = "group.com.pipass.shared";
+
+let cachedBiometricAvailable: boolean | null = null;
+
+async function isBiometricAvailable(): Promise<boolean> {
+  if (Platform.OS === "web") return false;
+  if (cachedBiometricAvailable !== null) return cachedBiometricAvailable;
+  try {
+    const LocalAuthentication = await import("expo-local-authentication");
+    const hasHardware = await LocalAuthentication.hasHardwareAsync();
+    const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+    cachedBiometricAvailable = hasHardware && isEnrolled;
+  } catch (err) {
+    if (__DEV__) console.warn("[storageWorker] biometric probe failed:", err);
+    cachedBiometricAvailable = false;
+  }
+  return cachedBiometricAvailable;
+}
 
 export async function storeMasterKeySecurely(keyHex: string): Promise<void> {
-  if (Platform.OS === "web") {
-    return;
+  if (Platform.OS === "web") return;
+
+  const useBiometric = await isBiometricAvailable();
+
+  try {
+    await SecureStore.setItemAsync(KEYCHAIN_KEY, keyHex, {
+      keychainService: KEYCHAIN_SERVICE,
+      requireAuthentication: useBiometric,
+    });
+  } catch (err) {
+    if (__DEV__) {
+      console.warn(
+        "[storageWorker] storeMasterKeySecurely with requireAuthentication=" +
+          useBiometric + " failed:",
+        err
+      );
+    }
+    if (useBiometric) {
+      try {
+        await SecureStore.setItemAsync(KEYCHAIN_KEY, keyHex, {
+          keychainService: KEYCHAIN_SERVICE,
+          requireAuthentication: false,
+        });
+        if (__DEV__) {
+          console.warn(
+            "[storageWorker] stored master key without biometric gate (fallback)"
+          );
+        }
+      } catch (fallbackErr) {
+        if (__DEV__) {
+          console.warn("[storageWorker] fallback store also failed:", fallbackErr);
+        }
+      }
+    }
   }
-  await SecureStore.setItemAsync(KEYCHAIN_KEY, keyHex, {
-    keychainService: "group.com.pipass.shared",
-    requireAuthentication: true,
-  });
 }
 
 export async function getMasterKeySecurely(): Promise<string | null> {
-  if (Platform.OS === "web") {
+  if (Platform.OS === "web") return null;
+
+  const useBiometric = await isBiometricAvailable();
+
+  try {
+    return await SecureStore.getItemAsync(KEYCHAIN_KEY, {
+      keychainService: KEYCHAIN_SERVICE,
+      requireAuthentication: useBiometric,
+    });
+  } catch (err) {
+    if (__DEV__) {
+      console.warn(
+        "[storageWorker] getMasterKeySecurely failed (will fall back to master password):",
+        err
+      );
+    }
     return null;
   }
-  return SecureStore.getItemAsync(KEYCHAIN_KEY, {
-    keychainService: "group.com.pipass.shared",
-    requireAuthentication: true,
-  });
 }
 
 export async function clearMasterKeySecurely(): Promise<void> {
-  if (Platform.OS === "web") {
-    return;
+  if (Platform.OS === "web") return;
+  try {
+    await SecureStore.deleteItemAsync(KEYCHAIN_KEY, {
+      keychainService: KEYCHAIN_SERVICE,
+    });
+  } catch (err) {
+    if (__DEV__) console.warn("[storageWorker] clearMasterKeySecurely failed:", err);
   }
-  await SecureStore.deleteItemAsync(KEYCHAIN_KEY, {
-    keychainService: "group.com.pipass.shared",
-  });
 }
 

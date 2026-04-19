@@ -18,6 +18,9 @@
        "jsEngine": "jsc",
       "supportsTablet": false,
       "bundleIdentifier": "com.pipass.app",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "PiPass uses Face ID to securely unlock your vault."
+      },
       "entitlements": {
         "keychain-access-groups": [
           "group.com.pipass.shared"
