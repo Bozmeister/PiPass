@@ -91,7 +91,7 @@ Preferred communication style: Simple, everyday language.
 
 ### Database
 - **Current**: PostgreSQL via Drizzle ORM (node-postgres adapter). Connection in `server/db.ts` reads `DATABASE_URL` and fails fast if missing — there is no in-memory fallback.
-- **Schema** (`shared/schema.ts`): `users` table (uuid PK `defaultRandom`, unique `username`, `authHash`, `salt`, `iterations`, `createdAt` bigint mode:"number") and `vaultBlobs` table (uuid `userId` PK + FK → `users.id` ON DELETE CASCADE, `encryptedBlob`, `version`, `updatedAt` bigint). Drizzle `$inferSelect` types alongside the existing zod schemas used by the frontend.
+- **Schema** (`shared/schema.ts`): `users` table (uuid PK `defaultRandom`, unique `username`, `authHash`, `salt`, `iterations`, `createdAt` bigint mode:"number") and `vaultBlobs` table (uuid `userId` PK + FK → `users.id` ON DELETE CASCADE, `encryptedBlob`, `version`, `updatedAt` bigint). DB-level CHECK constraint `users_iterations_range` enforces `iterations BETWEEN 3 AND 1000000` — defense-in-depth mirror of the zod `registerSchema` bounds, so even a raw SQL bypass cannot store an out-of-range iteration count. Drizzle `$inferSelect` types alongside the existing zod schemas used by the frontend.
 - **Migrations**: `drizzle.config.ts` + `npm run db:push` (no hand-written SQL).
 
 ### Project Structure

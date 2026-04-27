@@ -1,17 +1,27 @@
 import { z } from "zod";
-import { pgTable, text, integer, bigint, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, text, integer, bigint, uuid, check } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 
-export const users = pgTable("users", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  username: text("username").notNull().unique(),
-  authHash: text("auth_hash").notNull(),
-  salt: text("salt").notNull(),
-  iterations: integer("iterations").notNull(),
-  createdAt: bigint("created_at", { mode: "number" })
-    .notNull()
-    .$defaultFn(() => Date.now()),
-});
+export const users = pgTable(
+  "users",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    username: text("username").notNull().unique(),
+    authHash: text("auth_hash").notNull(),
+    salt: text("salt").notNull(),
+    iterations: integer("iterations").notNull(),
+    createdAt: bigint("created_at", { mode: "number" })
+      .notNull()
+      .$defaultFn(() => Date.now()),
+  },
+  (table) => [
+    check(
+      "users_iterations_range",
+      sql`${table.iterations} >= 3 AND ${table.iterations} <= 1000000`,
+    ),
+  ],
+);
 
 export const vaultBlobs = pgTable("vault_blobs", {
   userId: uuid("user_id")
