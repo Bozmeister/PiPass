@@ -1,0 +1,158 @@
+Implement per-user rate limiting for PiPass to prevent abuse of vault endpoints even with valid credentials.
+
+GOALS:
+1. Add per-user rate limits on all authenticated endpoints
+2. Layer per-user limits on top of existing per-IP limits
+3. Ensure limits are enforced regardless of auth method (session token or auth-hash)
+4. Prevent abuse like rapid overwrites, scraping, or resource exhaustion
+
+---
+
+TARGET ENDPOINTS:
+
+Apply per-user rate limiting to:
+
+- POST /api/vault/sync
+- GET  /api/vault/fetch
+- GET  /api/vault/history
+- POST /api/vault/restore
+- GET  /api/auth/sessions
+- POST /api/auth/logout-all
+
+(Do NOT rate-limit /api/health)
+
+---
+
+RATE LIMITS (initial values):
+
+- vault/fetch   → 60 requests / minute / user
+- vault/sync    → 30 requests / minute / user
+- vault/history → 30 requests / minute / user
+- vault/restore → 10 requests / minute / user
+- auth/sessions → 10 requests / minute / user
+- logout-all    → 5 requests / minute / user
+
+These should be constants, easy to tune later.
+
+---
+
+IMPLEMENTATION:
+
+1. Extend existing rateLimitMap:
+
+Current keys:
+  endpoint:ip
+
+Add:
+  endpoint:uid
+
+Example:
+  "vault_sync:ip:1.2.3.4"
+  "vault_sync:uid:<userId>"
+
+---
+
+2. Create helper:
+
+checkRateLimit(endpoint: string, ip: string, userId?: string)
+
+Behavior:
+- Always check IP limit (existing)
+- If userId present → also check user limit
+- If either limit exceeded → return 429
+
+---
+
+3. Integration point:
+
+In routes:
+- Call authenticate() FIRST
+- Then apply rate limiting using resolved userId
+
+Flow:
+  validateHeaders
+  authenticate()
+  checkRateLimit(endpoint, ip, user.id)
+  proceed
+
+IMPORTANT:
+- Do NOT rate-limit before auth (prevents userId-based enforcement)
+
+---
+
+4. Response:
+
+On limit exceeded:
+  HTTP 429
+  { "error": "Too many requests" }
+
+DO NOT distinguish:
+- IP vs user limit
+- which endpoint triggered
+
+---
+
+5. Storage:
+
+Use in-memory Map (same as current implementation)
+
+Structure:
+  key → { count, windowStart }
+
+Window:
+  fixed 60-second window is acceptable
+
+---
+
+6. Reset logic:
+
+- Reset count when window expires
+- Do NOT leak timing details in response
+
+---
+
+EDGE CASES:
+
+- If authenticate() fails → do NOT apply user limit (no userId)
+- If both IP and user limits exceeded → still return single 429
+- Ensure logout-all cannot be spammed to disrupt sessions
+
+---
+
+SECURITY REQUIREMENTS:
+
+- Must apply equally to:
+    session-token auth
+    auth-hash fallback
+
+- Must not leak:
+    which limit triggered
+    how close user is to limit
+
+---
+
+VERIFICATION:
+
+- Rapid 100 fetch requests → capped at 60/min
+- Rapid 50 sync requests → capped at 30/min
+- Same user from multiple IPs → still capped (user limit works)
+- Different users from same IP → independent user limits
+- Invalid auth → still 401, not 429
+- Rate limit resets after 60s
+
+---
+
+CONSTRAINTS:
+
+- DO NOT modify crypto/
+- DO NOT break existing endpoints
+- DO NOT remove IP-based rate limits
+- KEEP implementation simple (no Redis yet)
+
+---
+
+SUCCESS CRITERIA:
+
+- Vault endpoints cannot be spammed even with valid credentials
+- Abuse becomes bounded and predictable
+- System is protected against high-frequency attacks

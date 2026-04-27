@@ -38,6 +38,31 @@ const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 10;
 
+// Per-user request budgets for the authenticated endpoints. These are the
+// values from the spec — change any single number here and the cap moves
+// without touching any route handler. Values are deliberately tight on
+// destructive operations (logout-all = 5/min) and generous on read paths
+// (vault/fetch = 60/min, ~one per second of normal client polling).
+const PER_USER_RATE_LIMITS = {
+  vault_fetch: 60,
+  vault_sync: 30,
+  vault_history: 30,
+  vault_restore: 10,
+  auth_sessions: 10,
+  logout_all: 5,
+} as const;
+type RateLimitedEndpoint = keyof typeof PER_USER_RATE_LIMITS;
+
+// IP-bucket cap for the authenticated endpoints. Set higher than the per-
+// user cap so several authenticated users sharing one egress IP (corporate
+// NAT, mobile carrier-grade NAT, household router) can each hit their full
+// per-user quota without blocking each other. A single source still gets a
+// hard cap if it spreads abuse across many user accounts. The 10x factor
+// was picked as the "fits a small office" headroom — reasonable shared-IP
+// scenarios stay well under it; spam-from-one-IP across many accounts is
+// still bounded at a predictable rate.
+const PER_IP_LIMIT_MULTIPLIER = 10;
+
 // Rate limiting can be disabled via DISABLE_RATE_LIMIT=true for local
 // integration testing where bursts of requests are expected. The flag is
 // IGNORED whenever NODE_ENV === "production" so a misconfigured deploy can
@@ -58,7 +83,11 @@ if (RATE_LIMIT_DISABLED) {
   );
 }
 
-function isRateLimited(key: string): boolean {
+// Generic fixed-window counter. The `limit` parameter defaults to
+// RATE_LIMIT_MAX so the existing per-IP buckets on register/login/salt
+// keep their original 10/min cap untouched; the new per-endpoint buckets
+// pass an explicit cap derived from PER_USER_RATE_LIMITS.
+function isRateLimited(key: string, limit: number = RATE_LIMIT_MAX): boolean {
   if (RATE_LIMIT_DISABLED) return false;
   const now = Date.now();
   const entry = rateLimitMap.get(key);
@@ -67,7 +96,44 @@ function isRateLimited(key: string): boolean {
     return false;
   }
   entry.count++;
-  return entry.count > RATE_LIMIT_MAX;
+  return entry.count > limit;
+}
+
+// Per-endpoint rate limiter for AUTHENTICATED routes. Always called
+// AFTER authenticate() so the userId is real (a probe with bad creds
+// gets a 401 from authenticate and never poisons either bucket here).
+//
+// Checks two buckets with one shared cap each:
+//   - `endpoint:uid:<userId>` capped at PER_USER_RATE_LIMITS[endpoint] —
+//     the primary defense against a single account's abuse.
+//   - `endpoint:ip:<ip>`     capped at the user cap × MULTIPLIER —
+//     a softer ceiling that lets shared-NAT users coexist while still
+//     stopping a single source from spraying across many accounts.
+//
+// Returns true the moment EITHER bucket is over budget. The 429 response
+// at the call site is single-shape; callers must NOT distinguish "user
+// vs IP triggered" or report time-to-reset (per spec — leaking that lets
+// an attacker tune their pacing).
+function checkUserRateLimit(
+  endpoint: RateLimitedEndpoint,
+  ip: string,
+  userId: string,
+): boolean {
+  const userCap = PER_USER_RATE_LIMITS[endpoint];
+  const ipCap = userCap * PER_IP_LIMIT_MULTIPLIER;
+  // User bucket FIRST: if a single account is already over its own cap,
+  // its denied requests must not keep charging the shared IP bucket.
+  // Without this, a single over-quota account on a NAT could eventually
+  // drag the IP cap over the line and throttle unrelated, well-behaved
+  // users sharing that egress IP.
+  if (isRateLimited(`${endpoint}:uid:${userId}`, userCap)) return true;
+  // IP bucket only fires when a request was about to be honored. The
+  // cross-account abuse case ("one IP spraying via many user accounts")
+  // is still caught: each spreader account's request increments IP
+  // because it's individually within its per-user cap, so the IP bucket
+  // accumulates the spread and saturates at the IP cap.
+  if (isRateLimited(`${endpoint}:ip:${ip}`, ipCap)) return true;
+  return false;
 }
 
 function getClientIp(req: Request): string {
@@ -334,6 +400,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
       const { userId } = auth;
 
+      // Rate limit AFTER authenticate so the userId is real and unauth
+      // probes can never poison either bucket. Single-shape 429 — see
+      // checkUserRateLimit doc for why we don't distinguish IP vs user.
+      if (checkUserRateLimit("vault_sync", getClientIp(req), userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+
       // syncVault is fully transactional: it locks the existing row,
       // verifies version monotonicity (CAS), archives the previous blob to
       // vault_blob_history, writes the new blob, and prunes history — all
@@ -375,6 +448,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
       const { userId } = auth;
 
+      if (checkUserRateLimit("vault_fetch", getClientIp(req), userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+
       const blob = await storage.getVaultBlob(userId);
       if (!blob) {
         return res.status(200).json({ encryptedBlob: null, version: 0 });
@@ -403,6 +480,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(auth.status).json({ error: auth.error });
       }
       const { userId } = auth;
+
+      if (checkUserRateLimit("vault_history", getClientIp(req), userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
 
       // Returns metadata only — `version`, `archivedAt`, `blobSize`. We do
       // NOT return encrypted blobs here. Reasons:
@@ -441,6 +522,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(auth.status).json({ error: auth.error });
       }
       const { userId } = auth;
+
+      if (checkUserRateLimit("vault_restore", getClientIp(req), userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
 
       // restoreVault is itself transactional and idempotent: it picks the
       // new vault version as max(currentVersion, targetVersion) + 1 so the
@@ -527,6 +612,15 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(auth.status).json({ error: auth.error });
       }
 
+      // Tightest cap of any endpoint (5/min). The whole point of
+      // logout-all is "panic button"; that only happens a handful of
+      // times in a user's lifetime. Capping it tightly stops an
+      // attacker who briefly grabs a session from spamming this to
+      // disrupt the legitimate user's other sessions repeatedly.
+      if (checkUserRateLimit("logout_all", getClientIp(req), auth.userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+
       const revoked = await storage.deleteAllSessionsForUser(auth.userId);
       return res.status(200).json({ ok: true, revoked });
     } catch (err) {
@@ -552,6 +646,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       const auth = await authenticate(req, storage);
       if (!auth.ok) {
         return res.status(auth.status).json({ error: auth.error });
+      }
+
+      if (checkUserRateLimit("auth_sessions", getClientIp(req), auth.userId)) {
+        return res.status(429).json({ error: "Too many requests" });
       }
 
       const list = await storage.listActiveSessionsForUser(auth.userId);
