@@ -1,0 +1,79 @@
+Perform a full vault integrity and tamper-resistance audit of the PiPass protocol across client + server.
+
+Scope:
+- client credential handling (lib/credentials.ts)
+- authedApiRequest flow
+- vault sync/fetch endpoints
+- database write logic (versioning, upsert)
+- encryptedBlob handling (treated as opaque ciphertext)
+
+Focus areas:
+
+1. TAMPER RESISTANCE
+- Assume attacker has valid credentials (x-user-id + x-auth-hash)
+- Can they:
+  - Corrupt or poison stored vault data?
+  - Inject malformed encryptedBlob values?
+  - Cause partial writes or inconsistent state?
+- Verify server enforces:
+  - blob is required, correct type, bounded size
+  - version monotonicity is strictly enforced
+  - no downgrade or overwrite with stale data
+
+2. INTEGRITY GUARANTEES
+- Is encryptedBlob integrity verifiable?
+  - If NOT (no MAC / AEAD), explicitly flag risk of silent corruption
+- Determine whether:
+  - server should enforce blob format (length, encoding)
+  - or integrity is fully delegated to client crypto
+
+3. CONCURRENCY & RACE CONDITIONS
+- Simulate:
+  - two devices syncing simultaneously with different versions
+  - out-of-order requests
+- Verify:
+  - last-write-wins is intentional and safe
+  - or whether compare-and-swap semantics are needed
+
+4. REPLAY + REORDER ATTACKS
+- Can an attacker:
+  - replay older valid sync requests to overwrite newer data?
+- Confirm DB constraint + query logic prevents rollback
+
+5. MALFORMED INPUT EDGE CASES
+- fuzz encryptedBlob:
+  - empty string
+  - extremely large but valid-sized payload
+  - non-hex / binary-like input
+- ensure consistent 400 responses (not 500)
+
+6. CLIENT TRUST BOUNDARY
+- verify:
+  - client never trusts fetched blob blindly
+  - crypto layer validates/decrypts safely
+- confirm failure modes:
+  - corrupted blob does not crash app
+  - decryption errors are handled safely
+
+7. STORAGE SAFETY
+- confirm:
+  - no plaintext secrets ever stored server-side
+  - only encryptedBlob persisted
+- verify no accidental logging of blob
+
+8. RECOMMENDATIONS
+Provide:
+- P0 (must fix)
+- P1 (should fix)
+- P2 (nice to have)
+
+Be explicit:
+- If integrity depends entirely on client-side encryption, state it clearly
+- If AEAD (e.g. AES-GCM) is not enforced, recommend it
+- If versioning is the only protection, assess its strength critically
+
+Output format:
+- Executive summary
+- Attack scenarios table
+- Findings with severity
+- Concrete fixes (code-level where possible)
