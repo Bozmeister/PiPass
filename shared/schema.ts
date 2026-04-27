@@ -73,11 +73,52 @@ export const vaultBlobHistory = pgTable(
   ],
 );
 
+// Session lifecycle:
+//   - Created on POST /api/auth/login (one row per login)
+//   - Looked up by SHA-256(token) on every authenticated request
+//   - Deleted by POST /api/auth/logout (current session) or
+//     POST /api/auth/logout-all (every session for the user)
+//   - Cascaded on user deletion (FK ON DELETE CASCADE)
+//
+// We store ONLY token_hash (SHA-256 of the raw token). The raw token is
+// returned exactly once, in the login response, and is never persisted.
+// A DB compromise therefore cannot impersonate any user — the attacker
+// would have to find a SHA-256 preimage of a 32-byte (256-bit) secret,
+// which is computationally infeasible.
+//
+// expires_at / created_at / last_seen_at use bigint epoch-ms to match the
+// existing codebase convention (users.createdAt, vaultBlobs.updatedAt,
+// vaultBlobHistory.archivedAt all use this shape) — a TIMESTAMP column
+// would be inconsistent with the rest of the schema.
+export const sessions = pgTable(
+  "sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull().unique(),
+    createdAt: bigint("created_at", { mode: "number" })
+      .notNull()
+      .$defaultFn(() => Date.now()),
+    expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+    lastSeenAt: bigint("last_seen_at", { mode: "number" })
+      .notNull()
+      .$defaultFn(() => Date.now()),
+    userAgent: text("user_agent"),
+    ipAddress: text("ip_address"),
+  },
+  (table) => [
+    index("sessions_user_expires_idx").on(table.userId, table.expiresAt),
+  ],
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type VaultBlob = typeof vaultBlobs.$inferSelect;
 export type NewVaultBlob = typeof vaultBlobs.$inferInsert;
 export type VaultBlobHistoryEntry = typeof vaultBlobHistory.$inferSelect;
+export type Session = typeof sessions.$inferSelect;
 
 export const insertUserSchema = createInsertSchema(users, {
   username: (col) => col.min(3).max(64),
@@ -146,6 +187,16 @@ export const userIdHeaderSchema = z.string().uuid();
 export const authHashHeaderSchema = insertUserSchema.shape.authHash.regex(
   /^[0-9a-fA-F]+$/,
 );
+
+// x-session-token header: 32 random bytes encoded as 64 lowercase hex
+// chars (see crypto.randomBytes(32).toString("hex") in the login route).
+// Validating shape early avoids spending a SHA-256 + indexed lookup on
+// obvious junk and gives a clean 400 for malformed tokens. Accepts both
+// upper- and lower-case hex; the server normalizes by hashing.
+export const sessionTokenHeaderSchema = z
+  .string()
+  .length(64)
+  .regex(/^[0-9a-fA-F]+$/);
 
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;

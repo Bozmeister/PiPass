@@ -8,6 +8,7 @@ import {
   usernameParamSchema,
   userIdHeaderSchema,
   authHashHeaderSchema,
+  sessionTokenHeaderSchema,
   type RegisterInput,
   type LoginInput,
   type VaultSyncInput,
@@ -75,8 +76,8 @@ export function validateUsernameParam(value: unknown): Result<string> {
 
 export type AuthHeaders = { userId: string; authHash: string };
 
-// Validates the x-user-id and x-auth-hash headers used to authenticate vault
-// reads/writes. Returns a SINGLE error message regardless of which header is
+// Validates the x-user-id and x-auth-hash headers used by the LEGACY vault
+// auth path. Returns a SINGLE error message regardless of which header is
 // missing/malformed/duplicated so an attacker probing the endpoint cannot
 // distinguish "I sent the wrong shape" from "I sent nothing at all".
 //
@@ -109,6 +110,54 @@ export function validateHeaders(req: Request): Result<AuthHeaders> {
     return { ok: false, error: "Invalid authentication headers" };
   }
   return { ok: true, data: { userId: userId.data, authHash: authHash.data } };
+}
+
+// Tagged union representing the two ways a client may authenticate. Session
+// tokens (preferred) carry their own user binding via the DB lookup; legacy
+// auth-hash carries an explicit user id. Routes use a thin authenticate()
+// helper to collapse both into a uniform { userId, sessionId? } downstream.
+export type AuthHeaderKind =
+  | { kind: "session"; token: string }
+  | { kind: "legacy"; userId: string; authHash: string };
+
+// Header validator for any endpoint that accepts EITHER auth scheme. The
+// precedence rule (per spec): if x-session-token is present, use it; else
+// fall back to legacy x-user-id + x-auth-hash. This means a client cannot
+// "downgrade" by sending both — once they include x-session-token, the
+// legacy headers are ignored even if also supplied.
+//
+// Why precedence rather than "must be exactly one": real-world clients in
+// the middle of migrating may keep sending the legacy headers as a safety
+// net. Tolerating that without surprise (always preferring the new scheme
+// when present) is the safe default.
+//
+// Returns 400 for malformed headers (any branch); 401 lookups happen later
+// in the route. Same single-error-message rule as validateHeaders.
+export function validateAuthHeaders(req: Request): Result<AuthHeaderKind> {
+  const rawSessionToken = req.headers["x-session-token"];
+  if (rawSessionToken !== undefined) {
+    const parsed = sessionTokenHeaderSchema.safeParse(rawSessionToken);
+    if (!parsed.success) {
+      return { ok: false, error: "Invalid authentication headers" };
+    }
+    return { ok: true, data: { kind: "session", token: parsed.data } };
+  }
+  const legacy = validateHeaders(req);
+  if (!legacy.ok) return legacy;
+  return { ok: true, data: { kind: "legacy", ...legacy.data } };
+}
+
+// Header validator for endpoints that REQUIRE a session token specifically
+// (POST /api/auth/logout — there is no "log out" without a session id to
+// delete). Falling back to legacy auth-hash here would be meaningless.
+// Returns the parsed token; routes are responsible for hashing + DB lookup.
+export function validateSessionTokenHeader(req: Request): Result<string> {
+  const raw = req.headers["x-session-token"];
+  const parsed = sessionTokenHeaderSchema.safeParse(raw);
+  if (!parsed.success) {
+    return { ok: false, error: "Invalid authentication headers" };
+  }
+  return { ok: true, data: parsed.data };
 }
 
 // Rejects any request that carries query parameters. None of the API endpoints

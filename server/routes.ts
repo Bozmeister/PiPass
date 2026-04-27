@@ -1,14 +1,15 @@
 import express, { type Express, type Request, type Response } from "express";
 import { createServer, type Server } from "node:http";
 import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
-import type { IStorage } from "./storage";
+import { SESSION_LIFETIME_MS, type IStorage } from "./storage";
 import {
   validateRegister,
   validateLogin,
   validateVaultSync,
   validateVaultRestore,
   validateUsernameParam,
-  validateHeaders,
+  validateAuthHeaders,
+  validateSessionTokenHeader,
   validateNoQueryParams,
 } from "./validation";
 
@@ -89,6 +90,89 @@ if (!RATE_LIMIT_DISABLED) {
   }, 5 * 60_000);
 }
 
+// Result of authenticating a request via either session token (preferred)
+// or legacy x-auth-hash. `sessionId` is populated only when the request
+// authenticated via a session token — a logout endpoint can use this to
+// know which session row to delete. The "401 vs 400" split lives here so
+// every authenticated route returns consistent responses; see comments
+// inside authenticate() for why.
+type AuthResult =
+  | { ok: true; userId: string; sessionId: string | null }
+  | { ok: false; status: 400 | 401; error: string };
+
+// Single source of truth for vault-endpoint authentication. Combines:
+//   - Header shape validation (400 on malformed headers — same single
+//     "Invalid authentication headers" message regardless of which header
+//     went wrong, so a probe cannot fingerprint the missing piece).
+//   - Session-token lookup (preferred path): hashes the token, looks up
+//     a non-expired row, and touches last_seen_at. Invalid OR expired
+//     tokens collapse to a single 401 — never tell the attacker which.
+//   - Legacy auth-hash lookup: timing-safe compare against stored hash;
+//     unknown user collapses to the same 401 as wrong password.
+//
+// On success, the route handler gets a verified userId and (for the
+// session path) the sessionId so it can pass it to logout endpoints.
+async function authenticate(
+  req: Request,
+  storage: IStorage,
+): Promise<AuthResult> {
+  const headers = validateAuthHeaders(req);
+  if (!headers.ok) return { ok: false, status: 400, error: headers.error };
+
+  if (headers.data.kind === "session") {
+    // SHA-256 the raw token before any DB I/O. The DB only ever sees the
+    // hash; the raw token never touches the storage layer.
+    const tokenHash = createHash("sha256")
+      .update(headers.data.token)
+      .digest("hex");
+    const session = await storage.getActiveSessionByTokenHash(tokenHash);
+    if (!session) {
+      // Per spec: invalid and expired must be indistinguishable. The
+      // active-only filter inside getActiveSessionByTokenHash already
+      // collapses both branches into a single "no row" result.
+      return { ok: false, status: 401, error: "Invalid credentials" };
+    }
+    // Best-effort touch — failing this should NOT fail the request.
+    // If the DB is briefly unavailable for the UPDATE we still want the
+    // user to be able to read their vault. Caught locally and logged.
+    try {
+      await storage.touchSession(session.id, Date.now());
+    } catch (err) {
+      console.error("touchSession failed");
+    }
+    return { ok: true, userId: session.userId, sessionId: session.id };
+  }
+
+  const { userId, authHash } = headers.data;
+  const user = await storage.getUser(userId);
+  if (!user) {
+    // Same defense-in-depth collapse as the existing legacy code path.
+    return { ok: false, status: 401, error: "Invalid credentials" };
+  }
+  const providedHash = hashForComparison(authHash);
+  const storedHash = Buffer.from(user.authHash, "hex");
+  if (
+    providedHash.length !== storedHash.length ||
+    !timingSafeEqual(providedHash, storedHash)
+  ) {
+    return { ok: false, status: 401, error: "Invalid credentials" };
+  }
+  return { ok: true, userId, sessionId: null };
+}
+
+// Truncate user-agent so a malicious or misbehaving client cannot bloat
+// the sessions table by sending a multi-megabyte UA string. 512 bytes is
+// well above any real browser/native UA (~200 bytes typical).
+const USER_AGENT_MAX_BYTES = 512;
+function captureUserAgent(req: Request): string | null {
+  const raw = req.headers["user-agent"];
+  if (typeof raw !== "string") return null;
+  if (raw.length === 0) return null;
+  return raw.length > USER_AGENT_MAX_BYTES
+    ? raw.slice(0, USER_AGENT_MAX_BYTES)
+    : raw;
+}
+
 export async function registerRoutes(app: Express, storage: IStorage): Promise<Server> {
 
   app.post("/api/auth/register", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
@@ -166,11 +250,32 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
+      // Issue a fresh session: 32 random bytes (256 bits of entropy) hex-
+      // encoded for transport. We persist ONLY the SHA-256 hash so a
+      // database leak cannot impersonate the user — the raw token is shown
+      // to the client exactly once, in this response, and never again.
+      const rawToken = randomBytes(32).toString("hex");
+      const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+      const session = await storage.createSession({
+        userId: user.id,
+        tokenHash,
+        expiresAt: Date.now() + SESSION_LIFETIME_MS,
+        userAgent: captureUserAgent(req),
+        ipAddress: getClientIp(req),
+      });
+
+      // Existing fields are preserved for backward compatibility — clients
+      // that have not yet adopted session tokens continue to receive
+      // id/username/salt/iterations exactly as before. New clients pick up
+      // sessionToken + sessionExpiresAt and switch to the token-based
+      // header (x-session-token) on subsequent requests.
       return res.status(200).json({
         id: user.id,
         username: user.username,
         salt: user.salt,
         iterations: user.iterations,
+        sessionToken: rawToken,
+        sessionExpiresAt: session.expiresAt,
       });
     } catch (err) {
       console.error("Login error");
@@ -214,35 +319,20 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(400).json({ error: queryCheck.error });
       }
 
-      const auth = validateHeaders(req);
-      if (!auth.ok) {
-        return res.status(400).json({ error: auth.error });
-      }
-      const { userId, authHash } = auth.data;
-
-      // Validate body shape BEFORE any DB lookup. Per the hardening spec,
-      // no malformed input should reach the storage layer — even a wasted
-      // getUser() round-trip on a junk request is avoidable. Header/query
-      // checks above are pure CPU; auth (which costs a DB read) only runs
-      // once we know the request is structurally valid.
+      // Validate body shape BEFORE the auth DB lookup — same ordering
+      // rationale as the original implementation: a malformed body should
+      // never trigger a wasted getUser/getActiveSessionByTokenHash round
+      // trip. Header shape is checked inside authenticate() below.
       const parsed = validateVaultSync(req.body);
       if (!parsed.ok) {
         return res.status(400).json({ error: parsed.error });
       }
 
-      const user = await storage.getUser(userId);
-      if (!user) {
-        // Collapse "user does not exist" into the same response as "wrong
-        // password" so an attacker who somehow guesses a UUID cannot
-        // distinguish a real account from a fake one.
-        return res.status(401).json({ error: "Invalid credentials" });
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
       }
-
-      const providedHash = hashForComparison(authHash);
-      const storedHash = Buffer.from(user.authHash, "hex");
-      if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
-        return res.status(401).json({ error: "Invalid credentials" });
-      }
+      const { userId } = auth;
 
       // syncVault is fully transactional: it locks the existing row,
       // verifies version monotonicity (CAS), archives the previous blob to
@@ -279,23 +369,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(400).json({ error: queryCheck.error });
       }
 
-      const auth = validateHeaders(req);
+      const auth = await authenticate(req, storage);
       if (!auth.ok) {
-        return res.status(400).json({ error: auth.error });
+        return res.status(auth.status).json({ error: auth.error });
       }
-      const { userId, authHash } = auth.data;
-
-      const user = await storage.getUser(userId);
-      if (!user) {
-        // See sync handler — same defense-in-depth collapse.
-        return res.status(401).json({ error: "Invalid credentials" });
-      }
-
-      const providedHash = hashForComparison(authHash);
-      const storedHash = Buffer.from(user.authHash, "hex");
-      if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
-        return res.status(401).json({ error: "Invalid credentials" });
-      }
+      const { userId } = auth;
 
       const blob = await storage.getVaultBlob(userId);
       if (!blob) {
@@ -320,21 +398,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(400).json({ error: queryCheck.error });
       }
 
-      const auth = validateHeaders(req);
+      const auth = await authenticate(req, storage);
       if (!auth.ok) {
-        return res.status(400).json({ error: auth.error });
+        return res.status(auth.status).json({ error: auth.error });
       }
-      const { userId, authHash } = auth.data;
-
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Invalid credentials" });
-      }
-      const providedHash = hashForComparison(authHash);
-      const storedHash = Buffer.from(user.authHash, "hex");
-      if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
-        return res.status(401).json({ error: "Invalid credentials" });
-      }
+      const { userId } = auth;
 
       // Returns metadata only — `version`, `archivedAt`, `blobSize`. We do
       // NOT return encrypted blobs here. Reasons:
@@ -359,12 +427,6 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(400).json({ error: queryCheck.error });
       }
 
-      const auth = validateHeaders(req);
-      if (!auth.ok) {
-        return res.status(400).json({ error: auth.error });
-      }
-      const { userId, authHash } = auth.data;
-
       // Body validation BEFORE the DB auth check, mirroring /api/vault/sync.
       // Restore body is tiny ({ version: number }) so the AUTH_BODY_LIMIT
       // (4kb) JSON parser is the right size — a fat body is a 413 by
@@ -374,15 +436,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(400).json({ error: parsed.error });
       }
 
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Invalid credentials" });
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
       }
-      const providedHash = hashForComparison(authHash);
-      const storedHash = Buffer.from(user.authHash, "hex");
-      if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
-        return res.status(401).json({ error: "Invalid credentials" });
-      }
+      const { userId } = auth;
 
       // restoreVault is itself transactional and idempotent: it picks the
       // new vault version as max(currentVersion, targetVersion) + 1 so the
@@ -410,6 +468,96 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       });
     } catch (err) {
       console.error("Vault restore error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // POST /api/auth/logout — revoke the current session.
+  // Requires x-session-token specifically (not a legacy auth-hash) because
+  // there is nothing to delete in the legacy path: a vault user without a
+  // session has nothing to "log out". 400 if the header is missing or
+  // malformed; 401 if the token is unknown OR expired (single response so
+  // an attacker cannot probe for valid tokens via this endpoint); 200 on
+  // success. The response includes no body fields the caller doesn't
+  // already know — the client knows it just logged out.
+  app.post("/api/auth/logout", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const tokenHeader = validateSessionTokenHeader(req);
+      if (!tokenHeader.ok) {
+        return res.status(400).json({ error: tokenHeader.error });
+      }
+
+      const tokenHash = createHash("sha256")
+        .update(tokenHeader.data)
+        .digest("hex");
+      const session = await storage.getActiveSessionByTokenHash(tokenHash);
+      if (!session) {
+        // Treat unknown / expired the same. We do NOT reveal whether the
+        // token "used to be" valid — that is information leakage.
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+
+      await storage.deleteSessionById(session.id);
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      console.error("Logout error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // POST /api/auth/logout-all — revoke EVERY session for the user.
+  // Accepts either auth scheme so a user who lost access to a session
+  // (e.g. stolen device) but still remembers their password can still
+  // panic-revoke. Returns the count of revoked sessions purely as a
+  // confirmation signal for the client UI ("Logged out of N devices").
+  app.post("/api/auth/logout-all", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+
+      const revoked = await storage.deleteAllSessionsForUser(auth.userId);
+      return res.status(200).json({ ok: true, revoked });
+    } catch (err) {
+      console.error("Logout-all error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // GET /api/auth/sessions — list active sessions for the user.
+  // Powers a "where am I logged in?" UI. Only non-expired sessions are
+  // returned. Token hashes are deliberately omitted from the response
+  // (see SessionListItem doc) — an attacker who steals a session for a
+  // moment cannot use this endpoint to enumerate the user's other
+  // sessions' token hashes. The current session id is exposed via the
+  // `id` field so the UI can highlight it.
+  app.get("/api/auth/sessions", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+
+      const list = await storage.listActiveSessionsForUser(auth.userId);
+      return res.status(200).json(list);
+    } catch (err) {
+      console.error("List-sessions error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });

@@ -41,7 +41,14 @@ function setupCors(app: express.Application) {
         "Access-Control-Allow-Methods",
         "GET, POST, PUT, DELETE, OPTIONS",
       );
-      res.header("Access-Control-Allow-Headers", "Content-Type, X-User-Id, X-Auth-Hash");
+      // X-Session-Token is the new (preferred) auth header; X-User-Id /
+      // X-Auth-Hash are kept during the migration window. Browsers reject
+      // any header not listed here on preflight, so missing entries cause
+      // session-token requests to fail before reaching route handlers.
+      res.header(
+        "Access-Control-Allow-Headers",
+        "Content-Type, X-User-Id, X-Auth-Hash, X-Session-Token",
+      );
       res.header("Access-Control-Allow-Credentials", "true");
     }
 

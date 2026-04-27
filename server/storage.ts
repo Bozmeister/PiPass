@@ -1,17 +1,27 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, gt, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
   users,
   vaultBlobs,
   vaultBlobHistory,
+  sessions,
   type User,
   type VaultBlob,
+  type Session,
 } from "../shared/schema";
 
 // Maximum historical encrypted blobs retained per user. Bounded to keep
 // storage growth O(N) per user — without a cap, a malicious creds-holder
 // could spam syncs and balloon the table indefinitely.
 export const VAULT_HISTORY_LIMIT = 10;
+
+// Session lifetime. 30 days mirrors industry-standard "remember me" tokens
+// (1Password, Bitwarden) and bounds the compromise window for a stolen
+// token: even if logout-all is never called, a leaked token expires on
+// its own. Picked here (rather than on the client) so server-side rotation
+// of this constant immediately shortens every NEW session — old sessions
+// keep their original TTL until they expire naturally.
+export const SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 
 export type VaultHistoryEntry = {
   version: number;
@@ -27,6 +37,19 @@ export type RestoreVaultResult =
   | { ok: true; blob: VaultBlob; restoredFromVersion: number }
   | { ok: false; code: "not_found" }
   | { ok: false; code: "version_conflict"; serverVersion: number };
+
+// Public shape for GET /api/auth/sessions. The token_hash column is
+// deliberately omitted — it would let a DB-leak attacker invert the hash
+// table to identify "this user was active across these N devices". Only
+// non-sensitive metadata flows out: id, timestamps, user-agent, ip.
+export type SessionListItem = {
+  id: string;
+  createdAt: number;
+  lastSeenAt: number;
+  expiresAt: number;
+  userAgent: string | null;
+  ipAddress: string | null;
+};
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -48,6 +71,19 @@ export interface IStorage {
     userId: string,
     targetVersion: number,
   ): Promise<RestoreVaultResult>;
+
+  createSession(input: {
+    userId: string;
+    tokenHash: string;
+    expiresAt: number;
+    userAgent: string | null;
+    ipAddress: string | null;
+  }): Promise<Session>;
+  getActiveSessionByTokenHash(tokenHash: string): Promise<Session | undefined>;
+  touchSession(id: string, lastSeenAt: number): Promise<void>;
+  deleteSessionById(id: string): Promise<boolean>;
+  deleteAllSessionsForUser(userId: string): Promise<number>;
+  listActiveSessionsForUser(userId: string): Promise<SessionListItem[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -332,5 +368,108 @@ export class DatabaseStorage implements IStorage {
           LIMIT ${VAULT_HISTORY_LIMIT}
         )
     `);
+  }
+
+  // Persist a new session. Caller is responsible for hashing the raw
+  // token (we never see it) and for picking expiresAt (typically
+  // Date.now() + SESSION_LIFETIME_MS). The unique index on token_hash
+  // is the last line of defense against duplicate-token bugs — a
+  // 64-byte token collision is astronomically unlikely, but if it ever
+  // happens we want a 500 here, not silent overlap.
+  async createSession(input: {
+    userId: string;
+    tokenHash: string;
+    expiresAt: number;
+    userAgent: string | null;
+    ipAddress: string | null;
+  }): Promise<Session> {
+    const rows = await db
+      .insert(sessions)
+      .values({
+        userId: input.userId,
+        tokenHash: input.tokenHash,
+        expiresAt: input.expiresAt,
+        userAgent: input.userAgent,
+        ipAddress: input.ipAddress,
+      })
+      .returning();
+    return rows[0];
+  }
+
+  // Look up a session by its (already hashed) token, filtering expired
+  // rows so the caller cannot accidentally honor a stale token. The
+  // composite index on (user_id, expires_at) does NOT cover this lookup
+  // (we query by token_hash, which has its own unique index); the
+  // expires_at predicate is just a cheap defense-in-depth filter on the
+  // single-row result.
+  async getActiveSessionByTokenHash(
+    tokenHash: string,
+  ): Promise<Session | undefined> {
+    const now = Date.now();
+    const rows = await db
+      .select()
+      .from(sessions)
+      .where(
+        and(eq(sessions.tokenHash, tokenHash), gt(sessions.expiresAt, now)),
+      )
+      .limit(1);
+    return rows[0];
+  }
+
+  // Update last_seen_at on every authenticated request. This is a single
+  // indexed UPDATE by PK — cheap, but it IS a write per request, so any
+  // future "optimize for read-heavy" work should consider throttling
+  // (e.g. only touch if last_seen_at is more than 60s old).
+  async touchSession(id: string, lastSeenAt: number): Promise<void> {
+    await db
+      .update(sessions)
+      .set({ lastSeenAt })
+      .where(eq(sessions.id, id));
+  }
+
+  // Delete a single session by id. Returns true if a row was actually
+  // removed so the route can distinguish "I just logged you out" from
+  // "that session was already gone" (though the route currently treats
+  // both as 200 — see comments there).
+  async deleteSessionById(id: string): Promise<boolean> {
+    const rows = await db
+      .delete(sessions)
+      .where(eq(sessions.id, id))
+      .returning({ id: sessions.id });
+    return rows.length > 0;
+  }
+
+  // Nuke every session for the user. Used by POST /api/auth/logout-all
+  // and is the panic-button for "I think my account is compromised".
+  // Returns the count of revoked sessions for the response payload.
+  async deleteAllSessionsForUser(userId: string): Promise<number> {
+    const rows = await db
+      .delete(sessions)
+      .where(eq(sessions.userId, userId))
+      .returning({ id: sessions.id });
+    return rows.length;
+  }
+
+  // Active (non-expired) sessions for the user. token_hash is NEVER
+  // returned — see SessionListItem doc for why. Sorted by lastSeenAt
+  // desc so the most recently active device shows up first in the
+  // user-facing "where am I logged in?" view.
+  async listActiveSessionsForUser(
+    userId: string,
+  ): Promise<SessionListItem[]> {
+    const now = Date.now();
+    const rows = await db
+      .select({
+        id: sessions.id,
+        createdAt: sessions.createdAt,
+        lastSeenAt: sessions.lastSeenAt,
+        expiresAt: sessions.expiresAt,
+        userAgent: sessions.userAgent,
+        ipAddress: sessions.ipAddress,
+      })
+      .from(sessions)
+      .where(and(eq(sessions.userId, userId), gt(sessions.expiresAt, now)))
+      .orderBy(desc(sessions.lastSeenAt));
+    return rows;
   }
 }

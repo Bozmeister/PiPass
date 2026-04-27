@@ -1,0 +1,159 @@
+Implement session tokens and revocation for PiPass to replace long-lived header-based authentication.
+
+GOALS:
+1. Replace x-auth-hash on vault endpoints with short-lived session tokens
+2. Enable server-side revocation ("log out everywhere")
+3. Preserve zero-knowledge architecture (no crypto/ changes)
+4. Maintain backward compatibility during migration
+
+---
+
+SCHEMA:
+
+Create table:
+
+sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMP NOT NULL DEFAULT now(),
+  expires_at TIMESTAMP NOT NULL,
+  last_seen_at TIMESTAMP NOT NULL DEFAULT now(),
+  user_agent TEXT,
+  ip_address TEXT,
+
+  CONSTRAINT fk_user
+    FOREIGN KEY (user_id)
+    REFERENCES users(id)
+    ON DELETE CASCADE
+);
+
+Index:
+- (user_id, expires_at)
+
+---
+
+AUTH FLOW CHANGES:
+
+1. On POST /api/auth/login success:
+
+- Generate token:
+    rawToken = crypto.randomBytes(32).toString("hex")
+    tokenHash = sha256(rawToken)
+
+- Store in sessions:
+    user_id, token_hash, expires_at (e.g. now + 30 days)
+
+- Return:
+{
+  "sessionToken": rawToken
+}
+
+---
+
+2. New header:
+
+x-session-token: <rawToken>
+
+---
+
+3. Validation:
+
+- Hash incoming token
+- Lookup session by token_hash
+- Check expiry
+- If valid:
+    attach user to request
+    update last_seen_at
+
+- If invalid/expired:
+    return 401
+
+---
+
+4. Migration (IMPORTANT):
+
+Vault endpoints must accept BOTH:
+- x-session-token (preferred)
+- x-auth-hash (legacy)
+
+Logic:
+- If session token present → use it
+- Else fallback to auth-hash validation
+
+DO NOT break existing clients
+
+---
+
+NEW ENDPOINTS:
+
+1) POST /api/auth/logout
+
+- Deletes current session (by token)
+
+---
+
+2) POST /api/auth/logout-all
+
+- Deletes all sessions for user
+
+---
+
+3) GET /api/auth/sessions
+
+Returns:
+[
+  {
+    "id": UUID,
+    "createdAt": timestamp,
+    "lastSeenAt": timestamp,
+    "userAgent": string,
+    "ipAddress": string
+  }
+]
+
+---
+
+SECURITY REQUIREMENTS:
+
+- NEVER store raw tokens in DB
+- ALWAYS store token_hash
+- Tokens must be high entropy (>= 256 bits)
+- Expired tokens must be rejected
+- No distinction between "invalid" vs "expired"
+
+---
+
+EDGE CASES:
+
+- Multiple sessions per user allowed
+- Logout-all must invalidate ALL tokens immediately
+- Expired sessions can be lazily cleaned up
+
+---
+
+CONSTRAINTS:
+
+- DO NOT modify crypto/
+- DO NOT remove auth-hash yet
+- DO NOT weaken validation
+- KEEP existing API responses unchanged except login
+
+---
+
+VERIFICATION:
+
+- Login → receive session token
+- Use token → access vault endpoints
+- Logout → token no longer works
+- Logout-all → all tokens invalid
+- Expired token → 401
+- Auth-hash still works (backward compatibility)
+
+---
+
+SUCCESS CRITERIA:
+
+- Credentials are now revokable
+- Auth-hash no longer required on every request
+- Compromise window is bounded by session lifetime
