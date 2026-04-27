@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "X2W9fkfmnKEtPC5zSIq-A"
+uri = "file://auth_trust_model_review.md"
+type = "text"
+title = "Authentication Trust Model & API Attack Surface Review"
