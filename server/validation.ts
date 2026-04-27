@@ -73,23 +73,46 @@ export type AuthHeaders = { userId: string; authHash: string };
 // missing/malformed/duplicated so an attacker probing the endpoint cannot
 // distinguish "I sent the wrong shape" from "I sent nothing at all".
 //
-// Rejected shapes (all → 401 "Authentication required"):
+// Routes translate `!ok` into a 400 response. 400 (not 401) is correct here
+// because the headers themselves are malformed input — the user has not yet
+// presented credentials we could even attempt to authenticate. 401 is reserved
+// for "headers were well-formed but the credentials don't match a real user"
+// (handled separately in the route handler).
+//
+// Rejected shapes (all → 400 "Invalid authentication headers"):
 //   - header missing
 //   - header sent more than once (Express represents this as string[])
+//   - header is not a string (Node header-parsing edge cases)
 //   - x-user-id is not a valid UUID
 //   - x-auth-hash is not a hex string in the allowed length range
 //
 // On success, the returned strings are guaranteed safe to pass to
 // storage.getUser() (Drizzle/PG would otherwise throw on a non-UUID input,
 // surfacing as a misleading 500).
-export function validateAuthHeaders(req: Request): Result<AuthHeaders> {
+export function validateHeaders(req: Request): Result<AuthHeaders> {
   const rawUserId = req.headers["x-user-id"];
   const rawAuthHash = req.headers["x-auth-hash"];
 
+  // Note: we do NOT cast headers to string blindly. Express types these as
+  // `string | string[] | undefined` and the Zod schemas below reject any
+  // non-string shape (including the duplicate-header `string[]` case).
   const userId = userIdHeaderSchema.safeParse(rawUserId);
   const authHash = authHashHeaderSchema.safeParse(rawAuthHash);
   if (!userId.success || !authHash.success) {
-    return { ok: false, error: "Authentication required" };
+    return { ok: false, error: "Invalid authentication headers" };
   }
   return { ok: true, data: { userId: userId.data, authHash: authHash.data } };
+}
+
+// Rejects any request that carries query parameters. None of the API endpoints
+// accept query input today, so the safe default is "any unexpected query
+// param is a 400". Mirrors the .strict() behaviour we apply to JSON bodies.
+//
+// Returns Result<void> for symmetry with the other validators; routes
+// translate `!ok` into a 400 response.
+export function validateNoQueryParams(req: Request): Result<undefined> {
+  if (req.query && Object.keys(req.query).length > 0) {
+    return { ok: false, error: "Unexpected query parameter" };
+  }
+  return { ok: true, data: undefined };
 }

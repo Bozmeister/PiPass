@@ -7,7 +7,8 @@ import {
   validateLogin,
   validateVaultSync,
   validateUsernameParam,
-  validateAuthHeaders,
+  validateHeaders,
+  validateNoQueryParams,
 } from "./validation";
 
 // Per-route JSON parsers with explicit, route-appropriate size limits.
@@ -91,6 +92,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
 
   app.post("/api/auth/register", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
       const clientIp = getClientIp(req);
       if (isRateLimited(`register:${clientIp}`)) {
         return res.status(429).json({ error: "Too many attempts. Please try again later." });
@@ -129,6 +135,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
 
   app.post("/api/auth/login", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
       const clientIp = getClientIp(req);
       if (isRateLimited(`login:${clientIp}`)) {
         return res.status(429).json({ error: "Too many attempts. Please try again later." });
@@ -168,6 +179,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
 
   app.get("/api/auth/salt/:username", async (req: Request, res: Response) => {
     try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
       const clientIp = getClientIp(req);
       if (isRateLimited(`salt:${clientIp}`)) {
         return res.status(429).json({ error: "Too many attempts. Please try again later." });
@@ -192,11 +208,26 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
 
   app.post("/api/vault/sync", jsonBody(VAULT_SYNC_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
-      const auth = validateAuthHeaders(req);
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const auth = validateHeaders(req);
       if (!auth.ok) {
-        return res.status(401).json({ error: auth.error });
+        return res.status(400).json({ error: auth.error });
       }
       const { userId, authHash } = auth.data;
+
+      // Validate body shape BEFORE any DB lookup. Per the hardening spec,
+      // no malformed input should reach the storage layer — even a wasted
+      // getUser() round-trip on a junk request is avoidable. Header/query
+      // checks above are pure CPU; auth (which costs a DB read) only runs
+      // once we know the request is structurally valid.
+      const parsed = validateVaultSync(req.body);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
 
       const user = await storage.getUser(userId);
       if (!user) {
@@ -210,11 +241,6 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       const storedHash = Buffer.from(user.authHash, "hex");
       if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
         return res.status(401).json({ error: "Invalid credentials" });
-      }
-
-      const parsed = validateVaultSync(req.body);
-      if (!parsed.ok) {
-        return res.status(400).json({ error: parsed.error });
       }
 
       const existing = await storage.getVaultBlob(userId);
@@ -246,9 +272,14 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
 
   app.get("/api/vault/fetch", async (req: Request, res: Response) => {
     try {
-      const auth = validateAuthHeaders(req);
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const auth = validateHeaders(req);
       if (!auth.ok) {
-        return res.status(401).json({ error: auth.error });
+        return res.status(400).json({ error: auth.error });
       }
       const { userId, authHash } = auth.data;
 
@@ -280,8 +311,23 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
     }
   });
 
-  app.get("/api/health", (_req: Request, res: Response) => {
+  app.get("/api/health", (req: Request, res: Response) => {
+    const queryCheck = validateNoQueryParams(req);
+    if (!queryCheck.ok) {
+      return res.status(400).json({ error: queryCheck.error });
+    }
     return res.status(200).json({ status: "ok", timestamp: Date.now() });
+  });
+
+  // Catch-all for unknown /api/* paths. Without this, Express returns its
+  // default text/html 404 page, which violates the API's "always JSON
+  // { error: ... }" contract and could confuse a JSON-only client. Mounted
+  // as middleware (rather than `app.all("/api/*", ...)`) for compatibility
+  // with Express 5 / path-to-regexp v8, which no longer accepts the bare
+  // wildcard syntax. Order-based: only requests that didn't match any of
+  // the routes registered above reach this handler.
+  app.use("/api", (_req: Request, res: Response) => {
+    return res.status(404).json({ error: "Not found" });
   });
 
   const httpServer = createServer(app);
