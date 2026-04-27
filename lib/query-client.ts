@@ -1,5 +1,6 @@
 import { fetch } from "expo/fetch";
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
+import { clearCredentials, getCredentials } from "./credentials";
 
 /**
  * Gets the base URL for the Express API server (e.g., "http://localhost:3000")
@@ -38,6 +39,82 @@ export async function apiRequest(
     body: data ? JSON.stringify(data) : undefined,
     credentials: "include",
   });
+
+  await throwIfResNotOk(res);
+  return res;
+}
+
+/**
+ * Thrown by `authedApiRequest` whenever the request cannot be authenticated:
+ *   - no credentials in SecureStore (caller must run the login flow)
+ *   - server returned 401 (credentials invalid; SecureStore is wiped before
+ *     this error is thrown so the caller can navigate to the login flow
+ *     without first having to clean up).
+ *
+ * Callers should catch this specifically and route the user to re-auth.
+ */
+export class AuthRequiredError extends Error {
+  constructor(message = "Authentication required") {
+    super(message);
+    this.name = "AuthRequiredError";
+  }
+}
+
+/**
+ * Authenticated request helper for endpoints that require `x-user-id` +
+ * `x-auth-hash`.
+ *
+ * Contract:
+ *   - Reads credentials from `expo-secure-store` (Keychain/Keystore on native,
+ *     localStorage on web) on EVERY call. Never caches in memory or React
+ *     state — `expo-secure-store` is the only trusted credential source.
+ *   - If no credentials are present, throws `AuthRequiredError` BEFORE any
+ *     network request is made. The server never sees the call.
+ *   - Headers are guaranteed to be plain strings: `getCredentials` rejects
+ *     anything that isn't a UUID + hex string, so the helper cannot send an
+ *     array, object, or undefined.
+ *   - On 401 from the server, clears stored credentials and throws
+ *     `AuthRequiredError`. Caller is responsible for navigating to re-auth.
+ *   - Never logs credentials. Errors thrown from this function include the
+ *     server's response body but never the request headers.
+ */
+export async function authedApiRequest(
+  method: string,
+  route: string,
+  data?: unknown | undefined,
+): Promise<Response> {
+  const creds = await getCredentials();
+  if (!creds) {
+    throw new AuthRequiredError(
+      "Authentication required: no credentials in secure storage",
+    );
+  }
+
+  const baseUrl = getApiUrl();
+  const url = new URL(route, baseUrl);
+
+  const headers: Record<string, string> = {
+    "x-user-id": creds.userId,
+    "x-auth-hash": creds.authHash,
+  };
+  if (data !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const res = await fetch(url.toString(), {
+    method,
+    headers,
+    body: data !== undefined ? JSON.stringify(data) : undefined,
+    // Defense-in-depth: explicitly omit cookies. The server is sessionless
+    // and the only trusted credential source is SecureStore, so we must not
+    // accidentally send any other credential material on the request.
+    credentials: "omit",
+  });
+
+  if (res.status === 401) {
+    await clearCredentials();
+    throw new AuthRequiredError();
+  }
 
   await throwIfResNotOk(res);
   return res;
