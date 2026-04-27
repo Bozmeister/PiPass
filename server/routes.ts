@@ -72,6 +72,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         iterations: user.iterations,
       });
     } catch (err) {
+      const e = err as { code?: string; constraint?: string };
+      if (e?.code === "23505") {
+        return res.status(409).json({ error: "Username already taken" });
+      }
       console.error("Register error");
       return res.status(500).json({ error: "Internal server error" });
     }
@@ -168,6 +172,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
 
       const blob = await storage.upsertVaultBlob(userId, parsed.data.encryptedBlob, parsed.data.version);
+      if (!blob) {
+        const current = await storage.getVaultBlob(userId);
+        return res.status(409).json({
+          error: "Version conflict",
+          serverVersion: current?.version ?? 0,
+        });
+      }
 
       return res.status(200).json({
         version: blob.version,

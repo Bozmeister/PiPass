@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { users, vaultBlobs, type User, type VaultBlob } from "../shared/schema";
 
@@ -7,7 +7,7 @@ export interface IStorage {
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(input: { username: string; authHash: string; salt: string; iterations: number }): Promise<User>;
   getVaultBlob(userId: string): Promise<VaultBlob | undefined>;
-  upsertVaultBlob(userId: string, encryptedBlob: string, version: number): Promise<VaultBlob>;
+  upsertVaultBlob(userId: string, encryptedBlob: string, version: number): Promise<VaultBlob | null>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -56,7 +56,7 @@ export class DatabaseStorage implements IStorage {
     userId: string,
     encryptedBlob: string,
     version: number,
-  ): Promise<VaultBlob> {
+  ): Promise<VaultBlob | null> {
     const now = Date.now();
     const rows = await db
       .insert(vaultBlobs)
@@ -73,9 +73,10 @@ export class DatabaseStorage implements IStorage {
           version,
           updatedAt: now,
         },
+        where: sql`${vaultBlobs.version} < ${version}`,
       })
       .returning();
-    return rows[0];
+    return rows[0] ?? null;
   }
 }
 
