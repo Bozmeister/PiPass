@@ -12,7 +12,28 @@ const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 10;
 
+// Rate limiting can be disabled via DISABLE_RATE_LIMIT=true for local
+// integration testing where bursts of requests are expected. The flag is
+// IGNORED whenever NODE_ENV === "production" so a misconfigured deploy can
+// never silently turn off the auth-endpoint protection.
+const RATE_LIMIT_DISABLED =
+  process.env.NODE_ENV !== "production" &&
+  process.env.DISABLE_RATE_LIMIT === "true";
+
+if (RATE_LIMIT_DISABLED) {
+  console.warn(
+    "[rate-limit] DISABLED via DISABLE_RATE_LIMIT=true " +
+      "(non-production environment). Do not use this setting in production.",
+  );
+} else if (process.env.DISABLE_RATE_LIMIT === "true") {
+  console.warn(
+    "[rate-limit] DISABLE_RATE_LIMIT=true was set but is being IGNORED " +
+      "because NODE_ENV=production. Rate limiting remains active.",
+  );
+}
+
 function isRateLimited(key: string): boolean {
+  if (RATE_LIMIT_DISABLED) return false;
   const now = Date.now();
   const entry = rateLimitMap.get(key);
   if (!entry || now > entry.resetAt) {
@@ -34,12 +55,14 @@ function deterministicDummySalt(username: string): string {
   return createHash("sha256").update(DUMMY_SECRET).update(username).digest("hex");
 }
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of rateLimitMap) {
-    if (now > entry.resetAt) rateLimitMap.delete(key);
-  }
-}, 5 * 60_000);
+if (!RATE_LIMIT_DISABLED) {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of rateLimitMap) {
+      if (now > entry.resetAt) rateLimitMap.delete(key);
+    }
+  }, 5 * 60_000);
+}
 
 export async function registerRoutes(app: Express, storage: IStorage): Promise<Server> {
 

@@ -80,7 +80,7 @@ Preferred communication style: Simple, everyday language.
 - **Security**:
   - Timing-safe auth hash comparison via `node:crypto` `timingSafeEqual`
   - AuthHash stored as SHA-256 hash server-side (not raw), mitigating pass-the-hash if DB leaks
-  - Rate limiting on all auth endpoints (10 requests/minute per IP)
+  - Rate limiting on all auth endpoints (10 requests/minute per IP). Can be disabled for local integration testing by setting `DISABLE_RATE_LIMIT=true`. The flag is silently ignored when `NODE_ENV=production` (with a startup warning logged), so a misconfigured deploy cannot turn off the protection.
   - Username enumeration prevented: salt endpoint returns dummy salt/iterations for non-existent users
   - Error handlers never log error objects/stack traces to prevent information leakage
   - Request logging omits response bodies
