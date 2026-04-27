@@ -23,16 +23,22 @@ export const users = pgTable(
   ],
 );
 
-export const vaultBlobs = pgTable("vault_blobs", {
-  userId: uuid("user_id")
-    .primaryKey()
-    .references(() => users.id, { onDelete: "cascade" }),
-  encryptedBlob: text("encrypted_blob").notNull(),
-  version: integer("version").notNull(),
-  updatedAt: bigint("updated_at", { mode: "number" })
-    .notNull()
-    .$defaultFn(() => Date.now()),
-});
+export const vaultBlobs = pgTable(
+  "vault_blobs",
+  {
+    userId: uuid("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    encryptedBlob: text("encrypted_blob").notNull(),
+    version: integer("version").notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" })
+      .notNull()
+      .$defaultFn(() => Date.now()),
+  },
+  (table) => [
+    check("vault_blobs_version_min", sql`${table.version} >= 1`),
+  ],
+);
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
