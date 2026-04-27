@@ -1,7 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "node:http";
 import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
-import { storage } from "./storage";
+import type { IStorage } from "./storage";
 import { validateRegister, validateLogin, validateVaultSync } from "./validation";
 
 function hashForComparison(value: string): Buffer {
@@ -41,7 +41,7 @@ setInterval(() => {
   }
 }, 5 * 60_000);
 
-export async function registerRoutes(app: Express): Promise<Server> {
+export async function registerRoutes(app: Express, storage: IStorage): Promise<Server> {
 
   app.post("/api/auth/register", async (req: Request, res: Response) => {
     try {
