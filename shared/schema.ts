@@ -113,12 +113,68 @@ export const sessions = pgTable(
   ],
 );
 
+// Append-only audit trail of sensitive user actions: logins, logouts,
+// every successful vault read/write, and detected anomalies. Powers the
+// user-facing GET /api/vault/audit endpoint and gives operators a way to
+// reconstruct "what happened on this account" after a security incident.
+//
+// Zero-knowledge guarantees are preserved: this table NEVER stores
+// encrypted blob contents, auth hashes, or session tokens — only
+// metadata about the action (which version was written, how big the
+// blob was, where the request came from).
+//
+// version_before / version_after / blob_size_bytes are nullable because
+// only the vault_sync / vault_restore actions populate them; login,
+// logout, fetch, and anomaly events leave them null.
+//
+// ip_address / user_agent are nullable because not every code path has
+// a request object (background tasks, future CLI tools), and because
+// the spec explicitly allows missing values.
+//
+// created_at uses bigint epoch-ms to match the existing codebase
+// convention (users.createdAt, sessions.*, vaultBlobs.updatedAt,
+// vaultBlobHistory.archivedAt all use this shape) — same deliberate
+// deviation from the spec's "TIMESTAMP" wording as the sessions table.
+export const vaultAuditLog = pgTable(
+  "vault_audit_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    action: text("action").notNull(),
+    versionBefore: integer("version_before"),
+    versionAfter: integer("version_after"),
+    blobSize: integer("blob_size_bytes"),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    createdAt: bigint("created_at", { mode: "number" })
+      .notNull()
+      .$defaultFn(() => Date.now()),
+  },
+  (table) => [
+    // Primary access pattern: "give me the most recent N entries for
+    // this user" — drives GET /api/vault/audit. The .desc() on
+    // createdAt makes the ORDER BY ... DESC LIMIT 100 a single index
+    // scan with no sort step.
+    index("vault_audit_user_created_idx").on(
+      table.userId,
+      table.createdAt.desc(),
+    ),
+    // Secondary access pattern: "did this user ever do action X?"
+    // (anomaly review, security audit). Cheaper than a full scan with
+    // a per-user predicate plus an action filter.
+    index("vault_audit_user_action_idx").on(table.userId, table.action),
+  ],
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type VaultBlob = typeof vaultBlobs.$inferSelect;
 export type NewVaultBlob = typeof vaultBlobs.$inferInsert;
 export type VaultBlobHistoryEntry = typeof vaultBlobHistory.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
+export type VaultAuditLogEntry = typeof vaultAuditLog.$inferSelect;
 
 export const insertUserSchema = createInsertSchema(users, {
   username: (col) => col.min(3).max(64),

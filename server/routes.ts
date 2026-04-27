@@ -1,7 +1,12 @@
 import express, { type Express, type Request, type Response } from "express";
 import { createServer, type Server } from "node:http";
 import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
-import { SESSION_LIFETIME_MS, type IStorage } from "./storage";
+import {
+  SESSION_LIFETIME_MS,
+  AUDIT_LOG_LIMIT,
+  type AuditEventInput,
+  type IStorage,
+} from "./storage";
 import {
   validateRegister,
   validateLogin,
@@ -50,6 +55,12 @@ const PER_USER_RATE_LIMITS = {
   vault_restore: 10,
   auth_sessions: 10,
   logout_all: 5,
+  // GET /api/vault/audit — comparable in nature to auth_sessions
+  // (read-only listing of per-user metadata). Same 10/min cap so an
+  // attacker who briefly has a session can't scrape audit history at
+  // unbounded rates. The spec doesn't mandate a limit here, but
+  // matching the existing pattern is the conservative default.
+  vault_audit: 10,
 } as const;
 type RateLimitedEndpoint = keyof typeof PER_USER_RATE_LIMITS;
 
@@ -154,6 +165,173 @@ if (!RATE_LIMIT_DISABLED) {
       if (now > entry.resetAt) rateLimitMap.delete(key);
     }
   }, 5 * 60_000);
+}
+
+// ---------------------------------------------------------------------------
+// Anomaly detection (in-memory, best-effort)
+// ---------------------------------------------------------------------------
+//
+// Lightweight inline detection of two patterns, both fire-and-forget into
+// the audit log. Neither blocks or rejects requests — that's the rate
+// limiter's job. This is *observability* on top of the hard rate caps.
+//
+//   1. Rate spike:  > ANOMALY_FETCH_THRESHOLD vault_fetch in 60s, or
+//                   > ANOMALY_SYNC_THRESHOLD vault_sync in 60s.
+//      Triggers ONCE per user per window so a single burst does not
+//      flood the audit log with N redundant anomaly rows.
+//
+//   2. IP change:   the per-user lastIp differs from the request IP.
+//      Useful signal for "session token used from two countries" but
+//      noisy on roaming users — the spec lists this as OPTIONAL.
+//
+// Thresholds are deliberately BELOW the rate-limit caps (fetch=60,
+// sync=30 per minute) so an anomaly fires before the rate limiter
+// kicks in. That gives operators visibility into "this account is
+// approaching abuse" without waiting for a hard 429.
+//
+// State is per-process and resets on restart. Multi-instance deploys
+// would need to share state via Redis to detect anomalies that span
+// instances — out of scope for this task; in-memory is the spec.
+const ANOMALY_FETCH_THRESHOLD = 30;
+const ANOMALY_SYNC_THRESHOLD = 15;
+const ANOMALY_WINDOW_MS = 60_000;
+// Drop entries that haven't been touched in 1h. Bounds memory growth
+// for long-tail inactive users while keeping anomaly state alive
+// across short pauses (typical user session).
+const ANOMALY_STATE_TTL_MS = 60 * 60_000;
+
+type AnomalyState = {
+  windowStart: number;
+  fetchCount: number;
+  syncCount: number;
+  // Dedup flags so the threshold only logs ONCE per window per action,
+  // not every additional request after crossing the line.
+  fetchAnomalyLogged: boolean;
+  syncAnomalyLogged: boolean;
+  // Same dedup discipline for ip_change_detected: emit at most one
+  // ip_change event per user per window. Without this, a flaky NAT
+  // or mobile/wifi handoff that flips A→B→A→B every few seconds would
+  // spam the audit log with a row per flip — drowning the signal that
+  // a real IP change actually means something. Resets on window roll
+  // (see new-entry init below).
+  ipChangeAnomalyLogged: boolean;
+  // Last observed IP — used purely for ip_change_detected. Persists
+  // across window rolls so a 61s gap between requests doesn't reset
+  // the IP comparison.
+  lastIp?: string;
+  // For TTL-based cleanup; updated on every recordAnomaly() call.
+  lastTouchedAt: number;
+};
+const anomalyState = new Map<string, AnomalyState>();
+
+type AnomalySignal = {
+  rateAnomalyMeta?: string;
+  ipChangeFromIp?: string;
+};
+
+// Increment the in-memory counters for `userId`+`action`, roll the
+// window if expired, and return any anomalies that just crossed their
+// threshold. PURE: never logs anything itself — the caller decides
+// whether/how to surface the signals (typically: fire-and-forget audit
+// rows). Always cheap (one Map lookup, no I/O).
+function recordAnomaly(
+  userId: string,
+  action: "vault_fetch" | "vault_sync",
+  ip: string,
+): AnomalySignal {
+  const now = Date.now();
+  let entry = anomalyState.get(userId);
+  if (!entry || now - entry.windowStart > ANOMALY_WINDOW_MS) {
+    entry = {
+      windowStart: now,
+      fetchCount: 0,
+      syncCount: 0,
+      fetchAnomalyLogged: false,
+      syncAnomalyLogged: false,
+      ipChangeAnomalyLogged: false,
+      // Preserve lastIp across window rolls so an IP change is still
+      // detectable even if it happens at the boundary.
+      lastIp: entry?.lastIp,
+      lastTouchedAt: now,
+    };
+    anomalyState.set(userId, entry);
+  }
+
+  let rateAnomalyMeta: string | undefined;
+  if (action === "vault_fetch") {
+    entry.fetchCount++;
+    if (
+      entry.fetchCount > ANOMALY_FETCH_THRESHOLD &&
+      !entry.fetchAnomalyLogged
+    ) {
+      entry.fetchAnomalyLogged = true;
+      rateAnomalyMeta = `vault_fetch threshold exceeded (${entry.fetchCount} in ${ANOMALY_WINDOW_MS / 1000}s)`;
+    }
+  } else {
+    entry.syncCount++;
+    if (
+      entry.syncCount > ANOMALY_SYNC_THRESHOLD &&
+      !entry.syncAnomalyLogged
+    ) {
+      entry.syncAnomalyLogged = true;
+      rateAnomalyMeta = `vault_sync threshold exceeded (${entry.syncCount} in ${ANOMALY_WINDOW_MS / 1000}s)`;
+    }
+  }
+
+  let ipChangeFromIp: string | undefined;
+  if (entry.lastIp && entry.lastIp !== ip && !entry.ipChangeAnomalyLogged) {
+    // First IP change of this window → emit. Subsequent flips within
+    // the same window are intentionally suppressed (NAT/cell-handoff
+    // noise). entry.lastIp is still updated below so the comparison
+    // baseline keeps moving forward.
+    ipChangeFromIp = entry.lastIp;
+    entry.ipChangeAnomalyLogged = true;
+  }
+  entry.lastIp = ip;
+  entry.lastTouchedAt = now;
+
+  return { rateAnomalyMeta, ipChangeFromIp };
+}
+
+if (!RATE_LIMIT_DISABLED) {
+  // Periodic GC for anomaly state. Same cadence as the rate-limit map
+  // GC above. Without this, a server that has seen N distinct users
+  // over its lifetime keeps O(N) anomaly entries in memory forever.
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of anomalyState) {
+      if (now - v.lastTouchedAt > ANOMALY_STATE_TTL_MS) {
+        anomalyState.delete(k);
+      }
+    }
+  }, 5 * 60_000);
+}
+
+// ---------------------------------------------------------------------------
+// Audit log fire-and-forget wrapper
+// ---------------------------------------------------------------------------
+//
+// All audit-log writes go through this helper. Two reasons to wrap it
+// rather than calling storage.logAuditEvent directly:
+//   1. The .catch() is belt-and-suspenders — storage.logAuditEvent
+//      already swallows its own errors, but if a future refactor
+//      removes that try/catch we don't want a stray rejection to
+//      crash the request handler.
+//   2. The helper is synchronous from the caller's perspective: it
+//      kicks off the async insert and returns immediately. Callers
+//      can do `recordAudit(...); return res.json(...);` and not
+//      worry about awaiting the audit insert before responding.
+//
+// Critical: never put encrypted blob contents, auth_hash, session
+// token, or any other secret into `input`. The audit log is read
+// back wholesale by GET /api/vault/audit, so anything that lands
+// here becomes user-visible.
+function recordAudit(storage: IStorage, input: AuditEventInput): void {
+  storage.logAuditEvent(input).catch(() => {
+    // Errors are already logged inside storage.logAuditEvent. The
+    // additional .catch() here is just to absorb any rejection so it
+    // can't surface as an unhandled promise rejection.
+  });
 }
 
 // Result of authenticating a request via either session token (preferred)
@@ -330,6 +508,25 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         ipAddress: getClientIp(req),
       });
 
+      // Audit hooks AFTER successful auth + session creation. Two
+      // separate events per spec: login_success (the credential
+      // exchange) and session_created (a new server-side session row).
+      // Both fire-and-forget — the response is sent regardless.
+      const ip = getClientIp(req);
+      const userAgent = captureUserAgent(req);
+      recordAudit(storage, {
+        userId: user.id,
+        action: "login_success",
+        ipAddress: ip,
+        userAgent,
+      });
+      recordAudit(storage, {
+        userId: user.id,
+        action: "session_created",
+        ipAddress: ip,
+        userAgent,
+      });
+
       // Existing fields are preserved for backward compatibility — clients
       // that have not yet adopted session tokens continue to receive
       // id/username/salt/iterations exactly as before. New clients pick up
@@ -419,9 +616,49 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         parsed.data.version,
       );
       if (!result.ok) {
+        // Version conflict is NOT a successful sync — do not audit-log
+        // it. Per spec we only log AFTER success to avoid noise and to
+        // prevent enumeration via repeated failed attempts.
         return res.status(409).json({
           error: "Version conflict",
           serverVersion: result.serverVersion,
+        });
+      }
+
+      // Audit + anomaly hooks AFTER success. blobSize is the actual
+      // byte length of the encrypted blob the client just stored
+      // (NOT the blob contents themselves — we never log those, that
+      // would break zero-knowledge). versionBefore is captured inside
+      // syncVault's transaction so it's race-free.
+      const ip = getClientIp(req);
+      const userAgent = captureUserAgent(req);
+      recordAudit(storage, {
+        userId,
+        action: "vault_sync",
+        versionBefore: result.previousVersion,
+        versionAfter: result.blob.version,
+        blobSize: Buffer.byteLength(parsed.data.encryptedBlob, "utf8"),
+        ipAddress: ip,
+        userAgent,
+      });
+      const signal = recordAnomaly(userId, "vault_sync", ip);
+      if (signal.rateAnomalyMeta) {
+        // Stash anomaly context in user_agent (per spec: "include
+        // metadata in user_agent or a new field"). Keeps the schema
+        // unchanged while preserving the human-readable detail.
+        recordAudit(storage, {
+          userId,
+          action: "anomaly_detected",
+          ipAddress: ip,
+          userAgent: signal.rateAnomalyMeta,
+        });
+      }
+      if (signal.ipChangeFromIp) {
+        recordAudit(storage, {
+          userId,
+          action: "ip_change_detected",
+          ipAddress: ip,
+          userAgent: `previous: ${signal.ipChangeFromIp}`,
         });
       }
 
@@ -453,6 +690,35 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
 
       const blob = await storage.getVaultBlob(userId);
+      // A fetch with no current vault row is still a SUCCESSFUL fetch
+      // (the user simply has no vault yet) — log it. Spec says log
+      // every successful fetch; doesn't carve out the empty case.
+      const ip = getClientIp(req);
+      const userAgent = captureUserAgent(req);
+      recordAudit(storage, {
+        userId,
+        action: "vault_fetch",
+        ipAddress: ip,
+        userAgent,
+      });
+      const signal = recordAnomaly(userId, "vault_fetch", ip);
+      if (signal.rateAnomalyMeta) {
+        recordAudit(storage, {
+          userId,
+          action: "anomaly_detected",
+          ipAddress: ip,
+          userAgent: signal.rateAnomalyMeta,
+        });
+      }
+      if (signal.ipChangeFromIp) {
+        recordAudit(storage, {
+          userId,
+          action: "ip_change_detected",
+          ipAddress: ip,
+          userAgent: `previous: ${signal.ipChangeFromIp}`,
+        });
+      }
+
       if (!blob) {
         return res.status(200).json({ encryptedBlob: null, version: 0 });
       }
@@ -535,6 +801,8 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // is looked up by (userId, targetVersion); if absent → 404.
       const result = await storage.restoreVault(userId, parsed.data.version);
       if (!result.ok) {
+        // Failed restores (version_conflict, not_found) are NOT
+        // audit-logged per the "only log AFTER success" rule.
         if (result.code === "version_conflict") {
           // A concurrent sync/restore raced this restore. The historical
           // entry exists; the client should re-fetch and retry.
@@ -545,6 +813,18 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         }
         return res.status(404).json({ error: "Version not found in history" });
       }
+
+      // versionBefore captured race-free inside restoreVault's
+      // transaction. versionAfter is the new live version (max of
+      // current+1 and target+1, see restoreVault doc).
+      recordAudit(storage, {
+        userId,
+        action: "vault_restore",
+        versionBefore: result.previousVersion,
+        versionAfter: result.blob.version,
+        ipAddress: getClientIp(req),
+        userAgent: captureUserAgent(req),
+      });
 
       return res.status(200).json({
         version: result.blob.version,
@@ -588,6 +868,18 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
 
       await storage.deleteSessionById(session.id);
+      // Audit AFTER deletion succeeds. We treat "session was already
+      // gone" the same as "we just deleted it" (deleteSessionById
+      // returns false in the former case, true in the latter), but
+      // either way the user reached this branch with a valid token,
+      // so the logout intent succeeded. Logging it gives users a
+      // record of "I was logged out at this time from this device".
+      recordAudit(storage, {
+        userId: session.userId,
+        action: "logout",
+        ipAddress: getClientIp(req),
+        userAgent: captureUserAgent(req),
+      });
       return res.status(200).json({ ok: true });
     } catch (err) {
       console.error("Logout error");
@@ -622,6 +914,17 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
 
       const revoked = await storage.deleteAllSessionsForUser(auth.userId);
+      // Audit AFTER the delete succeeds. Spec doesn't ask for a
+      // "count revoked" metadata field for logout_all, so we don't
+      // stash it — the count is already in the API response and the
+      // user can see it there. Logging it here too would be redundant
+      // and would awkwardly overload one of the version_* columns.
+      recordAudit(storage, {
+        userId: auth.userId,
+        action: "logout_all",
+        ipAddress: getClientIp(req),
+        userAgent: captureUserAgent(req),
+      });
       return res.status(200).json({ ok: true, revoked });
     } catch (err) {
       console.error("Logout-all error");
@@ -656,6 +959,50 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       return res.status(200).json(list);
     } catch (err) {
       console.error("List-sessions error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // GET /api/vault/audit — return the latest AUDIT_LOG_LIMIT (100)
+  // audit entries for the authenticated user, newest first. Powers a
+  // user-facing "vault activity" view so the user can see when their
+  // vault was read/written, from where, and detect anything unfamiliar.
+  //
+  // Privacy contract:
+  //   - The internal row id is NEVER exposed (see AuditLogItem doc).
+  //   - The endpoint is per-user — the WHERE userId = auth.userId
+  //     filter in storage.getAuditLog ensures one user can never see
+  //     another's history even via a forged request.
+  //   - Encrypted blobs / auth hashes / tokens are not in this table
+  //     by construction (see vaultAuditLog schema doc), so there is
+  //     nothing sensitive to redact at the API layer.
+  //
+  // No pagination by spec. The fixed 100-row cap is also a DoS bound
+  // — even a user with millions of audit rows pays only for a single
+  // index-backed LIMIT 100 lookup per request.
+  app.get("/api/vault/audit", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+
+      // Rate limit AFTER authenticate so the userId is real and unauth
+      // probes never poison the user/IP buckets — same pattern as the
+      // other authenticated endpoints. See checkUserRateLimit doc.
+      if (checkUserRateLimit("vault_audit", getClientIp(req), auth.userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+
+      const entries = await storage.getAuditLog(auth.userId, AUDIT_LOG_LIMIT);
+      return res.status(200).json(entries);
+    } catch (err) {
+      console.error("Vault audit error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });

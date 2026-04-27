@@ -1,0 +1,193 @@
+Implement audit logging and basic anomaly detection for PiPass to provide visibility into vault activity and enable detection of suspicious behavior.
+
+GOALS:
+1. Record all sensitive actions in an append-only audit log
+2. Expose audit history safely to the user
+3. Detect basic anomalies (rate spikes, unusual patterns)
+4. Preserve zero-knowledge (no plaintext or sensitive data leakage)
+
+---
+
+SCHEMA:
+
+Create table:
+
+vault_audit_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL,
+  action TEXT NOT NULL,
+  version_before INTEGER,
+  version_after INTEGER,
+  blob_size_bytes INTEGER,
+  ip_address TEXT,
+  user_agent TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT now(),
+
+  CONSTRAINT fk_user
+    FOREIGN KEY (user_id)
+    REFERENCES users(id)
+    ON DELETE CASCADE
+);
+
+Indexes:
+- (user_id, created_at DESC)
+- (user_id, action)
+
+---
+
+ACTIONS TO LOG:
+
+Log entries for:
+
+- vault_sync
+- vault_restore
+- vault_fetch
+- login_success
+- logout
+- logout_all
+- session_created
+
+---
+
+IMPLEMENTATION:
+
+1. Create helper:
+
+logAuditEvent({
+  userId,
+  action,
+  versionBefore?,
+  versionAfter?,
+  blobSize?,
+  ip?,
+  userAgent?
+})
+
+- Insert into vault_audit_log
+- Must NEVER throw (wrap in try/catch, log errors only)
+- Must NOT block main request
+
+---
+
+2. Hook into existing flows:
+
+- On successful login → log "login_success"
+- On session creation → log "session_created"
+- On logout → log "logout"
+- On logout-all → log "logout_all"
+- On vault fetch → log "vault_fetch"
+- On vault sync → log "vault_sync" (include versionBefore + versionAfter + blobSize)
+- On restore → log "vault_restore" (include versionBefore + versionAfter)
+
+IMPORTANT:
+- Only log AFTER success
+- Do NOT log failed auth attempts (avoid noise + enumeration risk)
+
+---
+
+NEW ENDPOINT:
+
+GET /api/vault/audit
+
+Returns:
+[
+  {
+    "action": string,
+    "createdAt": timestamp,
+    "ipAddress": string,
+    "userAgent": string,
+    "versionBefore": number | null,
+    "versionAfter": number | null,
+    "blobSize": number | null
+  }
+]
+
+Rules:
+- Auth required
+- Sort DESC by created_at
+- Limit 100 entries
+- NO pagination (keep simple for now)
+- NEVER return internal IDs
+
+---
+
+ANOMALY DETECTION (LIGHTWEIGHT):
+
+Implement simple inline detection:
+
+1. Rate spike detection:
+   - If user performs > X actions in Y seconds:
+       vault_fetch > 30 in 60s
+       vault_sync > 15 in 60s
+
+2. On trigger:
+   - Log special event:
+       action = "anomaly_detected"
+       include metadata in user_agent or a new field (optional)
+
+3. Do NOT block requests (logging only)
+
+---
+
+OPTIONAL (LOW COST):
+
+- Track last_ip per user in memory
+- If IP changes suddenly:
+    log "ip_change_detected"
+
+---
+
+SECURITY REQUIREMENTS:
+
+- DO NOT log:
+    encrypted_blob contents
+    auth_hash
+    session_token
+    any secrets
+
+- Logging must not break zero-knowledge guarantees
+
+---
+
+PERFORMANCE:
+
+- Logging must be async/non-blocking
+- Failure to log must NOT impact API response
+
+---
+
+EDGE CASES:
+
+- Missing IP/user-agent → store null
+- Very high volume → logs still bounded by query limit (100)
+- Concurrent writes → logs must reflect actual committed actions only
+
+---
+
+VERIFICATION:
+
+- Login → audit shows login_success + session_created
+- Fetch → audit entry appears
+- Sync → includes correct versionBefore/After
+- Restore → logged correctly
+- Logout → entry appears
+- Audit endpoint returns latest 100 entries
+- No sensitive data appears in logs
+- Rapid fetch spam triggers anomaly_detected
+
+---
+
+CONSTRAINTS:
+
+- DO NOT modify crypto/
+- DO NOT change existing endpoints
+- KEEP logging isolated and safe
+- KEEP implementation simple (no external services)
+
+---
+
+SUCCESS CRITERIA:
+
+- User can see their vault activity history
+- Suspicious behavior is detectable
+- System gains observability without weakening security

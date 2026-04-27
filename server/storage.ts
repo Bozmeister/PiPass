@@ -5,6 +5,7 @@ import {
   vaultBlobs,
   vaultBlobHistory,
   sessions,
+  vaultAuditLog,
   type User,
   type VaultBlob,
   type Session,
@@ -29,12 +30,27 @@ export type VaultHistoryEntry = {
   blobSize: number;
 };
 
+// `previousVersion` is the version that was current in vault_blobs
+// immediately BEFORE this sync committed (null on first-ever write for
+// the user). Captured inside the same transaction as the CAS so it is
+// race-free — a separate getVaultBlob() call from the route would risk
+// reporting a stale version if a concurrent sync interleaved. Consumed
+// by the audit log to populate version_before.
 export type SyncVaultResult =
-  | { ok: true; blob: VaultBlob }
+  | { ok: true; blob: VaultBlob; previousVersion: number | null }
   | { ok: false; code: "version_conflict"; serverVersion: number };
 
+// `previousVersion` is the version that was current BEFORE the restore
+// overwrote it (null if the user had no current vault yet — restoring
+// directly into an empty user state). Same race-free guarantee as
+// SyncVaultResult.previousVersion.
 export type RestoreVaultResult =
-  | { ok: true; blob: VaultBlob; restoredFromVersion: number }
+  | {
+      ok: true;
+      blob: VaultBlob;
+      restoredFromVersion: number;
+      previousVersion: number | null;
+    }
   | { ok: false; code: "not_found" }
   | { ok: false; code: "version_conflict"; serverVersion: number };
 
@@ -50,6 +66,39 @@ export type SessionListItem = {
   userAgent: string | null;
   ipAddress: string | null;
 };
+
+// Input shape for the audit-log writer. `action` is intentionally a
+// loose string (not a union) so anomaly_detected / ip_change_detected
+// and any future event types can be appended without changing the
+// storage interface. Optional fields default to null in the DB.
+export type AuditEventInput = {
+  userId: string;
+  action: string;
+  versionBefore?: number | null;
+  versionAfter?: number | null;
+  blobSize?: number | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+};
+
+// Public shape for GET /api/vault/audit. The internal `id` column is
+// deliberately omitted (per spec) — exposing the row UUID is gratuitous
+// information leakage and serves no client-side use case. The shape is
+// what the user sees in their "vault activity" view.
+export type AuditLogItem = {
+  action: string;
+  createdAt: number;
+  ipAddress: string | null;
+  userAgent: string | null;
+  versionBefore: number | null;
+  versionAfter: number | null;
+  blobSize: number | null;
+};
+
+// Bounded result count for GET /api/vault/audit (no pagination per
+// spec). 100 is enough for a "recent activity" UI without paying the
+// cost of the full table on every query.
+export const AUDIT_LOG_LIMIT = 100;
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -84,6 +133,24 @@ export interface IStorage {
   deleteSessionById(id: string): Promise<boolean>;
   deleteAllSessionsForUser(userId: string): Promise<number>;
   listActiveSessionsForUser(userId: string): Promise<SessionListItem[]>;
+
+  // Audit log writer. CONTRACT:
+  //   - Must NEVER throw — implementations MUST swallow all errors
+  //     internally and only log them. The caller relies on
+  //     fire-and-forget semantics: a failed audit insert must NOT
+  //     break the API response that triggered it.
+  //   - Must NOT block. Callers do `void storage.logAuditEvent(...)`
+  //     and immediately return their HTTP response; the row write
+  //     races the response and may commit AFTER the client gets the
+  //     200. That's intentional — the audit log is best-effort
+  //     observability, not a critical path.
+  logAuditEvent(input: AuditEventInput): Promise<void>;
+
+  // Reader for GET /api/vault/audit. Returns at most `limit` rows
+  // (defaults to AUDIT_LOG_LIMIT) ordered by created_at DESC. The
+  // internal `id` column is NEVER included in the result — see
+  // AuditLogItem doc for why.
+  getAuditLog(userId: string, limit?: number): Promise<AuditLogItem[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -216,7 +283,14 @@ export class DatabaseStorage implements IStorage {
 
       await this.pruneHistory(tx, userId);
 
-      return { ok: true as const, blob: writtenRows[0] };
+      // previousVersion captured from the FOR-UPDATE-locked read above so
+      // it reflects the state right before this commit, not a racy later
+      // re-read. Null on first-ever sync (no prior row to displace).
+      return {
+        ok: true as const,
+        blob: writtenRows[0],
+        previousVersion: existing?.version ?? null,
+      };
     });
   }
 
@@ -340,10 +414,15 @@ export class DatabaseStorage implements IStorage {
 
       await this.pruneHistory(tx, userId);
 
+      // previousVersion captured from the FOR-UPDATE-locked read above.
+      // Null only if there was NO prior current vault row (restoring
+      // straight into an empty user state — unusual but possible if the
+      // user manually nuked vault_blobs while history survived).
       return {
         ok: true as const,
         blob: writtenRows[0],
         restoredFromVersion: targetVersion,
+        previousVersion: existing?.version ?? null,
       };
     });
   }
@@ -470,6 +549,68 @@ export class DatabaseStorage implements IStorage {
       .from(sessions)
       .where(and(eq(sessions.userId, userId), gt(sessions.expiresAt, now)))
       .orderBy(desc(sessions.lastSeenAt));
+    return rows;
+  }
+
+  // Append a single audit row. Hard contract: this method MUST NOT
+  // throw — every code path is wrapped in try/catch and errors are
+  // logged-only. Callers fire-and-forget (`void storage.logAuditEvent`)
+  // and rely on this guarantee so a transient DB hiccup writing audit
+  // metadata can never poison a successful API response.
+  //
+  // Defense-in-depth: we also clamp blob_size_bytes to a sane positive
+  // integer range so a buggy caller can't insert NaN/Infinity/negative
+  // values that the spec doesn't anticipate. Other numeric fields are
+  // already small (versions are bounded by VAULT_HISTORY_LIMIT growth).
+  async logAuditEvent(input: AuditEventInput): Promise<void> {
+    try {
+      await db.insert(vaultAuditLog).values({
+        userId: input.userId,
+        action: input.action,
+        versionBefore: input.versionBefore ?? null,
+        versionAfter: input.versionAfter ?? null,
+        blobSize:
+          typeof input.blobSize === "number" &&
+          Number.isFinite(input.blobSize) &&
+          input.blobSize >= 0
+            ? Math.floor(input.blobSize)
+            : null,
+        ipAddress: input.ipAddress ?? null,
+        userAgent: input.userAgent ?? null,
+      });
+    } catch (err) {
+      // Log-only. Do NOT rethrow. The action that triggered this audit
+      // event has already succeeded (we only log AFTER success per
+      // spec) and the user-facing response either has already been
+      // sent or is about to be — losing one audit row must never
+      // become a 500 to the client.
+      console.error("Audit log insert failed");
+    }
+  }
+
+  // Read latest N audit rows for a user, newest first. The ORDER BY
+  // ... DESC LIMIT N is a single index scan thanks to
+  // vault_audit_user_created_idx (user_id, created_at desc). The
+  // internal `id` column is deliberately excluded from the SELECT —
+  // it is never exposed via the API (see AuditLogItem doc).
+  async getAuditLog(
+    userId: string,
+    limit: number = AUDIT_LOG_LIMIT,
+  ): Promise<AuditLogItem[]> {
+    const rows = await db
+      .select({
+        action: vaultAuditLog.action,
+        createdAt: vaultAuditLog.createdAt,
+        ipAddress: vaultAuditLog.ipAddress,
+        userAgent: vaultAuditLog.userAgent,
+        versionBefore: vaultAuditLog.versionBefore,
+        versionAfter: vaultAuditLog.versionAfter,
+        blobSize: vaultAuditLog.blobSize,
+      })
+      .from(vaultAuditLog)
+      .where(eq(vaultAuditLog.userId, userId))
+      .orderBy(desc(vaultAuditLog.createdAt))
+      .limit(limit);
     return rows;
   }
 }
