@@ -68,7 +68,7 @@ Preferred communication style: Simple, everyday language.
 
 ### Backend (Express server) — Zero-Knowledge API
 - **Location**: `server/` directory
-- **Validation**: `server/validation.ts` — hand-written validators (no shared schema dependency to avoid tsx/react-native resolution conflicts)
+- **Validation**: `server/validation.ts` — thin adapters around the zod schemas in `shared/schema.ts`, which are themselves derived from the Drizzle table definitions via `drizzle-zod`'s `createInsertSchema` (single source of truth). Adapters call `safeParse` and map the first issue back to the legacy `{error: "Invalid <field>"}` response shape (with `encryptedBlob` → `"blob"`) so API behavior matches the previous hand-written validators on every real input. Single intentional divergence: a JSON array body (e.g. `[]`) now returns 400 `"Invalid body"` instead of 400 `"Invalid <first_field>"` — the legacy `"Invalid username"` reply for `[]` was an artifact of object destructuring, not an intentional contract; both responses are 400 and clients sending arrays to JSON-object endpoints are malformed regardless.
 - **API Routes** (`server/routes.ts`):
   - `POST /api/auth/register` — Create user with username, authHash, salt, iterations
   - `POST /api/auth/login` — Verify credentials with timing-safe comparison
@@ -91,7 +91,7 @@ Preferred communication style: Simple, everyday language.
 
 ### Database
 - **Current**: PostgreSQL via Drizzle ORM (node-postgres adapter). Connection in `server/db.ts` reads `DATABASE_URL` and fails fast if missing — there is no in-memory fallback.
-- **Schema** (`shared/schema.ts`): `users` table (uuid PK `defaultRandom`, unique `username`, `authHash`, `salt`, `iterations`, `createdAt` bigint mode:"number") and `vaultBlobs` table (uuid `userId` PK + FK → `users.id` ON DELETE CASCADE, `encryptedBlob`, `version`, `updatedAt` bigint). DB-level CHECK constraints provide defense-in-depth mirrors of the zod schemas: `users_iterations_range` enforces `iterations BETWEEN 3 AND 1000000` (matches `registerSchema`), and `vault_blobs_version_range` enforces `version >= 1` (matches `vaultSyncSchema`). Even a raw SQL bypass cannot store an out-of-range iteration count or a non-positive vault version. Drizzle `$inferSelect` types alongside the existing zod schemas used by the frontend.
+- **Schema** (`shared/schema.ts`): `users` table (uuid PK `defaultRandom`, unique `username`, `authHash`, `salt`, `iterations`, `createdAt` bigint mode:"number") and `vaultBlobs` table (uuid `userId` PK + FK → `users.id` ON DELETE CASCADE, `encryptedBlob`, `version`, `updatedAt` bigint). DB-level CHECK constraints provide defense-in-depth mirrors of the zod schemas: `users_iterations_range` enforces `iterations BETWEEN 3 AND 1000000` (matches `registerSchema`), and `vault_blobs_version_range` enforces `version >= 1` (matches `vaultSyncSchema`). Even a raw SQL bypass cannot store an out-of-range iteration count or a non-positive vault version. The zod schemas (`registerSchema`, `loginSchema`, `vaultSyncSchema`) are derived from the Drizzle tables via `drizzle-zod`'s `createInsertSchema(table, refinements).pick({...})`, so column types come from the table definition and the API-level bounds (length/range caps) are layered on as refinements — eliminating duplicated validation logic. `User`/`NewUser`/`VaultBlob`/`NewVaultBlob` types come from `$inferSelect`/`$inferInsert`.
 - **Migrations**: `drizzle.config.ts` + `npm run db:push` (no hand-written SQL).
 
 ### Project Structure

@@ -45,26 +45,35 @@ export type NewUser = typeof users.$inferInsert;
 export type VaultBlob = typeof vaultBlobs.$inferSelect;
 export type NewVaultBlob = typeof vaultBlobs.$inferInsert;
 
-export const insertUserSchema = createInsertSchema(users);
+export const insertUserSchema = createInsertSchema(users, {
+  username: (col) => col.min(3).max(64),
+  authHash: (col) => col.min(64).max(128),
+  salt: (col) => col.min(32).max(128),
+  iterations: (col) => col.min(3).max(1000000),
+});
 export const selectUserSchema = createSelectSchema(users);
-export const insertVaultBlobSchema = createInsertSchema(vaultBlobs);
+
+export const insertVaultBlobSchema = createInsertSchema(vaultBlobs, {
+  encryptedBlob: (col) => col.max(10 * 1024 * 1024),
+  version: (col) => col.min(1),
+});
 export const selectVaultBlobSchema = createSelectSchema(vaultBlobs);
 
-export const registerSchema = z.object({
-  username: z.string().min(3).max(64),
-  authHash: z.string().min(64).max(128),
-  salt: z.string().min(32).max(128),
-  iterations: z.number().int().min(3).max(1000000),
+export const registerSchema = insertUserSchema.pick({
+  username: true,
+  authHash: true,
+  salt: true,
+  iterations: true,
 });
 
-export const loginSchema = z.object({
-  username: z.string().min(3).max(64),
-  authHash: z.string().min(64).max(128),
+export const loginSchema = insertUserSchema.pick({
+  username: true,
+  authHash: true,
 });
 
-export const vaultSyncSchema = z.object({
-  encryptedBlob: z.string().max(10 * 1024 * 1024),
-  version: z.number().int().min(1),
+export const vaultSyncSchema = insertVaultBlobSchema.pick({
+  encryptedBlob: true,
+  version: true,
 });
 
 export type RegisterInput = z.infer<typeof registerSchema>;
