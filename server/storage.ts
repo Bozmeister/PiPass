@@ -79,5 +79,3 @@ export class DatabaseStorage implements IStorage {
     return rows[0] ?? null;
   }
 }
-
-export const storage = new DatabaseStorage();
