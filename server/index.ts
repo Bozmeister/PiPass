@@ -54,15 +54,7 @@ function setupCors(app: express.Application) {
 }
 
 function setupBodyParsing(app: express.Application) {
-  app.use(
-    express.json({
-      verify: (req, _res, buf) => {
-        req.rawBody = buf;
-      },
-    }),
-  );
-
-  app.use(express.urlencoded({ extended: false }));
+  app.use(express.urlencoded({ extended: false, limit: "4kb" }));
 }
 
 function setupRequestLogging(app: express.Application) {
@@ -201,12 +193,15 @@ function setupErrorHandler(app: express.Application) {
 
     const status = error.status || error.statusCode || 500;
 
-    console.error("Internal Server Error");
-
     if (res.headersSent) {
       return next(err);
     }
 
+    if (status === 413) {
+      return res.status(413).json({ error: "Payload too large" });
+    }
+
+    console.error("Internal Server Error");
     return res.status(status).json({ message: "Internal Server Error" });
   });
 }

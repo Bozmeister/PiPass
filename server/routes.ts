@@ -1,8 +1,25 @@
-import type { Express, Request, Response } from "express";
+import express, { type Express, type Request, type Response } from "express";
 import { createServer, type Server } from "node:http";
 import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
 import type { IStorage } from "./storage";
 import { validateRegister, validateLogin, validateVaultSync } from "./validation";
+
+// Per-route JSON parsers with explicit, route-appropriate size limits.
+// Auth bodies are small (~500 bytes max — see registerSchema/loginSchema bounds);
+// vault sync must accept up to a 10 MiB encryptedBlob (see vaultSyncSchema cap)
+// plus a few dozen bytes of JSON envelope. We mount per-route rather than
+// globally so an auth endpoint cannot be DoS'd by an 11 MiB payload that the
+// validator would have rejected anyway.
+function jsonBody(limit: string) {
+  return express.json({
+    limit,
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  });
+}
+const AUTH_BODY_LIMIT = "4kb";
+const VAULT_SYNC_BODY_LIMIT = "11mb";
 
 function hashForComparison(value: string): Buffer {
   return createHash("sha256").update(value).digest();
@@ -66,7 +83,7 @@ if (!RATE_LIMIT_DISABLED) {
 
 export async function registerRoutes(app: Express, storage: IStorage): Promise<Server> {
 
-  app.post("/api/auth/register", async (req: Request, res: Response) => {
+  app.post("/api/auth/register", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
       const clientIp = getClientIp(req);
       if (isRateLimited(`register:${clientIp}`)) {
@@ -104,7 +121,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
     }
   });
 
-  app.post("/api/auth/login", async (req: Request, res: Response) => {
+  app.post("/api/auth/login", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
       const clientIp = getClientIp(req);
       if (isRateLimited(`login:${clientIp}`)) {
@@ -161,7 +178,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
     }
   });
 
-  app.post("/api/vault/sync", async (req: Request, res: Response) => {
+  app.post("/api/vault/sync", jsonBody(VAULT_SYNC_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
       const userId = req.headers["x-user-id"] as string;
       const authHash = req.headers["x-auth-hash"] as string;
