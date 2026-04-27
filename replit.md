@@ -68,7 +68,13 @@ Preferred communication style: Simple, everyday language.
 
 ### Backend (Express server) — Zero-Knowledge API
 - **Location**: `server/` directory
-- **Validation**: `server/validation.ts` — thin adapters around the zod schemas in `shared/schema.ts`, which are themselves derived from the Drizzle table definitions via `drizzle-zod`'s `createInsertSchema` (single source of truth). Adapters call `safeParse` and map the first issue back to the legacy `{error: "Invalid <field>"}` response shape (with `encryptedBlob` → `"blob"`) so API behavior matches the previous hand-written validators on every real input. Single intentional divergence: a JSON array body (e.g. `[]`) now returns 400 `"Invalid body"` instead of 400 `"Invalid <first_field>"` — the legacy `"Invalid username"` reply for `[]` was an artifact of object destructuring, not an intentional contract; both responses are 400 and clients sending arrays to JSON-object endpoints are malformed regardless.
+- **Validation** (`server/validation.ts` + `shared/schema.ts`): every input source on every endpoint flows through a zod schema derived from the Drizzle table definitions (`drizzle-zod`'s `createInsertSchema` — single source of truth). The adapters in `server/validation.ts` call `safeParse` and map the first issue back to a `{error: "Invalid <field>"}` 400 response (with `encryptedBlob` → `"blob"`).
+  - **Body schemas use `.strict()`** — unknown fields are REJECTED with 400 `"Unknown field"`, not silently stripped. A client that sends an unrecognized field needs to know the request shape is wrong.
+  - **No type coercion** — `z.string()` and `z.number().int()` reject mismatched types (no `z.coerce`); fractional numbers for integer fields are rejected.
+  - **Path params validated**: `/api/auth/salt/:username` runs `validateUsernameParam` against `usernameParamSchema` (derived from `insertUserSchema.shape.username`, same 3–64 char rule as register) before any storage call → 400 `"Invalid username"` for malformed input.
+  - **Auth headers validated**: `validateAuthHeaders(req)` checks `x-user-id` (must be a UUID) and `x-auth-hash` (must be hex within the same length range as `authHash`) on `/api/vault/sync` and `/api/vault/fetch`. Missing headers, duplicate headers (which Express represents as `string[]`), non-UUID `x-user-id`, and non-hex `x-auth-hash` all return the SAME 401 `"Authentication required"` so an attacker cannot distinguish failure modes. Previously a non-UUID `x-user-id` would reach Drizzle and surface as a misleading 500 from PG's UUID-syntax error.
+  - **Order of checks**: rate limit → auth-header validation → DB lookup → password compare → body validation. Nothing touches storage with raw client input; nothing parses the body before auth on protected routes.
+  - **Documented divergences** from the previous hand-written validators: (1) JSON array bodies (e.g. `[]`) return 400 `"Invalid body"` instead of `"Invalid <first_field>"` — the legacy reply was an artifact of object destructuring. (2) Unknown fields now return 400 `"Unknown field"` (intentional, see strict mode above) instead of being silently accepted.
 - **API Routes** (`server/routes.ts`):
   - `POST /api/auth/register` — Create user with username, authHash, salt, iterations
   - `POST /api/auth/login` — Verify credentials with timing-safe comparison
@@ -81,8 +87,11 @@ Preferred communication style: Simple, everyday language.
 - **Security**:
   - Timing-safe auth hash comparison via `node:crypto` `timingSafeEqual`
   - AuthHash stored as SHA-256 hash server-side (not raw), mitigating pass-the-hash if DB leaks
+  - **Response format is uniform**: every error response uses `{error: string}`, including the global error handler (which previously returned `{message: "Internal Server Error"}`). 413 → `{error: "Payload too large"}`, malformed JSON → 400 `{error: "Invalid JSON"}`, anything else uncaught → 500 `{error: "Internal server error"}`.
+  - **No sensitive data ever returned**: `authHash` (the SHA-256 hash) is never serialized into any response. Register/login return only `{id, username, salt, iterations}`; salt endpoint returns `{salt, iterations}`; vault fetch returns `{encryptedBlob, version, updatedAt}` (the blob is encrypted client-side); vault sync returns `{version, updatedAt}`.
+  - **No username enumeration**: salt endpoint returns deterministic dummy `salt/iterations` for non-existent usernames (computed via `HMAC(DUMMY_SECRET, username)` — derived per-process secret, indistinguishable from a real salt).
+  - **No userId enumeration**: vault sync/fetch collapse "user not found" into the same 401 `"Invalid credentials"` response as "wrong authHash" — an attacker who somehow obtained a UUID cannot tell whether it corresponds to a real account.
   - Rate limiting on all auth endpoints (10 requests/minute per IP). Can be disabled for local integration testing by setting `DISABLE_RATE_LIMIT=true`. The flag is silently ignored when `NODE_ENV=production` (with a startup warning logged), so a misconfigured deploy cannot turn off the protection.
-  - Username enumeration prevented: salt endpoint returns dummy salt/iterations for non-existent users
   - Error handlers never log error objects/stack traces to prevent information leakage
   - Request logging omits response bodies
   - Rate limit map auto-cleaned every 5 minutes to prevent memory leaks

@@ -2,7 +2,13 @@ import express, { type Express, type Request, type Response } from "express";
 import { createServer, type Server } from "node:http";
 import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
 import type { IStorage } from "./storage";
-import { validateRegister, validateLogin, validateVaultSync } from "./validation";
+import {
+  validateRegister,
+  validateLogin,
+  validateVaultSync,
+  validateUsernameParam,
+  validateAuthHeaders,
+} from "./validation";
 
 // Per-route JSON parsers with explicit, route-appropriate size limits.
 // Auth bodies are small (~500 bytes max — see registerSchema/loginSchema bounds);
@@ -167,10 +173,16 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(429).json({ error: "Too many attempts. Please try again later." });
       }
 
-      const user = await storage.getUserByUsername(req.params.username);
+      const validated = validateUsernameParam(req.params.username);
+      if (!validated.ok) {
+        return res.status(400).json({ error: validated.error });
+      }
+      const username = validated.data;
+
+      const user = await storage.getUserByUsername(username);
 
       return res.status(200).json({
-        salt: user ? user.salt : deterministicDummySalt(req.params.username),
+        salt: user ? user.salt : deterministicDummySalt(username),
         iterations: user ? user.iterations : DUMMY_ITERATIONS,
       });
     } catch (err) {
@@ -180,16 +192,18 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
 
   app.post("/api/vault/sync", jsonBody(VAULT_SYNC_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
-      const userId = req.headers["x-user-id"] as string;
-      const authHash = req.headers["x-auth-hash"] as string;
-
-      if (!userId || !authHash) {
-        return res.status(401).json({ error: "Authentication required" });
+      const auth = validateAuthHeaders(req);
+      if (!auth.ok) {
+        return res.status(401).json({ error: auth.error });
       }
+      const { userId, authHash } = auth.data;
 
       const user = await storage.getUser(userId);
       if (!user) {
-        return res.status(401).json({ error: "Invalid user" });
+        // Collapse "user does not exist" into the same response as "wrong
+        // password" so an attacker who somehow guesses a UUID cannot
+        // distinguish a real account from a fake one.
+        return res.status(401).json({ error: "Invalid credentials" });
       }
 
       const providedHash = hashForComparison(authHash);
@@ -232,16 +246,16 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
 
   app.get("/api/vault/fetch", async (req: Request, res: Response) => {
     try {
-      const userId = req.headers["x-user-id"] as string;
-      const authHash = req.headers["x-auth-hash"] as string;
-
-      if (!userId || !authHash) {
-        return res.status(401).json({ error: "Authentication required" });
+      const auth = validateAuthHeaders(req);
+      if (!auth.ok) {
+        return res.status(401).json({ error: auth.error });
       }
+      const { userId, authHash } = auth.data;
 
       const user = await storage.getUser(userId);
       if (!user) {
-        return res.status(401).json({ error: "Invalid user" });
+        // See sync handler — same defense-in-depth collapse.
+        return res.status(401).json({ error: "Invalid credentials" });
       }
 
       const providedHash = hashForComparison(authHash);

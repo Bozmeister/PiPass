@@ -59,22 +59,47 @@ export const insertVaultBlobSchema = createInsertSchema(vaultBlobs, {
 });
 export const selectVaultBlobSchema = createSelectSchema(vaultBlobs);
 
-export const registerSchema = insertUserSchema.pick({
-  username: true,
-  authHash: true,
-  salt: true,
-  iterations: true,
-});
+// Request schemas use .strict() so unknown fields are REJECTED (not silently
+// stripped). Clients sending fields the API doesn't recognize get a 400 instead
+// of a deceptive 200 — they need to know their request shape is wrong.
+export const registerSchema = insertUserSchema
+  .pick({
+    username: true,
+    authHash: true,
+    salt: true,
+    iterations: true,
+  })
+  .strict();
 
-export const loginSchema = insertUserSchema.pick({
-  username: true,
-  authHash: true,
-});
+export const loginSchema = insertUserSchema
+  .pick({
+    username: true,
+    authHash: true,
+  })
+  .strict();
 
-export const vaultSyncSchema = insertVaultBlobSchema.pick({
-  encryptedBlob: true,
-  version: true,
-});
+export const vaultSyncSchema = insertVaultBlobSchema
+  .pick({
+    encryptedBlob: true,
+    version: true,
+  })
+  .strict();
+
+// Path/query/header param schemas — same constraints as the corresponding body
+// fields, derived from the table-level insert schema so they cannot drift.
+export const usernameParamSchema = insertUserSchema.shape.username;
+
+// x-user-id header: must be a UUID (matches users.id column).
+export const userIdHeaderSchema = z.string().uuid();
+
+// x-auth-hash header: must be a hex string in the same length range the
+// register endpoint accepts for authHash. The server SHA-256s this value before
+// timing-safe comparison, so any input is technically "safe" — but rejecting
+// malformed hashes early avoids spending CPU on obvious junk and gives a clean
+// 401 instead of a misleading "Invalid credentials" after a wasted round trip.
+export const authHashHeaderSchema = insertUserSchema.shape.authHash.regex(
+  /^[0-9a-fA-F]+$/,
+);
 
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;

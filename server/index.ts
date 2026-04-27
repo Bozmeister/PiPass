@@ -188,6 +188,7 @@ function setupErrorHandler(app: express.Application) {
     const error = err as {
       status?: number;
       statusCode?: number;
+      type?: string;
       message?: string;
     };
 
@@ -197,12 +198,20 @@ function setupErrorHandler(app: express.Application) {
       return next(err);
     }
 
+    // Body-parser errors. These are client mistakes (oversize payload,
+    // syntactically invalid JSON) — surface them with the SAME { error: ... }
+    // shape every API route uses, not the generic Internal-Server-Error shape,
+    // and don't pollute the server log with "Internal Server Error" for what
+    // is really just a malformed request.
     if (status === 413) {
       return res.status(413).json({ error: "Payload too large" });
     }
+    if (status === 400 && error.type === "entity.parse.failed") {
+      return res.status(400).json({ error: "Invalid JSON" });
+    }
 
     console.error("Internal Server Error");
-    return res.status(status).json({ message: "Internal Server Error" });
+    return res.status(status).json({ error: "Internal server error" });
   });
 }
 
