@@ -1,0 +1,123 @@
+Perform an adversarial system-level security audit of the PiPass vault layer focusing on state integrity over time under repeated authenticated abuse.
+
+Assume:
+- attacker has valid x-user-id + x-auth-hash credentials
+- attacker can send unlimited valid requests (no rate limit protection on vault endpoints)
+- attacker is NOT able to break encryption, only abuse protocol behavior
+
+This is NOT a schema review. This is a state-machine integrity analysis.
+
+---
+
+## 1. VAULT STATE LIFECYCLE MODEL
+Reconstruct the vault as a state machine:
+
+- initial state
+- sync transitions
+- overwrite transitions
+- version transitions
+- failure states
+
+Explicitly describe:
+- what constitutes a valid state
+- what transitions are allowed
+- what transitions are NOT currently prevented but should be
+
+---
+
+## 2. STATE DESTRUCTION ATTACKS (CRITICAL)
+Test whether an attacker can:
+
+- permanently erase vault data
+- force downgrade to empty or invalid states
+- desync client vs server permanently
+- create “valid but unusable vault state”
+
+Include:
+- empty blob injection (already known issue)
+- repeated sync spam with alternating valid/invalid blobs
+- version edge manipulation
+- rapid overwrite loops (race amplification)
+
+For each attack:
+- feasibility (Yes / No / Partial)
+- impact severity
+- whether recovery is possible
+
+---
+
+## 3. CONSISTENCY MODEL ANALYSIS
+Determine whether the system is:
+
+- strictly monotonic
+- last-write-wins
+- partially monotonic (mixed guarantees)
+
+Then answer:
+
+- Can two valid devices diverge permanently?
+- Can a stale client overwrite a newer vault under any condition?
+- Is consistency guaranteed per-user or per-device?
+
+---
+
+## 4. ATOMICITY & PARTIAL WRITE RISK
+Check for:
+
+- partial writes (DB update succeeds but client state fails or vice versa)
+- non-atomic multi-step operations in sync path
+- gaps between validation and persistence
+
+If any exist:
+- identify exact race window
+- describe exploit scenario
+
+---
+
+## 5. RECOVERY & RESILIENCE
+If vault becomes corrupted or wiped:
+
+- can client recover automatically?
+- can server restore prior state?
+- is there any rollback mechanism at all?
+
+Classify system as:
+- self-healing
+- manually recoverable
+- permanently destructive
+
+---
+
+## 6. ABUSE WITHOUT BREAKING CRYPTO
+Assume encryption is perfect.
+
+Can attacker still:
+
+- lock user out of vault
+- continuously overwrite usable state
+- degrade performance via sync spam
+- create persistent denial-of-vault (DoV)
+
+---
+
+## 7. REQUIRED FIXES (PRIORITIZED)
+Provide:
+
+P0 — must fix before production sync is enabled anywhere
+P1 — should fix before public release
+P2 — optional hardening
+
+Be strict:
+- If "empty blob acceptance" still exists, treat it as P0
+- If no rate limit exists on vault endpoints, treat it as P0
+- If no rollback exists, explicitly evaluate whether that is acceptable in a zero-knowledge design or a risk
+
+---
+
+## OUTPUT FORMAT
+
+- Executive verdict: "safe / unsafe / safe with constraints"
+- State machine diagram (textual)
+- Attack table
+- Critical invariants violated (if any)
+- Fixes with exact schema / route-level suggestions
