@@ -6,6 +6,7 @@ import {
   validateRegister,
   validateLogin,
   validateVaultSync,
+  validateVaultRestore,
   validateUsernameParam,
   validateHeaders,
   validateNoQueryParams,
@@ -243,26 +244,27 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
-      const existing = await storage.getVaultBlob(userId);
-      if (existing && existing.version >= parsed.data.version) {
+      // syncVault is fully transactional: it locks the existing row,
+      // verifies version monotonicity (CAS), archives the previous blob to
+      // vault_blob_history, writes the new blob, and prunes history — all
+      // atomically. We no longer need the read-then-CAS-then-recheck dance
+      // here in the route. Returns either { ok:true, blob } or
+      // { ok:false, code:"version_conflict", serverVersion }.
+      const result = await storage.syncVault(
+        userId,
+        parsed.data.encryptedBlob,
+        parsed.data.version,
+      );
+      if (!result.ok) {
         return res.status(409).json({
           error: "Version conflict",
-          serverVersion: existing.version,
-        });
-      }
-
-      const blob = await storage.upsertVaultBlob(userId, parsed.data.encryptedBlob, parsed.data.version);
-      if (!blob) {
-        const current = await storage.getVaultBlob(userId);
-        return res.status(409).json({
-          error: "Version conflict",
-          serverVersion: current?.version ?? 0,
+          serverVersion: result.serverVersion,
         });
       }
 
       return res.status(200).json({
-        version: blob.version,
-        updatedAt: blob.updatedAt,
+        version: result.blob.version,
+        updatedAt: result.blob.updatedAt,
       });
     } catch (err) {
       console.error("Vault sync error");
@@ -307,6 +309,107 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       });
     } catch (err) {
       console.error("Vault fetch error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/vault/history", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const auth = validateHeaders(req);
+      if (!auth.ok) {
+        return res.status(400).json({ error: auth.error });
+      }
+      const { userId, authHash } = auth.data;
+
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+      const providedHash = hashForComparison(authHash);
+      const storedHash = Buffer.from(user.authHash, "hex");
+      if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+
+      // Returns metadata only — `version`, `archivedAt`, `blobSize`. We do
+      // NOT return encrypted blobs here. Reasons:
+      //   (a) the blob can be up to 10 MiB; sending up to 10 of them per
+      //       request would be a DoS amplification vector, and
+      //   (b) only the user already has the master key, so seeing N
+      //       encrypted blobs without metadata wastes bandwidth — they have
+      //       to GET /api/vault/restore (or in a future API, GET a specific
+      //       historical blob) to actually use one.
+      const entries = await storage.getVaultHistory(userId);
+      return res.status(200).json(entries);
+    } catch (err) {
+      console.error("Vault history error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/vault/restore", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const auth = validateHeaders(req);
+      if (!auth.ok) {
+        return res.status(400).json({ error: auth.error });
+      }
+      const { userId, authHash } = auth.data;
+
+      // Body validation BEFORE the DB auth check, mirroring /api/vault/sync.
+      // Restore body is tiny ({ version: number }) so the AUTH_BODY_LIMIT
+      // (4kb) JSON parser is the right size — a fat body is a 413 by
+      // express.json before this handler even runs.
+      const parsed = validateVaultRestore(req.body);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+      const providedHash = hashForComparison(authHash);
+      const storedHash = Buffer.from(user.authHash, "hex");
+      if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+
+      // restoreVault is itself transactional and idempotent: it picks the
+      // new vault version as max(currentVersion, targetVersion) + 1 so the
+      // restore can never violate version monotonicity, archives the
+      // displaced current blob first (a restore IS a write, so it must
+      // itself be reversible), and prunes history. The historical entry
+      // is looked up by (userId, targetVersion); if absent → 404.
+      const result = await storage.restoreVault(userId, parsed.data.version);
+      if (!result.ok) {
+        if (result.code === "version_conflict") {
+          // A concurrent sync/restore raced this restore. The historical
+          // entry exists; the client should re-fetch and retry.
+          return res.status(409).json({
+            error: "Version conflict",
+            serverVersion: result.serverVersion,
+          });
+        }
+        return res.status(404).json({ error: "Version not found in history" });
+      }
+
+      return res.status(200).json({
+        version: result.blob.version,
+        updatedAt: result.blob.updatedAt,
+        restoredFromVersion: result.restoredFromVersion,
+      });
+    } catch (err) {
+      console.error("Vault restore error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });

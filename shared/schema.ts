@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { sql } from "drizzle-orm";
-import { pgTable, text, integer, bigint, uuid, check } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, bigint, uuid, check, index } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 
 export const users = pgTable(
@@ -40,10 +40,44 @@ export const vaultBlobs = pgTable(
   ],
 );
 
+// Append-only ring-buffer of historical encrypted vault blobs. On every
+// successful sync, the previous vault_blobs row is archived here BEFORE the
+// new row is written, then this table is pruned to keep only the latest N
+// entries per user (see DatabaseStorage.syncVault). The encrypted blob is
+// stored verbatim — the server never decrypts it, preserving the
+// zero-knowledge property. Restoration writes a historical blob back into
+// vault_blobs as currentVersion + 1 (see DatabaseStorage.restoreVault).
+export const vaultBlobHistory = pgTable(
+  "vault_blob_history",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    encryptedBlob: text("encrypted_blob").notNull(),
+    archivedAt: bigint("archived_at", { mode: "number" })
+      .notNull()
+      .$defaultFn(() => Date.now()),
+  },
+  (table) => [
+    index("vault_blob_history_user_version_idx").on(
+      table.userId,
+      table.version.desc(),
+    ),
+    index("vault_blob_history_user_archived_idx").on(
+      table.userId,
+      table.archivedAt.desc(),
+    ),
+    check("vault_blob_history_version_range", sql`${table.version} >= 1`),
+  ],
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type VaultBlob = typeof vaultBlobs.$inferSelect;
 export type NewVaultBlob = typeof vaultBlobs.$inferInsert;
+export type VaultBlobHistoryEntry = typeof vaultBlobHistory.$inferSelect;
 
 export const insertUserSchema = createInsertSchema(users, {
   username: (col) => col.min(3).max(64),
@@ -82,6 +116,18 @@ export const vaultSyncSchema = insertVaultBlobSchema
   .pick({
     encryptedBlob: true,
     version: true,
+  })
+  .strict();
+
+// Restore endpoint — caller picks which historical version to roll back to.
+// `version` is the historical version (the one stored in vault_blob_history),
+// NOT the new version that will be written to vault_blobs (the server picks
+// that as currentVersion + 1 to preserve monotonicity). .strict() so unknown
+// fields (e.g. someone hand-crafting an `encryptedBlob` field hoping to inject
+// blob content via the restore path) are rejected with 400.
+export const vaultRestoreSchema = z
+  .object({
+    version: z.number().int().min(1),
   })
   .strict();
 

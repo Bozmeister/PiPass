@@ -4,6 +4,7 @@ import {
   registerSchema,
   loginSchema,
   vaultSyncSchema,
+  vaultRestoreSchema,
   usernameParamSchema,
   userIdHeaderSchema,
   authHashHeaderSchema,
@@ -11,8 +12,10 @@ import {
   type LoginInput,
   type VaultSyncInput,
 } from "../shared/schema";
+import type { z } from "zod";
 
 export type { RegisterInput, LoginInput, VaultSyncInput };
+export type VaultRestoreInput = z.infer<typeof vaultRestoreSchema>;
 
 export type Result<T> =
   | { ok: true; data: T }
@@ -58,6 +61,10 @@ export function validateLogin(body: unknown): Result<LoginInput> {
 
 export function validateVaultSync(body: unknown): Result<VaultSyncInput> {
   return parse(body, vaultSyncSchema);
+}
+
+export function validateVaultRestore(body: unknown): Result<VaultRestoreInput> {
+  return parse(body, vaultRestoreSchema);
 }
 
 export function validateUsernameParam(value: unknown): Result<string> {

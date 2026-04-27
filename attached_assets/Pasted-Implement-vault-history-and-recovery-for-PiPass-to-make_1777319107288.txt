@@ -1,0 +1,163 @@
+Implement vault history and recovery for PiPass to make all destructive writes reversible.
+
+GOALS:
+1. Preserve the last N versions of each user’s vault (N = 10 default)
+2. Allow users to restore any previous version safely
+3. Ensure history does NOT break zero-knowledge guarantees
+4. Ensure history is bounded (no unbounded storage growth)
+
+---
+
+SCHEMA CHANGES:
+
+Create a new table:
+
+vault_blob_history (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL,
+  version INTEGER NOT NULL,
+  encrypted_blob TEXT NOT NULL,
+  archived_at TIMESTAMP NOT NULL DEFAULT now(),
+
+  CONSTRAINT fk_user
+    FOREIGN KEY (user_id)
+    REFERENCES users(id)
+    ON DELETE CASCADE
+);
+
+Indexes:
+- (user_id, version DESC)
+- (user_id, archived_at DESC)
+
+---
+
+CORE LOGIC:
+
+1. On every successful /api/vault/sync:
+
+BEFORE updating vault_blobs:
+- Read current row (if exists)
+- Insert it into vault_blob_history
+
+AFTER insert:
+- Enforce max history size per user:
+  Keep only the latest N entries (default 10)
+  Delete older ones:
+    DELETE FROM vault_blob_history
+    WHERE user_id = $1
+      AND id NOT IN (
+        SELECT id FROM vault_blob_history
+        WHERE user_id = $1
+        ORDER BY version DESC
+        LIMIT 10
+      );
+
+IMPORTANT:
+- This must happen inside the same request flow
+- Failure to write history must NOT corrupt main vault write
+- Prefer transaction if safe, otherwise best-effort fallback
+
+---
+
+NEW ENDPOINTS:
+
+1) GET /api/vault/history
+
+Returns:
+[
+  {
+    "version": number,
+    "archivedAt": timestamp,
+    "blobSize": number
+  }
+]
+
+Rules:
+- Auth required (same as vault endpoints)
+- Do NOT return encrypted_blob itself
+- Sort DESC by version
+- Limit to N entries
+
+---
+
+2) POST /api/vault/restore
+
+Body:
+{
+  "version": number
+}
+
+Behavior:
+- Validate version exists in vault_blob_history for user
+- Restore it into vault_blobs:
+    encrypted_blob = historical value
+    version = current_version + 1  (IMPORTANT: preserve monotonicity)
+
+- Return updated vault metadata
+
+Rules:
+- Must pass same validation as sync
+- Must NOT allow restoring to same version (always increment)
+- If version not found → 404
+
+---
+
+SECURITY REQUIREMENTS:
+
+1. Zero-knowledge preserved:
+   - Server NEVER inspects blob contents
+   - History stores encrypted blobs only
+
+2. Prevent abuse:
+   - Restoration counts as a write (subject to future rate limits)
+   - Do NOT allow arbitrary version injection
+
+3. Input validation:
+   - version must be positive integer
+   - Reject malformed requests with 400
+
+---
+
+EDGE CASES:
+
+- First write (no existing vault): no history entry created
+- Concurrent writes:
+  - Only archive the actually replaced version
+- History corruption:
+  - Must NOT block main vault operation
+
+---
+
+OPTIONAL (IF LOW EFFORT):
+
+- Add "restoredFromVersion" field in response for visibility
+
+---
+
+CONSTRAINTS:
+
+- DO NOT modify anything in crypto/
+- DO NOT change existing vault_blobs schema
+- DO NOT break existing API responses
+- DO NOT weaken validation
+- KEEP all logic server-side
+
+---
+
+VERIFICATION:
+
+- Write version 1 → no history
+- Write version 2 → history contains version 1
+- Write up to version 12 → history contains only last 10
+- Restore version 5 → creates version 13
+- Restore invalid version → 404
+- Ensure blob integrity unchanged after restore
+
+---
+
+SUCCESS CRITERIA:
+
+- Vault state is now reversible
+- No destructive action is permanent
+- History remains bounded and efficient
+- No change to encryption guarantees
