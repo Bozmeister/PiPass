@@ -36,7 +36,7 @@ export const vaultBlobs = pgTable(
       .$defaultFn(() => Date.now()),
   },
   (table) => [
-    check("vault_blobs_version_min", sql`${table.version} >= 1`),
+    check("vault_blobs_version_range", sql`${table.version} >= 1`),
   ],
 );
 
