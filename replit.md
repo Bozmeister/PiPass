@@ -76,7 +76,7 @@ Preferred communication style: Simple, everyday language.
   - `POST /api/vault/sync` — Upload encrypted vault blob (version-checked)
   - `GET /api/vault/fetch` — Download encrypted vault blob
   - `GET /api/health` — Health check
-- **Storage** (`server/storage.ts`): In-memory storage (MemStorage) with User and VaultBlob maps
+- **Storage** (`server/storage.ts`): `DatabaseStorage` class implementing `IStorage`, backed by PostgreSQL via Drizzle ORM (`server/db.ts` — pg `Pool` + node-postgres adapter, fail-fast on missing `DATABASE_URL`). Instantiated explicitly in `server/index.ts` and injected into `registerRoutes(app, storage)`.
 - **Security**:
   - Timing-safe auth hash comparison via `node:crypto` `timingSafeEqual`
   - AuthHash stored as SHA-256 hash server-side (not raw), mitigating pass-the-hash if DB leaks
@@ -90,9 +90,9 @@ Preferred communication style: Simple, everyday language.
 - **IMPORTANT**: Server files must use `node:crypto` (not `crypto`) to avoid resolving to the local `crypto/` directory
 
 ### Database
-- **Current**: In-memory storage (MemStorage class)
-- **Schema**: `shared/schema.ts` has zod schemas for validation (used by frontend only)
-- **Types**: User (id, username, authHash, salt, iterations, createdAt), VaultBlob (userId, encryptedBlob, version, updatedAt)
+- **Current**: PostgreSQL via Drizzle ORM (node-postgres adapter). Connection in `server/db.ts` reads `DATABASE_URL` and fails fast if missing — there is no in-memory fallback.
+- **Schema** (`shared/schema.ts`): `users` table (uuid PK `defaultRandom`, unique `username`, `authHash`, `salt`, `iterations`, `createdAt` bigint mode:"number") and `vaultBlobs` table (uuid `userId` PK + FK → `users.id` ON DELETE CASCADE, `encryptedBlob`, `version`, `updatedAt` bigint). Drizzle `$inferSelect` types alongside the existing zod schemas used by the frontend.
+- **Migrations**: `drizzle.config.ts` + `npm run db:push` (no hand-written SQL).
 
 ### Project Structure
 ```
