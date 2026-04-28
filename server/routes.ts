@@ -131,6 +131,15 @@ const PER_USER_RATE_LIMITS = {
   // replayed against /finish more than once.
   passkey_register_start: 5,
   passkey_register_finish: 5,
+  // Passkey step-up: same shape as totp_step_up. Slightly looser
+  // than register/* because a real user pushing through several
+  // sensitive actions in a row can legitimately re-prove on each
+  // one. /finish is what brute-forcers care about (it's the
+  // signature-verifying endpoint), and it is still capped at the
+  // same 10/min ceiling — the underlying anti-replay is the
+  // single-use challenge consumed inside server/webauthn.ts.
+  passkey_step_up_start: 10,
+  passkey_step_up_finish: 10,
 } as const;
 type RateLimitedEndpoint = keyof typeof PER_USER_RATE_LIMITS;
 
@@ -1848,6 +1857,31 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(401).json({ error: "TOTP required" });
       }
 
+      // Passkey step-up gate. Mirrors the TOTP gate above for users
+      // whose second factor is a passkey instead of TOTP. Sits BELOW
+      // the TOTP gate (which short-circuits for TOTP-enabled users)
+      // and ABOVE the untrusted-device 403 (so a passkey-fresh user
+      // can write from an untrusted device, same SUBSTITUTE-for-trust
+      // semantics the TOTP path already has).
+      const syncStepUpPasskey = await evaluatePasskeyStepUp({
+        userId,
+        sessionId: auth.sessionId,
+        sessionTotpVerifiedUntil: auth.totpVerifiedUntil,
+        securityLevel: syncSecurityLevel,
+        isUntrusted: syncIsUntrusted,
+        requireAlways: false,
+        totpEnabled: syncStepUp.totpEnabled,
+      });
+      if (syncStepUpPasskey.required && !syncStepUpPasskey.satisfied) {
+        recordAudit(storage, {
+          userId,
+          action: "passkey_required_for_write",
+          ipAddress: getClientIp(req),
+          userAgent: `attemptedAction=sync; level=${syncSecurityLevel}; untrusted=${syncIsUntrusted}`,
+        });
+        return res.status(401).json({ error: "Step-up required" });
+      }
+
       // Untrusted-device write block. Sits BELOW recovery mode (423)
       // and soft-lock (423) because those are stronger account-wide
       // states — surfacing 403 first would mislead the user into
@@ -1859,11 +1893,16 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // user a paper trail in their own audit log so they can see
       // "I tried to sync from a new device and was blocked".
       //
-      // SUPPRESSED when TOTP step-up is currently satisfied for this
-      // session: a 2FA-fresh user has already proven identity and is
-      // not subject to the per-device trust gate. Non-TOTP users
-      // continue to see the 403 exactly as before.
-      if (syncIsUntrusted && !syncStepUp.satisfied) {
+      // SUPPRESSED when ANY step-up factor is currently satisfied for
+      // this session (read directly off the totpVerifiedUntil column,
+      // which is written by both TOTP step-up AND passkey step-up).
+      // A 2FA-fresh user has already proven identity and is not
+      // subject to the per-device trust gate. Users with no second
+      // factor enabled continue to see the 403 exactly as before.
+      const syncStepUpFresh =
+        auth.totpVerifiedUntil !== null &&
+        auth.totpVerifiedUntil > Date.now();
+      if (syncIsUntrusted && !syncStepUpFresh) {
         recordAudit(storage, {
           userId,
           action: "untrusted_device_blocked",
@@ -2200,12 +2239,41 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(401).json({ error: "TOTP required" });
       }
 
+      // Passkey step-up gate. ALWAYS required for restore when the
+      // user has a passkey enabled (mirrors the TOTP gate's
+      // requireAlways:true above) — restore is the most destructive
+      // write so every restore re-prompts for the second factor
+      // regardless of context.
+      const restoreStepUpPasskey = await evaluatePasskeyStepUp({
+        userId,
+        sessionId: auth.sessionId,
+        sessionTotpVerifiedUntil: auth.totpVerifiedUntil,
+        securityLevel: restoreSecurityLevel,
+        isUntrusted: restoreIsUntrusted,
+        requireAlways: true,
+        totpEnabled: restoreStepUp.totpEnabled,
+      });
+      if (restoreStepUpPasskey.required && !restoreStepUpPasskey.satisfied) {
+        recordAudit(storage, {
+          userId,
+          action: "passkey_required_for_write",
+          ipAddress: getClientIp(req),
+          userAgent: `attemptedAction=restore; level=${restoreSecurityLevel}; untrusted=${restoreIsUntrusted}`,
+        });
+        return res.status(401).json({ error: "Step-up required" });
+      }
+
       // Untrusted-device write block — same placement / rationale as
       // /api/vault/sync. Restore IS a write (it archives the current
       // blob and replaces it with a historical version), so it must
       // be blocked from untrusted devices for the same reason sync is.
-      // Suppressed when TOTP step-up is satisfied (mirror of sync).
-      if (restoreIsUntrusted && !restoreStepUp.satisfied) {
+      // Suppressed when ANY step-up factor is satisfied (read off the
+      // shared totpVerifiedUntil column written by both TOTP and
+      // passkey step-up paths — mirror of sync).
+      const restoreStepUpFresh =
+        auth.totpVerifiedUntil !== null &&
+        auth.totpVerifiedUntil > Date.now();
+      if (restoreIsUntrusted && !restoreStepUpFresh) {
         recordAudit(storage, {
           userId,
           action: "untrusted_device_blocked",
@@ -2572,6 +2640,72 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       input.sessionTotpVerifiedUntil !== null &&
       input.sessionTotpVerifiedUntil > now;
     return { required: true, satisfied, totpEnabled: true };
+  }
+
+  // ---------------------------------------------------------------------
+  // Passkey step-up gate helper
+  // ---------------------------------------------------------------------
+  //
+  // Mirror of evaluateTotpStepUp for accounts whose second factor is a
+  // passkey rather than TOTP. A successful passkey step-up writes the
+  // same sessions.totp_verified_until column (legacy column name —
+  // semantically it represents "this session has step-up verified by
+  // ANY accepted second factor", not specifically TOTP), so the
+  // satisfaction check here is identical to the TOTP helper.
+  //
+  // The gate runs ONLY when TOTP is disabled. If a user has BOTH
+  // factors enabled, evaluateTotpStepUp already fired and the
+  // resulting "step-up required" error message routes the user
+  // through the TOTP path; either factor satisfies the same column,
+  // so a TOTP-and-passkey user can still complete via passkey if
+  // they prefer (the route just doesn't surface "use passkey" as a
+  // first-class option in that combined case).
+  //
+  // The "do they actually have a passkey" lookup happens AFTER the
+  // cheap context checks short-circuit, so a normal-context sync on
+  // a passkey-less account costs zero extra DB hits.
+  async function evaluatePasskeyStepUp(input: {
+    userId: string;
+    sessionId: string | null;
+    sessionTotpVerifiedUntil: number | null;
+    securityLevel: SecurityLevel;
+    isUntrusted: boolean;
+    requireAlways: boolean;
+    totpEnabled: boolean;
+  }): Promise<{ required: boolean; satisfied: boolean }> {
+    if (input.totpEnabled) {
+      // TOTP gate already handled this user; do nothing here so we
+      // don't double-gate. (Either factor's step-up writes the same
+      // column, so a TOTP-stepped-up user is also passkey-fresh
+      // from the column's perspective.)
+      return { required: false, satisfied: false };
+    }
+    const required =
+      input.requireAlways ||
+      input.securityLevel === "high" ||
+      input.isUntrusted ||
+      // Legacy auth-hash callers (sessionId === null) cannot step
+      // up: there is no session row to mark. Same rationale as
+      // the TOTP helper — passkey-enabled users on the legacy
+      // auth path become read-only on sync/restore until they
+      // log in via the session-token path.
+      input.sessionId === null;
+    if (!required) {
+      return { required: false, satisfied: false };
+    }
+    // Only when the gate WOULD fire do we hit the DB to confirm
+    // the user actually has a usable passkey. listCredentialsForUser
+    // already filters out revoked rows, so empty list = "no
+    // active passkey" and the gate is a no-op for this account.
+    const credentials = await storage.listCredentialsForUser(input.userId);
+    if (credentials.length === 0) {
+      return { required: false, satisfied: false };
+    }
+    const now = Date.now();
+    const satisfied =
+      input.sessionTotpVerifiedUntil !== null &&
+      input.sessionTotpVerifiedUntil > now;
+    return { required: true, satisfied };
   }
 
   // POST /api/vault/recovery/acknowledge — user-initiated exit from
@@ -3187,6 +3321,298 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         });
       } catch (err) {
         console.error("TOTP step-up error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // POST /api/passkeys/step-up/start — auth required. Mints a fresh
+  // WebAuthn AUTHENTICATION challenge (single-use, in-process, 5 min
+  // TTL) bound to the current session's userId, and returns
+  // PublicKeyCredentialRequestOptions for the client to hand to
+  // navigator.credentials.get(). Mirror of the TOTP step-up start
+  // path conceptually, except the second factor is a passkey
+  // assertion rather than a TOTP code.
+  //
+  // Body: empty object — strict-validated via the existing
+  // validatePasskeyRegisterStart (same shape: an empty .strict()).
+  // No body fields are needed; the user is identified entirely by
+  // the session token on the request.
+  //
+  // Legacy auth-hash callers cannot step up (no session row to mark
+  // on /finish) — rejected with 400 same as the TOTP path.
+  app.post(
+    "/api/passkeys/step-up/start",
+    jsonBody(AUTH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+
+        const parsed = validatePasskeyRegisterStart(req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        const { userId, sessionId } = auth;
+
+        if (
+          checkUserRateLimit("passkey_step_up_start", getClientIp(req), userId)
+        ) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+
+        if (sessionId === null) {
+          return res
+            .status(400)
+            .json({ error: "Session token required to step up" });
+        }
+
+        // Need at least one usable passkey to even start. listCredentials
+        // already filters revoked rows; an empty list means the user has
+        // no passkey to assert with. 400 (not 404) — the request itself
+        // is invalid for this account state, same shape the TOTP path
+        // returns when TOTP is not enabled.
+        const credentials = await storage.listCredentialsForUser(userId);
+        if (credentials.length === 0) {
+          return res
+            .status(400)
+            .json({ error: "No passkeys registered for this account" });
+        }
+
+        const options = await generateAuthenticationOptionsFor({
+          userId,
+          request: req,
+          allowCredentialIds: credentials.map((c) => ({
+            id: c.credentialId,
+            transports: c.transports,
+          })),
+        });
+        if (!options.ok) {
+          // generateAuthenticationOptionsFor only fails on internal
+          // errors (challenge store failure, etc.). Surface 500.
+          console.error(
+            `Passkey step-up options generation failed: code=${options.code}`,
+          );
+          return res
+            .status(500)
+            .json({ error: "Internal server error" });
+        }
+        return res.status(200).json(options.options);
+      } catch (err) {
+        console.error("Passkey step-up start error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // POST /api/passkeys/step-up/finish — auth required. Verifies the
+  // assertion against the challenge issued by /step-up/start, then
+  // marks sessions.totpVerifiedUntil so the next sync/restore on
+  // this session bypasses the step-up gate for STEP_UP_TTL_MS.
+  //
+  // Body: { response: <WebAuthn assertion> } — strict-validated via
+  // the existing validatePasskeyLoginFinish (identical body shape).
+  //
+  // Critical security check: the credential must belong to the
+  // session's user. Without this, an attacker who controls both an
+  // active session for user X AND a passkey-bound authenticator
+  // belonging to user Z could:
+  //   1. POST /step-up/start with X's session → challenge bound to X
+  //   2. Have Z sign that challenge
+  //   3. POST /step-up/finish with Z's assertion under X's session
+  //   4. The verifier would consume X's challenge and validate the
+  //      signature against Z's stored public key (looked up by
+  //      credential id) — succeeding because the signature is
+  //      cryptographically valid for that key
+  //   5. We would then mark X's session as step-up verified
+  // Cross-user assertions MUST be rejected before the verifier is
+  // called.
+  //
+  // Failure modes collapse to a generic 401 the same way passkey
+  // login does, so no information about WHY the step-up failed
+  // leaks (unknown credential vs. wrong user vs. bad signature
+  // vs. expired challenge are all "Step-up failed" to the client).
+  // counter_replay still gets the special revoke+anomaly path.
+  app.post(
+    "/api/passkeys/step-up/finish",
+    jsonBody(PASSKEY_FINISH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+
+        const parsed = validatePasskeyLoginFinish(req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        const { userId, sessionId } = auth;
+        const clientIp = getClientIp(req);
+        const userAgent = captureUserAgent(req);
+
+        if (
+          checkUserRateLimit("passkey_step_up_finish", clientIp, userId)
+        ) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+
+        if (sessionId === null) {
+          return res
+            .status(400)
+            .json({ error: "Session token required to step up" });
+        }
+
+        const stored = await storage.getCredentialById(parsed.data.response.id);
+        // Credential lookup failures collapse to the same generic 401
+        // as a verification failure. The user-mismatch branch is the
+        // load-bearing security check (see endpoint comment above):
+        // a valid assertion from credential C bound to user Z must
+        // NOT satisfy step-up for an attacker session bound to user X.
+        if (!stored || stored.userId !== userId) {
+          recordAudit(storage, {
+            userId,
+            action: "passkey_step_up_failure",
+            ipAddress: clientIp,
+            userAgent,
+          });
+          return res.status(401).json({ error: "Step-up failed" });
+        }
+
+        const verified = await verifyAuthenticationResponseFor({
+          userId,
+          // Same passthrough/strict mismatch as the login verify
+          // call: the validator's inner response uses .passthrough()
+          // so authenticator extras survive, but SimpleWebAuthn's
+          // AuthenticationResponseJSON narrows to known fields. The
+          // runtime contract is unchanged — the verifier rejects
+          // anything it doesn't understand.
+          response: parsed.data.response as Parameters<
+            typeof verifyAuthenticationResponseFor
+          >[0]["response"],
+          request: req,
+          storedCredential: {
+            credentialId: stored.credentialId,
+            publicKey: stored.publicKey,
+            counter: stored.counter,
+            transports: stored.transports,
+          },
+        });
+
+        if (!verified.ok) {
+          if (verified.code === "counter_replay") {
+            // Counter regression / replay — same severity here as on
+            // /api/passkeys/login/finish. Revoke the credential
+            // (best-effort; swallow storage errors so a DB hiccup
+            // can't be used to KEEP a compromised credential alive)
+            // and emit BOTH the anomaly event and the failure event
+            // so the audit log shows what happened and that the
+            // step-up itself was denied.
+            try {
+              await storage.revokeCredential(stored.credentialId);
+            } catch (revokeErr) {
+              console.error(
+                "Failed to revoke credential after counter replay during step-up",
+              );
+            }
+            recordAudit(storage, {
+              userId,
+              action: "passkey_counter_anomaly",
+              ipAddress: clientIp,
+              userAgent: `credentialId=${stored.credentialId}; source=step_up`,
+            });
+            recordAudit(storage, {
+              userId,
+              action: "passkey_step_up_failure",
+              ipAddress: clientIp,
+              userAgent,
+            });
+            return res.status(401).json({ error: "Step-up failed" });
+          }
+          if (verified.code === "internal_error") {
+            console.error("Passkey step-up verify internal_error");
+          }
+          recordAudit(storage, {
+            userId,
+            action: "passkey_step_up_failure",
+            ipAddress: clientIp,
+            userAgent,
+          });
+          return res.status(401).json({ error: "Step-up failed" });
+        }
+
+        // Persist the new signCount BEFORE marking the session.
+        // Same reasoning as /api/passkeys/login/finish: if we mark
+        // the session step-up-verified but fail to advance the
+        // counter, the same assertion could be replayed against a
+        // future step-up on this same credential. Counter
+        // persistence is therefore on the critical path; a write
+        // failure is a real 500, not the generic 401.
+        try {
+          await storage.updateCredentialCounter(
+            stored.credentialId,
+            verified.newCounter,
+          );
+        } catch (counterErr) {
+          console.error(
+            "Failed to persist new signCount after passkey step-up verify",
+          );
+          return res
+            .status(500)
+            .json({ error: "Internal server error" });
+        }
+
+        const verifiedUntil = Date.now() + STEP_UP_TTL_MS;
+        // markSessionTotpVerified writes the same column whose
+        // legacy name suggests TOTP — we reuse it deliberately so
+        // both factors satisfy the same downstream gates without
+        // any schema change. Returns false on DB error (errors
+        // swallowed inside the storage layer); surface that as 500
+        // so the user can retry rather than discovering the failure
+        // on their next sensitive write. The success-only audit
+        // pattern matches the TOTP step-up endpoint: an operator
+        // can distinguish "user attempted step-up but DB dropped
+        // it" from "user successfully stepped up".
+        const persisted = await storage.markSessionTotpVerified(
+          sessionId,
+          verifiedUntil,
+        );
+        if (!persisted) {
+          recordAudit(storage, {
+            userId,
+            action: "passkey_step_up_failure",
+            ipAddress: clientIp,
+            userAgent: `reason=persist_failed`,
+          });
+          return res
+            .status(500)
+            .json({ error: "Internal server error" });
+        }
+        recordAudit(storage, {
+          userId,
+          action: "passkey_step_up_success",
+          ipAddress: clientIp,
+          userAgent,
+        });
+
+        return res.status(200).json({
+          success: true,
+          verifiedUntil,
+        });
+      } catch (err) {
+        console.error("Passkey step-up finish error");
         return res.status(500).json({ error: "Internal server error" });
       }
     },
