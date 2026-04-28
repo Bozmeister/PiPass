@@ -308,6 +308,160 @@ if (!RATE_LIMIT_DISABLED) {
 }
 
 // ---------------------------------------------------------------------------
+// Soft-lock + IP-burst response system (in-memory, fail-open)
+// ---------------------------------------------------------------------------
+//
+// LAYERED on top of anomaly detection. Anomaly detection observes; this
+// layer RESPONDS:
+//
+//   - Rate-spike anomaly (existing rateAnomalyMeta from recordAnomaly)
+//     → soft-lock the user for SOFT_LOCK_DURATION_MS.
+//   - IP-flip burst: more than IP_CHANGE_THRESHOLD distinct sequential
+//     IPs in IP_CHANGE_WINDOW_MS → soft-lock.
+//
+// Soft lock semantics (per spec, deliberately conservative):
+//   - Returns 423 from POST /api/vault/sync and POST /api/vault/restore
+//     ONLY. Reads (fetch, history, audit, sessions) keep working — the
+//     user must always be able to see what's happening on their account
+//     during a lock.
+//   - Always auto-expires (Date.now() comparison, no admin override
+//     needed). There is no code path that creates a permanent lock.
+//   - Fail-open: if the in-memory state is somehow lost (server
+//     restart, GC eviction), all writes succeed. This is INTENTIONAL.
+//     Locking out a legitimate user because the lock-state Map crashed
+//     would be worse than a brief detection gap.
+//   - Triggered by the anomaly detector but NEVER by the rate-limiter:
+//     hitting a rate cap (429) is normal client misbehavior; tripping
+//     an anomaly threshold is the genuinely-suspicious signal.
+//
+// IP-burst tracking is separate from the existing single-flip
+// ip_change_detected event. A single flip is logged but does NOT lock
+// (per spec's "light touch"). Locking only happens after enough flips
+// pile up in the window — this catches "session token in use from many
+// places" without punishing road-warrior / mobile-roaming users.
+const SOFT_LOCK_DURATION_MS = 5 * 60_000;
+const IP_CHANGE_WINDOW_MS = 10 * 60_000;
+// Spec wording: "more than 3 IP changes within 10 minutes". A "change"
+// is a transition (A→B), not an entry. With N entries in the buffer,
+// transitions = N - 1. "More than 3" → transitions ≥ 4 → entries ≥ 5.
+const IP_CHANGE_THRESHOLD = 3;
+// Cap the buffer slightly above what the threshold needs so the
+// trim-to-window step has room to detect the most recent burst even
+// if old entries haven't been GC'd yet.
+const IP_HISTORY_MAX = IP_CHANGE_THRESHOLD + 3;
+
+type UserSecurityState = {
+  // Wall-clock epoch-ms after which the lock no longer applies. Absent
+  // / undefined → no lock. Compared with Date.now() on every check;
+  // there is no separate "lock expired" event — the absence of a
+  // future timestamp IS the unlock.
+  softLockedUntil?: number;
+  // Ring buffer of recent (ip, when) entries for burst detection.
+  // Pruned to entries within IP_CHANGE_WINDOW_MS on every push.
+  // Bounded length IP_HISTORY_MAX so a long-running attacker cannot
+  // grow this unbounded for one user.
+  ipHistory: Array<{ ip: string; at: number }>;
+  // For TTL-based GC of inactive users.
+  lastTouchedAt: number;
+};
+const userSecurityState = new Map<string, UserSecurityState>();
+
+// Same TTL as anomaly state. A user inactive for >1h drops out of the
+// in-memory tracker entirely (next request rebuilds state from scratch
+// — fail-open by design). EXCEPT: an active soft lock keeps the entry
+// alive past its TTL so a user who triggers a lock and then disappears
+// can't dodge the lock by waiting an hour.
+const SECURITY_STATE_TTL_MS = 60 * 60_000;
+if (!RATE_LIMIT_DISABLED) {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of userSecurityState) {
+      const stillLocked =
+        v.softLockedUntil !== undefined && v.softLockedUntil > now;
+      if (!stillLocked && now - v.lastTouchedAt > SECURITY_STATE_TTL_MS) {
+        userSecurityState.delete(k);
+      }
+    }
+  }, 5 * 60_000);
+}
+
+function getOrInitSecurityState(userId: string): UserSecurityState {
+  let s = userSecurityState.get(userId);
+  if (!s) {
+    s = { ipHistory: [], lastTouchedAt: Date.now() };
+    userSecurityState.set(userId, s);
+  }
+  return s;
+}
+
+// Returns the lock-until timestamp if the user is currently soft-locked,
+// otherwise undefined. ALSO opportunistically clears expired locks so the
+// in-memory state doesn't accumulate stale `softLockedUntil` values past
+// their expiry — important for the auto-expire UX (user makes a request
+// after the 5min lock has elapsed, this returns undefined, write proceeds).
+function getActiveSoftLock(userId: string): number | undefined {
+  const s = userSecurityState.get(userId);
+  if (!s || s.softLockedUntil === undefined) return undefined;
+  const now = Date.now();
+  if (s.softLockedUntil > now) return s.softLockedUntil;
+  s.softLockedUntil = undefined;
+  return undefined;
+}
+
+// Idempotent. Multiple anomalies in quick succession do NOT extend an
+// already-longer lock — Math.max keeps the latest expiry, never shortens.
+// Returns the lock-until timestamp so callers can include it in the
+// audit log payload.
+function triggerSoftLock(userId: string): number {
+  const s = getOrInitSecurityState(userId);
+  const now = Date.now();
+  const candidate = now + SOFT_LOCK_DURATION_MS;
+  s.softLockedUntil = Math.max(s.softLockedUntil ?? 0, candidate);
+  s.lastTouchedAt = now;
+  return s.softLockedUntil;
+}
+
+// Push the current IP onto the per-user history (only if it differs
+// from the most recent entry — repeated requests from the same IP do
+// not count as "changes"), prune to window + max-length, and report
+// whether the user JUST CROSSED the IP_CHANGE_THRESHOLD on this call.
+//
+// Edge-detected on purpose: a still-bursty user already past the
+// threshold returns FALSE here (the soft lock is already active and
+// triggerSoftLock is idempotent, but recomputing it on every
+// subsequent request was wasteful and made auditing the trigger point
+// harder). When the window expires and entries drop back below the
+// threshold, the next crossing fires fresh — no permanent suppression.
+function trackIpAndCheckBurst(userId: string, ip: string): boolean {
+  const s = getOrInitSecurityState(userId);
+  const now = Date.now();
+  s.lastTouchedAt = now;
+  // Prune stale entries FIRST so transitionsBefore reflects only the
+  // current 10-min window. Otherwise a 2-hour-old entry would inflate
+  // the pre-push count and prevent the edge detector from firing the
+  // current window's first crossing.
+  s.ipHistory = s.ipHistory.filter((e) => now - e.at <= IP_CHANGE_WINDOW_MS);
+  const transitionsBefore = Math.max(0, s.ipHistory.length - 1);
+
+  const last = s.ipHistory[s.ipHistory.length - 1];
+  if (!last || last.ip !== ip) {
+    s.ipHistory.push({ ip, at: now });
+  }
+  // Hard cap on buffer length to bound per-user memory.
+  if (s.ipHistory.length > IP_HISTORY_MAX) {
+    s.ipHistory = s.ipHistory.slice(-IP_HISTORY_MAX);
+  }
+  const transitionsAfter = s.ipHistory.length - 1;
+  // Edge: must have just crossed from "at-or-below threshold" to
+  // "above threshold". Threshold check uses ">" to match spec wording
+  // "more than 3".
+  return (
+    transitionsAfter > IP_CHANGE_THRESHOLD &&
+    transitionsBefore <= IP_CHANGE_THRESHOLD
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Audit log fire-and-forget wrapper
 // ---------------------------------------------------------------------------
 //
@@ -604,6 +758,33 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(429).json({ error: "Too many requests" });
       }
 
+      // Soft-lock check sits BETWEEN rate limit and the storage call:
+      //   - Rate-limit hits (429) come first because they are the
+      //     cheaper, lower-noise defense; we don't want a 423 to mask a
+      //     legitimate "you are spamming" 429.
+      //   - It runs BEFORE storage.syncVault so a locked user doesn't
+      //     hit the DB at all — the lock is the whole point.
+      // 423 (Locked) is the closest standard HTTP status; the response
+      // body is a single-shape error so a probe can't distinguish 423
+      // from any other rejection without parsing.
+      const lockedUntil = getActiveSoftLock(userId);
+      if (lockedUntil !== undefined) {
+        recordAudit(storage, {
+          userId,
+          action: "write_blocked_soft_lock",
+          ipAddress: getClientIp(req),
+          // Stash structured metadata in user_agent (same convention
+          // as anomaly_detected / ip_change_detected — see
+          // recordAnomaly callsites). attemptedAction lets a user
+          // reading their audit log see "I tried to sync at T and got
+          // blocked"; blockedUntil lets the UI show a countdown.
+          userAgent: `attemptedAction=sync; blockedUntil=${lockedUntil}`,
+        });
+        return res
+          .status(423)
+          .json({ error: "Vault temporarily locked due to suspicious activity" });
+      }
+
       // syncVault is fully transactional: it locks the existing row,
       // verifies version monotonicity (CAS), archives the previous blob to
       // vault_blob_history, writes the new blob, and prunes history — all
@@ -652,6 +833,19 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           ipAddress: ip,
           userAgent: signal.rateAnomalyMeta,
         });
+        // ESCALATE: a rate-spike anomaly is a high-signal event.
+        // Trigger the soft lock so the NEXT write attempt gets 423.
+        // (The current request already passed validation and the
+        // storage write succeeded; spec is "block writes during the
+        // lock window", not "retroactively reject this one".)
+        triggerSoftLock(userId);
+        // Mark the authenticating session as suspicious so the user's
+        // session-list UI can flag the device. No-op if the request
+        // came in via legacy auth-hash (auth.sessionId === null) —
+        // there is no session row to mark.
+        if (auth.sessionId) {
+          void storage.markSessionSuspicious(auth.sessionId);
+        }
       }
       if (signal.ipChangeFromIp) {
         recordAudit(storage, {
@@ -660,6 +854,14 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           ipAddress: ip,
           userAgent: `previous: ${signal.ipChangeFromIp}`,
         });
+      }
+      // IP-burst hardening: track on every authenticated write. Locks
+      // the user when the per-account ring buffer shows more than
+      // IP_CHANGE_THRESHOLD transitions in the window. Independent of
+      // the single-flip ip_change_detected event above (which only
+      // fires once per anomaly window and never locks).
+      if (trackIpAndCheckBurst(userId, ip)) {
+        triggerSoftLock(userId);
       }
 
       return res.status(200).json({
@@ -709,6 +911,16 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           ipAddress: ip,
           userAgent: signal.rateAnomalyMeta,
         });
+        // Same escalation as /api/vault/sync. Even though fetch is a
+        // READ and the soft lock only blocks WRITES, we still trigger
+        // the lock here: an attacker who can spam fetches has likely
+        // also stolen a session token, and we want their next write
+        // attempt to be blocked. Reads remain available throughout
+        // (per spec — user must always be able to see their data).
+        triggerSoftLock(userId);
+        if (auth.sessionId) {
+          void storage.markSessionSuspicious(auth.sessionId);
+        }
       }
       if (signal.ipChangeFromIp) {
         recordAudit(storage, {
@@ -717,6 +929,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           ipAddress: ip,
           userAgent: `previous: ${signal.ipChangeFromIp}`,
         });
+      }
+      // IP-burst tracking on reads too — fetches are far more frequent
+      // than writes and give us a denser signal of session-token reuse
+      // across geographies. The lock it triggers still only blocks
+      // WRITES; the fetch in flight here completes normally.
+      if (trackIpAndCheckBurst(userId, ip)) {
+        triggerSoftLock(userId);
       }
 
       if (!blob) {
@@ -793,6 +1012,23 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(429).json({ error: "Too many requests" });
       }
 
+      // Soft-lock check — same placement and rationale as
+      // /api/vault/sync. Restore IS a write (it archives the current
+      // blob and replaces it with a historical version), so it must
+      // be blocked during a lock too.
+      const restoreLockedUntil = getActiveSoftLock(userId);
+      if (restoreLockedUntil !== undefined) {
+        recordAudit(storage, {
+          userId,
+          action: "write_blocked_soft_lock",
+          ipAddress: getClientIp(req),
+          userAgent: `attemptedAction=restore; blockedUntil=${restoreLockedUntil}`,
+        });
+        return res
+          .status(423)
+          .json({ error: "Vault temporarily locked due to suspicious activity" });
+      }
+
       // restoreVault is itself transactional and idempotent: it picks the
       // new vault version as max(currentVersion, targetVersion) + 1 so the
       // restore can never violate version monotonicity, archives the
@@ -817,14 +1053,24 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // versionBefore captured race-free inside restoreVault's
       // transaction. versionAfter is the new live version (max of
       // current+1 and target+1, see restoreVault doc).
+      const restoreIp = getClientIp(req);
       recordAudit(storage, {
         userId,
         action: "vault_restore",
         versionBefore: result.previousVersion,
         versionAfter: result.blob.version,
-        ipAddress: getClientIp(req),
+        ipAddress: restoreIp,
         userAgent: captureUserAgent(req),
       });
+      // IP-burst tracking on restore too — restore is a write endpoint
+      // and an attacker spamming restores from rotating IPs should be
+      // caught the same way as someone spamming sync. We deliberately
+      // do NOT call recordAnomaly() here: restore has its own much
+      // tighter rate cap (10/min, well below the 15/min anomaly
+      // threshold), so a rate-spike anomaly bucket would never fire.
+      if (trackIpAndCheckBurst(userId, restoreIp)) {
+        triggerSoftLock(userId);
+      }
 
       return res.status(200).json({
         version: result.blob.version,
@@ -1000,7 +1246,26 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
 
       const entries = await storage.getAuditLog(auth.userId, AUDIT_LOG_LIMIT);
-      return res.status(200).json(entries);
+      // hasRecentAnomalies is a derived signal computed from the same
+      // page of entries we are about to return — no extra DB query.
+      // True iff there is at least one anomaly_detected OR
+      // write_blocked_soft_lock event in the last 10 minutes. The
+      // client uses this as a one-bit "show a security banner" hint
+      // without having to scan the entries array itself.
+      //
+      // RESPONSE SHAPE CHANGE: this endpoint previously returned the
+      // raw `entries` array. Wrapping it in `{ entries, hasRecentAnomalies }`
+      // is required by spec ("add optional field at top-level") and
+      // is the only spec-mandated breaking response change in this
+      // task. Documented in commit message.
+      const tenMinAgo = Date.now() - 10 * 60_000;
+      const hasRecentAnomalies = entries.some(
+        (e) =>
+          (e.action === "anomaly_detected" ||
+            e.action === "write_blocked_soft_lock") &&
+          e.createdAt >= tenMinAgo,
+      );
+      return res.status(200).json({ entries, hasRecentAnomalies });
     } catch (err) {
       console.error("Vault audit error");
       return res.status(500).json({ error: "Internal server error" });

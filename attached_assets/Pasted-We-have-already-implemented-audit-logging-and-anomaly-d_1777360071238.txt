@@ -1,0 +1,142 @@
+We have already implemented audit logging and anomaly detection (read/write spikes, IP changes).
+
+Now we want to ADD LIGHTWEIGHT RESPONSE MECHANISMS on top of this system.
+
+IMPORTANT CONSTRAINTS:
+- DO NOT modify crypto/
+- DO NOT change existing primary key column types
+- DO NOT break existing API responses
+- DO NOT block legitimate users aggressively
+- Keep everything additive and reversible
+
+GOAL:
+Convert anomaly detection from "log-only" into "detect + respond safely"
+
+--------------------------------------------------
+
+1. ADD SOFT LOCK SYSTEM (IN-MEMORY)
+
+Create a new in-memory structure:
+
+const userSecurityState = new Map<string, {
+  softLockedUntil?: number
+}>();
+
+Behavior:
+- When a HIGH-RISK anomaly is detected:
+  - write_spike_detected (e.g. >15 writes/min)
+  - read_spike_detected (e.g. >60 reads/min)
+  
+  → Set:
+     softLockedUntil = now + 5 minutes
+
+--------------------------------------------------
+
+2. ENFORCE SOFT LOCK ON WRITE OPERATIONS
+
+In these endpoints:
+- POST /api/vault/sync
+- POST /api/vault/restore
+
+After authenticate() and rate-limit checks:
+
+If user is soft-locked:
+→ return 423 Locked
+→ body: { "error": "Vault temporarily locked due to suspicious activity" }
+
+IMPORTANT:
+- READ operations (fetch/history/audit) must still work
+- User should always be able to see what's happening
+
+--------------------------------------------------
+
+3. ESCALATION LOGGING
+
+When a request is blocked due to soft lock:
+
+Write a new audit event:
+action: "write_blocked_soft_lock"
+
+metadata:
+- attemptedAction: "sync" or "restore"
+- blockedUntil: timestamp
+
+--------------------------------------------------
+
+4. IP CHANGE HARDENING (LIGHT TOUCH)
+
+If ip_change_detected occurs:
+
+Do NOT lock the user immediately.
+
+Instead:
+- Track recent IPs in memory (last 3)
+- If IP changes more than 3 times within 10 minutes:
+  → trigger soft lock
+
+--------------------------------------------------
+
+5. ADD OPTIONAL "SUSPICIOUS SESSION" FLAG
+
+In sessions table (add nullable column):
+
+suspicious BOOLEAN DEFAULT false
+
+When:
+- anomaly_detected OR write_spike_detected
+
+→ mark current session as suspicious
+
+Expose this in:
+GET /api/auth/sessions
+
+(no tokens, just the flag)
+
+--------------------------------------------------
+
+6. ADD USER-FACING SIGNAL (MINIMAL)
+
+Modify responses of:
+GET /api/vault/audit
+
+Add optional field at top-level:
+{
+  "hasRecentAnomalies": true | false
+}
+
+Definition:
+- any anomaly_detected or write_blocked_soft_lock in last 10 minutes
+
+--------------------------------------------------
+
+7. SAFETY RULES
+
+- Soft locks must auto-expire (no permanent lockout possible)
+- No database writes should ever fail because of this system
+- All new logic must be fail-open (if memory crashes, requests still work)
+- No sensitive data in logs
+
+--------------------------------------------------
+
+8. VERIFICATION
+
+Test:
+
+1) Trigger write spike → verify:
+   - anomaly logged
+   - soft lock activated
+   - sync returns 423
+
+2) Wait 5 minutes → sync works again
+
+3) Fetch still works during lock
+
+4) Audit shows:
+   - anomaly_detected
+   - write_blocked_soft_lock
+
+5) Sessions endpoint shows suspicious flag
+
+--------------------------------------------------
+
+Deliver implementation + summary of behavior.

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { sql } from "drizzle-orm";
-import { pgTable, text, integer, bigint, uuid, check, index } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, bigint, uuid, boolean, check, index } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 
 export const users = pgTable(
@@ -107,6 +107,15 @@ export const sessions = pgTable(
       .$defaultFn(() => Date.now()),
     userAgent: text("user_agent"),
     ipAddress: text("ip_address"),
+    // Set to TRUE when an anomaly_detected event fires for this user
+    // while this session was the authenticating session. Surfaces in
+    // GET /api/auth/sessions so users can see "this device flagged
+    // suspicious activity" in their session list. Nullable + default
+    // false so the column add is non-destructive — old rows pre-feature
+    // simply read as not-suspicious. Never reset to false: a session
+    // that ever tripped a flag stays flagged for the life of the row;
+    // logout-all is the user's reset button.
+    suspicious: boolean("suspicious").default(false),
   },
   (table) => [
     index("sessions_user_expires_idx").on(table.userId, table.expiresAt),

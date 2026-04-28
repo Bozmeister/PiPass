@@ -57,7 +57,9 @@ export type RestoreVaultResult =
 // Public shape for GET /api/auth/sessions. The token_hash column is
 // deliberately omitted — it would let a DB-leak attacker invert the hash
 // table to identify "this user was active across these N devices". Only
-// non-sensitive metadata flows out: id, timestamps, user-agent, ip.
+// non-sensitive metadata flows out: id, timestamps, user-agent, ip,
+// and the suspicious flag (TRUE if this session was the authenticating
+// session at the time an anomaly_detected event fired).
 export type SessionListItem = {
   id: string;
   createdAt: number;
@@ -65,6 +67,7 @@ export type SessionListItem = {
   expiresAt: number;
   userAgent: string | null;
   ipAddress: string | null;
+  suspicious: boolean;
 };
 
 // Input shape for the audit-log writer. `action` is intentionally a
@@ -133,6 +136,16 @@ export interface IStorage {
   deleteSessionById(id: string): Promise<boolean>;
   deleteAllSessionsForUser(userId: string): Promise<number>;
   listActiveSessionsForUser(userId: string): Promise<SessionListItem[]>;
+
+  // Set sessions.suspicious = true. Same fail-open contract as
+  // logAuditEvent: this method MUST NOT throw — implementations
+  // swallow all errors internally. Called fire-and-forget from the
+  // request handler when an anomaly fires; failing the suspicious flag
+  // must NEVER fail the API response. Idempotent: marking an already-
+  // suspicious session is a no-op (single-column UPDATE to the same
+  // value). No-op when sessionId is null (legacy auth-hash callers
+  // have no session row to mark).
+  markSessionSuspicious(sessionId: string): Promise<void>;
 
   // Audit log writer. CONTRACT:
   //   - Must NEVER throw — implementations MUST swallow all errors
@@ -545,11 +558,39 @@ export class DatabaseStorage implements IStorage {
         expiresAt: sessions.expiresAt,
         userAgent: sessions.userAgent,
         ipAddress: sessions.ipAddress,
+        suspicious: sessions.suspicious,
       })
       .from(sessions)
       .where(and(eq(sessions.userId, userId), gt(sessions.expiresAt, now)))
       .orderBy(desc(sessions.lastSeenAt));
-    return rows;
+    // Coerce nullable column → boolean so the API contract is the
+    // narrower SessionListItem.suspicious: boolean. Old pre-feature
+    // rows where the column is NULL surface as false to the client.
+    return rows.map((r) => ({ ...r, suspicious: r.suspicious === true }));
+  }
+
+  // Fail-open per IStorage contract: any DB error is logged and
+  // swallowed. Callers (the anomaly hook in routes.ts) fire-and-forget
+  // this and rely on the guarantee that a transient DB hiccup setting
+  // a metadata flag can never break the user's request.
+  async markSessionSuspicious(sessionId: string): Promise<void> {
+    try {
+      await db
+        .update(sessions)
+        .set({ suspicious: true })
+        .where(eq(sessions.id, sessionId));
+    } catch (err) {
+      // Include sessionId so an operator triaging "why didn't this
+      // session get flagged" can correlate. The error itself is
+      // intentionally NOT printed — DB drivers can include connection
+      // strings or query bodies in error.message that we don't want
+      // in plain logs. The exception type alone is enough signal.
+      const errType =
+        err instanceof Error ? err.constructor.name : typeof err;
+      console.error(
+        `markSessionSuspicious failed sessionId=${sessionId} errType=${errType}`,
+      );
+    }
   }
 
   // Append a single audit row. Hard contract: this method MUST NOT
