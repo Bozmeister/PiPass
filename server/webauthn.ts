@@ -428,6 +428,13 @@ export async function verifyAuthenticationResponseFor(input: {
     transports: string | null;
   };
 }): Promise<VerifyAuthenticationResponseResult> {
+  // -----------------------------------------------------------------
+  // Anti-replay: consume the single-use challenge that was issued
+  // for THIS userId during the corresponding /start call. If no
+  // challenge is set, or it has expired, abort BEFORE we even hand
+  // anything to the library — a bypass here would let an attacker
+  // skip the challenge step entirely.
+  // -----------------------------------------------------------------
   const claimed = consumeChallenge("authentication", input.userId);
   if (!claimed.ok) {
     return {
@@ -438,9 +445,44 @@ export async function verifyAuthenticationResponseFor(input: {
 
   const { rpId, expectedOrigin } = deriveRpConfig(input.request);
 
+  // -----------------------------------------------------------------
+  // Defensive: every WebAuthn security check (origin / rpId /
+  // challenge) only matters if the corresponding "expected" value
+  // is non-empty. An empty string would cause the underlying
+  // library to compare assertion-claimed values against "", which
+  // accepts anything. None of these CAN be empty in normal flow
+  // (consumeChallenge guarantees a non-empty stored challenge,
+  // deriveRpConfig falls back to "localhost" / "http://localhost"),
+  // but a sanity guard documents the invariant and fails closed
+  // if a future refactor breaks it.
+  // -----------------------------------------------------------------
+  if (!claimed.challenge || !rpId || !expectedOrigin) {
+    console.error(
+      "webauthn auth aborted: missing required security parameter",
+    );
+    return { ok: false, code: "verification_failed" };
+  }
+
   let verified = false;
   let newCounter = 0;
   try {
+    // The library enforces ALL THREE primary WebAuthn security
+    // guarantees in one call:
+    //   - expectedChallenge: assertion's clientDataJSON.challenge
+    //                        MUST equal the single-use challenge
+    //                        we stored under (auth, userId) and
+    //                        just consumed above. Mismatch -> throw.
+    //   - expectedOrigin   : assertion's clientDataJSON.origin
+    //                        MUST equal the live request origin
+    //                        (https://<host>, or http://localhost
+    //                        in dev). A credential phished onto
+    //                        evil.example fails here.
+    //   - expectedRPID     : assertion's authenticatorData
+    //                        rpIdHash MUST equal SHA-256(rpId).
+    //                        A credential bound to one app cannot
+    //                        be replayed against another.
+    // We never bypass any of these — they are all required arguments
+    // to the underlying call.
     const result = await swVerifyAuthenticationResponse({
       response: input.response,
       expectedChallenge: claimed.challenge,
@@ -457,13 +499,37 @@ export async function verifyAuthenticationResponseFor(input: {
     verified = result.verified;
     newCounter = result.authenticationInfo.newCounter;
   } catch (err) {
-    // The library throws a specific error when the assertion's
-    // signCount is <= the stored counter (replay attempt). We
-    // surface that as its own code so the route can audit it
-    // distinctly from a generic verification failure.
+    // ---------------------------------------------------------------
+    // Counter-replay detection on a thrown verify.
+    //
+    // We DELIBERATELY classify by error message ONLY here — NOT by
+    // numerically parsing the assertion's claimed signCount from
+    // authenticatorData. Reason: when the library throws, the
+    // signature has NOT been validated, which means the
+    // authenticatorData bytes are entirely attacker-controlled. An
+    // attacker who calls the unauthenticated /login/start (which
+    // returns credential ids in the options) could then submit a
+    // forged /login/finish with a valid credential id + valid
+    // challenge + low parsed signCount + INVALID signature. The
+    // library would throw on the signature, but a parse-based
+    // classification would mark it `counter_replay` and the route
+    // would revoke a perfectly good credential — a remote DoS /
+    // credential-wipe vector with no authentication required.
+    //
+    // The message-regex covers known wordings across @simplewebauthn
+    // versions. If a future version rewords the throw such that
+    // the regex misses, we lose the auto-revoke for that one
+    // attempt — but the client still gets a generic 401, the
+    // attempt is audited as a generic failure, and rate limiting
+    // still applies. Critically, a CLONED authenticator (which is
+    // the primary threat model for counter regression) produces
+    // VALID signatures — so it would land on the success path,
+    // where the post-verify numeric guard below catches the stale
+    // counter and applies revoke+audit unconditionally.
+    // ---------------------------------------------------------------
     const msg = err instanceof Error ? err.message : "";
-    if (/counter/i.test(msg)) {
-      logSwallow("verifyAuthenticationResponse[counter]", err);
+    if (/counter|clone|regress/i.test(msg)) {
+      logSwallow("verifyAuthenticationResponse[counter_msg]", err);
       return { ok: false, code: "counter_replay" };
     }
     const { reason } = logSwallow("verifyAuthenticationResponse", err);
@@ -471,6 +537,34 @@ export async function verifyAuthenticationResponseFor(input: {
   }
 
   if (!verified) return { ok: false, code: "verification_failed" };
+
+  // -----------------------------------------------------------------
+  // Defense-in-depth: strict counter check on the success path.
+  //
+  // The library is supposed to throw on any non-monotonic counter
+  // (handled in the catch above), but we MUST NOT trust that as
+  // the only line of defence — an upstream behavior change or a
+  // bug that lets a stale counter slip through would silently
+  // accept a replayed assertion.
+  //
+  // Rule per WebAuthn §6.1.1:
+  //   - If storedCounter > 0, the assertion's signCount MUST be
+  //     STRICTLY GREATER than the stored value. Equality is a
+  //     replay; less-than is a clone.
+  //   - If both storedCounter and newCounter are 0, the
+  //     authenticator does not implement a counter; this is
+  //     explicitly allowed and is NOT a replay.
+  // -----------------------------------------------------------------
+  if (
+    input.storedCredential.counter > 0 &&
+    newCounter <= input.storedCredential.counter
+  ) {
+    console.error(
+      `webauthn counter_replay caught by post-verify guard: stored=${input.storedCredential.counter} new=${newCounter}`,
+    );
+    return { ok: false, code: "counter_replay" };
+  }
+
   return { ok: true, newCounter };
 }
 

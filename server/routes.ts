@@ -3439,7 +3439,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
   // login does, so no information about WHY the step-up failed
   // leaks (unknown credential vs. wrong user vs. bad signature
   // vs. expired challenge are all "Step-up failed" to the client).
-  // counter_replay still gets the special revoke+anomaly path.
+  // counter_replay still gets the special revoke+replay-detected path.
   app.post(
     "/api/passkeys/step-up/finish",
     jsonBody(PASSKEY_FINISH_BODY_LIMIT),
@@ -3529,7 +3529,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             }
             recordAudit(storage, {
               userId,
-              action: "passkey_counter_anomaly",
+              action: "passkey_counter_replay_detected",
               ipAddress: clientIp,
               userAgent: `credentialId=${stored.credentialId}; source=step_up`,
             });
@@ -4043,7 +4043,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             }
             recordAudit(storage, {
               userId: stored.userId,
-              action: "passkey_counter_anomaly",
+              action: "passkey_counter_replay_detected",
               ipAddress: clientIp,
               userAgent,
             });
