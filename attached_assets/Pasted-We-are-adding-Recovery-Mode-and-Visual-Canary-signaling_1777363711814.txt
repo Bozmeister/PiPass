@@ -1,0 +1,174 @@
+We are adding Recovery Mode and Visual Canary signaling integration to the PiPass system.
+
+STRICT RULES:
+- DO NOT modify crypto/
+- DO NOT change any existing primary key column types
+- DO NOT alter existing schemas except ADDITIVE ONLY if absolutely required
+- All logic must fail-open (never permanently lock a legitimate user out)
+- No secrets (auth hash, session token, encrypted blob) may be logged
+
+----------------------------------------
+OBJECTIVE
+----------------------------------------
+
+Introduce a "Recovery Mode" that activates when securityLevel === "critical".
+
+This mode:
+1. Prevents further vault damage
+2. Signals clearly to the user (via API for frontend fractal)
+3. Allows safe recovery using vault history
+4. Logs all transitions for admin visibility
+
+----------------------------------------
+TASKS
+----------------------------------------
+
+T1 — Recovery Mode State (in-memory, routes.ts only)
+
+Add:
+
+recoveryState: Map<userId, {
+  enteredAt: number,
+  reason: string,
+  active: boolean
+}>
+
+Rules:
+- Enter Recovery Mode when:
+  - securityLevel transitions to "critical"
+- Exit Recovery Mode when:
+  - no anomalies for 10 minutes AND no soft lock active
+
+----------------------------------------
+
+T2 — API Signal for Frontend (fractal integration)
+
+Modify these endpoints to include:
+
+{
+  securityLevel: "normal" | "elevated" | "high" | "critical",
+  recoveryMode: boolean,
+  threatLevel: number // 0–100 scale
+}
+
+Threat level mapping:
+- normal = 0
+- elevated = 30
+- high = 60
+- critical = 90
+- if recoveryMode active → force 100
+
+Endpoints:
+- GET /api/vault/fetch
+- GET /api/vault/audit
+- GET /api/auth/sessions
+
+----------------------------------------
+
+T3 — Enforce Recovery Mode Behavior
+
+While recoveryMode.active === true:
+
+- BLOCK:
+  POST /api/vault/sync
+  POST /api/vault/restore
+
+Return:
+423 { error: "Vault locked - recovery mode active" }
+
+- ALLOW:
+  GET /api/vault/fetch
+  GET /api/vault/history
+  GET /api/vault/audit
+  GET /api/auth/sessions
+
+----------------------------------------
+
+T4 — Recovery Actions (controlled unlock)
+
+Add endpoint:
+
+POST /api/vault/recovery/acknowledge
+
+Auth required
+
+Behavior:
+- Clears recoveryMode.active
+- DOES NOT clear soft lock
+- DOES NOT clear anomaly memory
+- Logs event
+
+Response:
+{ success: true }
+
+----------------------------------------
+
+T5 — Audit Logging
+
+Log these new events:
+
+- recovery_mode_entered
+- recovery_mode_exited
+- recovery_acknowledged
+
+Metadata:
+- reason
+- previous securityLevel
+- current securityLevel
+
+Use existing audit log system (fire-and-forget, never throw)
+
+----------------------------------------
+
+T6 — Fractal Canary Signal (server side only)
+
+Add helper:
+
+getThreatLevel(userId)
+
+Returns:
+0–100 based on:
+- securityLevel
+- recent anomalies
+- recoveryMode
+
+This value is returned in API responses (frontend decides color rendering)
+
+----------------------------------------
+
+T7 — Safety Guarantees
+
+Ensure:
+
+- Recovery Mode NEVER permanently locks a user
+- Auto-expire if:
+  - no anomalies in last 15 minutes
+- Server restart MUST NOT trap user in recovery mode
+- Hydration logic must NOT re-trigger recovery mode unless anomalies exist
+
+----------------------------------------
+
+VERIFICATION
+
+1. Trigger anomaly burst → securityLevel = critical
+2. recoveryMode = true
+3. sync/restore → 423
+4. fetch/audit → 200 + threatLevel=100
+5. call /recovery/acknowledge → recoveryMode=false
+6. wait → system returns to normal automatically
+7. audit log contains all 3 recovery events
+
+----------------------------------------
+
+DO NOT:
+- Add database tables
+- Change crypto logic
+- Store any sensitive values in logs
+- Break existing API fields
+
+----------------------------------------
+
+Deliver clean, minimal diff focused on:
+- routes.ts
+- helper functions
+- endpoint responses

@@ -61,6 +61,13 @@ const PER_USER_RATE_LIMITS = {
   // unbounded rates. The spec doesn't mandate a limit here, but
   // matching the existing pattern is the conservative default.
   vault_audit: 10,
+  // POST /api/vault/recovery/acknowledge — user-initiated exit from
+  // recovery mode. Tighter than reads (this mutates security state)
+  // but loose enough that a user mashing the button while panicking
+  // doesn't lock themselves out. 10/min matches restore/sessions —
+  // any single user trying to acknowledge faster than once every
+  // 6 seconds is almost certainly a script, not a person.
+  recovery_ack: 10,
 } as const;
 type RateLimitedEndpoint = keyof typeof PER_USER_RATE_LIMITS;
 
@@ -561,6 +568,207 @@ if (!RATE_LIMIT_DISABLED) {
   }, 5 * 60_000);
 }
 
+// ---------------------------------------------------------------------------
+// Recovery Mode + Visual Canary (Threat Level)
+// ---------------------------------------------------------------------------
+//
+// Recovery Mode is an in-memory "circuit breaker" the server flips when a
+// user's security level escalates to "critical". While active it:
+//   - Blocks all WRITES (vault/sync, vault/restore) with 423 — protecting
+//     the vault from further damage during a suspected compromise.
+//   - Leaves READS available so the user can still inspect their vault,
+//     audit log, sessions, and (out-of-band) recover from a backup.
+//   - Forces threatLevel=100 in the response so the UI can paint the
+//     "panic" canary regardless of the underlying numeric level.
+//
+// Fail-open guarantees (T7):
+//   1. The user can ALWAYS escape via POST /api/vault/recovery/acknowledge.
+//   2. If the user just stops poking the server, recovery mode auto-exits
+//      after either (a) 10 min with no recent anomaly + no active lock
+//      (the "clean" path) or (b) RECOVERY_MAX_AGE_MS regardless of state
+//      (the "backstop" path that prevents a sustained false-positive
+//      from permanently locking a legitimate user out).
+//   3. Process restart never traps a user in recovery mode: the state is
+//      in-memory only. Hydration MAY re-enter recovery mode if and only
+//      if the audit log shows actual anomalies in the recent window AND
+//      the reconstructed level is "critical" (T7 wording: "must NOT
+//      re-trigger ... unless anomalies exist") — and even then the
+//      acknowledge + auto-expire escape hatches still apply.
+//
+// All recovery actions audit-log via recordAudit (fire-and-forget,
+// never throws).
+
+type RecoveryModeState = {
+  enteredAt: number;
+  reason: string;
+  // Soft flag rather than Map.delete() so we keep the timestamps for
+  // a short window after exit (useful for diagnosing back-to-back
+  // re-entries). The GC sweep below drops fully-inactive entries.
+  active: boolean;
+};
+
+// Per-user recovery mode state. Lost on restart by design — see
+// hydration hook in hydrateIfNeeded for the deliberate, conditional
+// re-entry pathway.
+const recoveryState = new Map<string, RecoveryModeState>();
+
+// Hard upper bound on recovery mode lifetime regardless of subsequent
+// signals. Required by the T7 fail-open guarantee — even if anomalies
+// keep firing, recovery mode auto-exits after this much time so a
+// legitimate user cannot be permanently locked out by a sustained
+// false-positive escalation. Distinct from the "clean" 10-min auto-
+// exit which only fires when the underlying signals have settled.
+const RECOVERY_MAX_AGE_MS = 15 * 60_000;
+
+// GC TTL for inactive recovery state entries. Same TTL we use for the
+// other in-memory security maps, so memory growth stays bounded for
+// long-tail inactive users.
+const RECOVERY_TTL_MS = SECURITY_STATE_TTL_MS;
+
+if (!RATE_LIMIT_DISABLED) {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of recoveryState) {
+      // Only sweep entries that have already exited (active=false) —
+      // an active recovery state is meaningful even if it's old; the
+      // RECOVERY_MAX_AGE_MS backstop inside isRecoveryModeActive will
+      // exit it lazily on the next request.
+      if (!v.active && now - v.enteredAt > RECOVERY_TTL_MS) {
+        recoveryState.delete(k);
+      }
+    }
+  }, 5 * 60_000);
+}
+
+// Idempotent enter. Re-entering an already-active recovery state is a
+// no-op (no duplicate audit row). The transition reason is recorded
+// in the audit metadata so operators can distinguish "live escalation"
+// from "post-restart hydration" entries.
+function enterRecoveryMode(
+  userId: string,
+  reason: string,
+  fromLevel: SecurityLevel,
+  toLevel: SecurityLevel,
+  storage: IStorage,
+): void {
+  const existing = recoveryState.get(userId);
+  if (existing?.active) return;
+  recoveryState.set(userId, {
+    enteredAt: Date.now(),
+    reason,
+    active: true,
+  });
+  recordAudit(storage, {
+    userId,
+    action: "recovery_mode_entered",
+    ipAddress: null,
+    // Stash structured context in user_agent following the existing
+    // anomaly_detected / write_blocked_soft_lock convention. Keeps
+    // the audit schema unchanged.
+    userAgent: `reason=${reason}; from=${fromLevel}; to=${toLevel}`,
+  });
+}
+
+// Idempotent exit. Distinct exit reasons ("user_acknowledged",
+// "auto_expired_clean", "auto_expired_max_age") are surfaced in the
+// audit metadata so operators can distinguish manual dismissal from
+// automatic recovery. NOTE: the user-acknowledged path emits a
+// recovery_acknowledged event INSTEAD of recovery_mode_exited (see
+// the acknowledge endpoint) — this function is only used for the
+// auto-exit paths.
+function exitRecoveryMode(
+  userId: string,
+  reason: string,
+  currentLevel: SecurityLevel,
+  storage: IStorage,
+): void {
+  const existing = recoveryState.get(userId);
+  if (!existing?.active) return;
+  existing.active = false;
+  recordAudit(storage, {
+    userId,
+    action: "recovery_mode_exited",
+    ipAddress: null,
+    userAgent: `reason=${reason}; level=${currentLevel}`,
+  });
+}
+
+// Single source of truth consulted by both the response builders
+// (fetch/audit/sessions) and the write blockers (sync/restore).
+// LAZY auto-exit: every call evaluates the exit conditions and
+// transitions to inactive if either condition holds. This keeps the
+// state machine self-healing — no setInterval needed to drive exit.
+//
+// Auto-exit conditions (either triggers exit):
+//   (a) "Clean" path — no recent anomaly within ANOMALY_RECENT_WINDOW_MS
+//       AND no active soft lock. This is the T1 wording.
+//   (b) "Backstop" path — recovery mode entered more than
+//       RECOVERY_MAX_AGE_MS ago, regardless of state. This is the T7
+//       fail-open guarantee that prevents sustained false-positives
+//       from permanently locking a user out.
+function isRecoveryModeActive(userId: string, storage: IStorage): boolean {
+  const r = recoveryState.get(userId);
+  if (!r?.active) return false;
+  const now = Date.now();
+  // Backstop FIRST so a stuck/looping signal can never defeat the
+  // hard upper bound. If we evaluated the clean condition first and
+  // an anomaly fired exactly at the backstop boundary, the backstop
+  // would never apply.
+  if (now - r.enteredAt > RECOVERY_MAX_AGE_MS) {
+    exitRecoveryMode(
+      userId,
+      "auto_expired_max_age",
+      deriveSecurityLevel(userId, null),
+      storage,
+    );
+    return false;
+  }
+  const sec = userSecurityState.get(userId);
+  const recentAnomaly =
+    sec?.recentAnomalyAt !== undefined &&
+    now - sec.recentAnomalyAt <= ANOMALY_RECENT_WINDOW_MS;
+  const lockActive = getActiveSoftLock(userId) !== undefined;
+  if (!recentAnomaly && !lockActive) {
+    exitRecoveryMode(
+      userId,
+      "auto_expired_clean",
+      deriveSecurityLevel(userId, null),
+      storage,
+    );
+    return false;
+  }
+  return true;
+}
+
+// Visual canary signal for the frontend. 0–100 scale so the client can
+// drive a single hue/animation parameter without having to translate
+// our enum to a color ramp. Mapping per spec:
+//   normal=0, elevated=30, high=60, critical=90; recoveryMode forces 100.
+// Pure derivation from existing in-memory state — NO DB I/O on the
+// hot path. Fail-open returns 0 (least alarming) if anything throws.
+function getThreatLevel(
+  userId: string,
+  sessionId: string | null,
+  storage: IStorage,
+): number {
+  try {
+    if (isRecoveryModeActive(userId, storage)) return 100;
+    const level = deriveSecurityLevel(userId, sessionId);
+    switch (level) {
+      case "normal":
+        return 0;
+      case "elevated":
+        return 30;
+      case "high":
+        return 60;
+      case "critical":
+        return 90;
+    }
+  } catch {
+    return 0;
+  }
+}
+
 // Pure synchronous derivation. ALL inputs come from the in-memory
 // userSecurityState Map populated by anomaly/soft-lock hooks. NO DB
 // access, NO awaits — safe to call on the hot path. Fail-open: any
@@ -631,6 +839,22 @@ function evaluateSecurityLevel(
           ipAddress,
           userAgent: `level=${newLevel}`,
         });
+      }
+      // Recovery Mode entry trigger (T1): enter when the level
+      // TRANSITIONS to "critical" — i.e. fires once on the rising
+      // edge, not on every subsequent critical-level request.
+      // enterRecoveryMode is itself idempotent so a stray double-call
+      // is harmless. We deliberately gate this on the prev !== newLevel
+      // branch so a normal "still critical" request doesn't keep
+      // reawakening recovery mode after the user acknowledged.
+      if (newLevel === "critical" && prev !== "critical") {
+        enterRecoveryMode(
+          userId,
+          "transition_to_critical",
+          prev,
+          newLevel,
+          storage,
+        );
       }
     }
   } catch {
@@ -856,6 +1080,33 @@ async function hydrateIfNeeded(
             currentLevel: derived,
             lastChangedAt: Date.now(),
           });
+          // Recovery Mode hydration hook (T7): re-enter recovery
+          // mode if-and-only-if the audit log showed a real anomaly
+          // AND the reconstructed level lands at "critical". This is
+          // the deliberate, conditional re-entry pathway documented
+          // in the recovery-mode header — without it an attacker
+          // could downgrade out of recovery just by waiting for /
+          // causing a process restart. The acknowledge endpoint and
+          // 15-min auto-expire backstop still apply, so the user is
+          // never permanently trapped (T7 fail-open).
+          //
+          // We seed the userSecurityLevelState above with `derived`,
+          // which means the FIRST evaluateSecurityLevel call after
+          // hydration sees prev===newLevel===critical and DOES NOT
+          // fire enterRecoveryMode via the transition path — so this
+          // is the only place hydration-driven recovery entry can
+          // happen. (Without this branch, post-restart users would
+          // see securityLevel=critical but recoveryMode=false, which
+          // is the regression the spec is closing.)
+          if (result.hadAnomaly && derived === "critical") {
+            enterRecoveryMode(
+              userId,
+              "hydrated_after_restart",
+              "normal",
+              derived,
+              storage,
+            );
+          }
         }
       } catch {
         // Fail-open: hydration is purely diagnostic. The slot stays
@@ -1191,6 +1442,20 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(429).json({ error: "Too many requests" });
       }
 
+      // Recovery Mode write block (T3): runs BEFORE the soft-lock
+      // check so the message is consistent ("recovery mode active")
+      // and so a user whose lock has technically expired but who
+      // hasn't acknowledged recovery mode is still blocked from
+      // further writes. isRecoveryModeActive itself runs the lazy
+      // auto-exit checks (clean + 15-min backstop), so a user whose
+      // signals have settled passes through here without any audit
+      // noise from this code path.
+      if (isRecoveryModeActive(userId, storage)) {
+        return res
+          .status(423)
+          .json({ error: "Vault locked - recovery mode active" });
+      }
+
       // Soft-lock check sits BETWEEN rate limit and the storage call:
       //   - Rate-limit hits (429) come first because they are the
       //     cheaper, lower-noise defense; we don't want a 423 to mask a
@@ -1392,11 +1657,21 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         ip,
         storage,
       );
+      // Recovery mode + threat level (T2/T6). isRecoveryModeActive
+      // also drives the lazy auto-exit, so calling it here keeps the
+      // self-healing path warm even on read-only traffic. Cheap (one
+      // Map lookup + a couple of timestamp comparisons).
+      const recoveryMode = isRecoveryModeActive(userId, storage);
+      const threatLevel = getThreatLevel(userId, auth.sessionId, storage);
 
       if (!blob) {
-        return res
-          .status(200)
-          .json({ encryptedBlob: null, version: 0, securityLevel });
+        return res.status(200).json({
+          encryptedBlob: null,
+          version: 0,
+          securityLevel,
+          recoveryMode,
+          threatLevel,
+        });
       }
 
       return res.status(200).json({
@@ -1404,6 +1679,8 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         version: blob.version,
         updatedAt: blob.updatedAt,
         securityLevel,
+        recoveryMode,
+        threatLevel,
       });
     } catch (err) {
       console.error("Vault fetch error");
@@ -1468,6 +1745,16 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
 
       if (checkUserRateLimit("vault_restore", getClientIp(req), userId)) {
         return res.status(429).json({ error: "Too many requests" });
+      }
+
+      // Recovery Mode write block (T3): same placement/rationale as
+      // /api/vault/sync — restore IS a write so it must be blocked
+      // while recovery mode is active. Runs BEFORE the soft-lock
+      // check for consistency.
+      if (isRecoveryModeActive(userId, storage)) {
+        return res
+          .status(423)
+          .json({ error: "Vault locked - recovery mode active" });
       }
 
       // Soft-lock check — same placement and rationale as
@@ -1675,7 +1962,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         getClientIp(req),
         storage,
       );
-      return res.status(200).json({ sessions: list, securityLevel });
+      // Recovery mode + threat level (T2/T6) — same additive pattern
+      // as /api/vault/fetch. Existing fields untouched.
+      const recoveryMode = isRecoveryModeActive(auth.userId, storage);
+      const threatLevel = getThreatLevel(auth.userId, auth.sessionId, storage);
+      return res
+        .status(200)
+        .json({ sessions: list, securityLevel, recoveryMode, threatLevel });
     } catch (err) {
       console.error("List-sessions error");
       return res.status(500).json({ error: "Internal server error" });
@@ -1746,11 +2039,93 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         getClientIp(req),
         storage,
       );
-      return res
-        .status(200)
-        .json({ entries, hasRecentAnomalies, securityLevel });
+      // Recovery mode + threat level (T2/T6) — same additive pattern
+      // as /api/vault/fetch and /api/auth/sessions. Existing fields
+      // (entries, hasRecentAnomalies) are untouched.
+      const recoveryMode = isRecoveryModeActive(auth.userId, storage);
+      const threatLevel = getThreatLevel(auth.userId, auth.sessionId, storage);
+      return res.status(200).json({
+        entries,
+        hasRecentAnomalies,
+        securityLevel,
+        recoveryMode,
+        threatLevel,
+      });
     } catch (err) {
       console.error("Vault audit error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // POST /api/vault/recovery/acknowledge — user-initiated exit from
+  // recovery mode (T4). Auth required (header path: x-session-token
+  // OR legacy x-user-id+x-auth-hash, same as every other authenticated
+  // endpoint). Idempotent: calling it when recovery mode is NOT active
+  // is a successful no-op (200) so a client retry on a flaky network
+  // can't surface a confusing failure.
+  //
+  // What this endpoint clears: ONLY the in-memory recovery flag.
+  // What it intentionally does NOT clear:
+  //   - softLockedUntil — if the user is still soft-locked, writes
+  //     stay blocked by the existing soft-lock guard. Acknowledging
+  //     recovery mode says "I see this", not "you were wrong".
+  //   - recentAnomalyAt — anomaly memory persists for the normal
+  //     ANOMALY_RECENT_WINDOW_MS so deriveSecurityLevel still
+  //     surfaces "elevated" until that window naturally expires.
+  //   - suspiciousSessions — the per-session suspicious flag remains
+  //     so the user can independently rotate the affected session via
+  //     the existing logout-all flow.
+  // The user is therefore never trapped, but is also never falsely
+  // told the underlying signals have all cleared.
+  app.post("/api/vault/recovery/acknowledge", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      const { userId } = auth;
+
+      // Rate-limit AFTER authenticate (real userId only). recovery_ack
+      // bucket: 10/min — see PER_USER_RATE_LIMITS comment for the
+      // rationale on why we don't lock this down further.
+      if (checkUserRateLimit("recovery_ack", getClientIp(req), userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+
+      const r = recoveryState.get(userId);
+      if (r?.active) {
+        // Flip the flag synchronously so a parallel write-blocker
+        // check (sync/restore) immediately observes the cleared
+        // state — no need to wait on the audit insert.
+        r.active = false;
+        const currentLevel = deriveSecurityLevel(userId, auth.sessionId);
+        // Single audit row per spec — recovery_acknowledged is
+        // distinct from recovery_mode_exited (the auto-exit event)
+        // so operators can distinguish manual user dismissal from
+        // automatic recovery without parsing metadata.
+        recordAudit(storage, {
+          userId,
+          action: "recovery_acknowledged",
+          ipAddress: getClientIp(req),
+          // previous: critical (recovery mode entry implies critical
+          // at the time of entry); current: derived NOW (may have
+          // already drifted down to elevated/normal as the underlying
+          // signals decayed). Keeping both gives operators the full
+          // before/after picture.
+          userAgent: `previous=critical; current=${currentLevel}`,
+        });
+      }
+      // Idempotent success — same response shape whether we cleared
+      // a state or there was nothing to clear. Clients can retry
+      // freely without surfacing a spurious failure.
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      console.error("Recovery acknowledge error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });
