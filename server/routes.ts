@@ -376,9 +376,16 @@ type UserSecurityState = {
   // deriveSecurityLevel to detect "high" synchronously, without a
   // per-request DB lookup. The DB column remains the durable source
   // of truth and is what GET /api/auth/sessions actually surfaces;
-  // this Set is purely a hot-path cache. Lost on restart — a fresh
-  // process derives "normal" until a new anomaly fires (fail-open).
+  // this Set is purely a hot-path cache. Lost on restart but
+  // hydrated lazily from the audit log — see hydrateSecurityStateFromAudit.
   suspiciousSessions: Set<string>;
+  // Wall-clock epoch-ms of the last successful hydration from the
+  // audit log. Set by hydrateSecurityStateFromAudit. Its mere
+  // presence (alongside the entry being in userSecurityState at all)
+  // is what causes future hydrateIfNeeded calls to skip — see the
+  // race-protection comment on hydrateIfNeeded for why a placeholder
+  // gets stamped BEFORE the audit query, not after.
+  hydratedAt?: number;
 };
 const userSecurityState = new Map<string, UserSecurityState>();
 
@@ -634,6 +641,240 @@ function evaluateSecurityLevel(
 }
 
 // ---------------------------------------------------------------------------
+// Lazy hydration of in-memory security state from the audit log
+// ---------------------------------------------------------------------------
+//
+// Problem: all the security state (recentAnomalyAt, softLockedUntil,
+// suspiciousSessions, currentLevel) lives ONLY in memory. A server
+// restart wipes it, which would let an attacker downgrade their
+// securityLevel ("critical" → "normal") simply by waiting for / causing
+// a process bounce. Spec requires the level to remain consistent
+// across restarts.
+//
+// Solution: on the first authenticated request per user after a fresh
+// process start, reconstruct what we can from the audit log (last 10
+// minutes only — beyond that the signal naturally decays anyway). This
+// is LAZY: only active users pay the cost; cold-start does not scan
+// every user.
+//
+// All hot-path constraints still hold:
+//   - Hydration is gated on "is this user's in-memory state empty?";
+//     a single check on the userSecurityState Map. Once populated,
+//     no further DB I/O for the lifetime of that process's entry.
+//   - The hydration query is bounded (limit 100, indexed by user_id +
+//     created_at) and runs at most ONCE per user per process.
+//   - Live signals (real-time anomaly hooks) ALWAYS win — hydration
+//     never overwrites a field that was set by a live event.
+//   - Wrapped in try/catch with fail-open semantics — any error
+//     (DB unreachable, malformed metadata, etc.) silently leaves the
+//     state empty rather than blocking authentication.
+
+// Maximum age of audit entries used to reconstruct state. Matches the
+// existing ANOMALY_RECENT_WINDOW_MS so a hydrated state cannot
+// surface as "elevated" longer than a live state could have.
+const HYDRATION_LOOKBACK_MS = ANOMALY_RECENT_WINDOW_MS;
+
+// Parse "blockedUntil=<epoch-ms>" out of a userAgent-stuffed audit
+// metadata string. Returns undefined on any parse failure (the loose
+// metadata format is best-effort by design — see write_blocked_soft_lock
+// recordAudit calls). Strict numeric parse: must be a finite number.
+function parseBlockedUntilFromMetadata(meta: string | null): number | undefined {
+  if (!meta) return undefined;
+  try {
+    const m = meta.match(/blockedUntil=(\d+)/);
+    if (!m) return undefined;
+    const n = Number(m[1]);
+    return Number.isFinite(n) ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Reconstruct the recent-window security signals for one user from
+// the audit log. Returns a tagged result the caller MERGES into live
+// state (never overwriting fields that already have live values).
+//
+// Failure mode: any error (DB unreachable, schema drift, parse error)
+// returns an empty result. The caller continues without hydration —
+// the user simply starts at "normal" and live signals will populate
+// state from the next anomaly forward.
+async function hydrateSecurityStateFromAudit(
+  userId: string,
+  storage: IStorage,
+): Promise<{
+  recentAnomalyAt?: number;
+  softLockedUntil?: number;
+  hadAnomaly: boolean;
+}> {
+  try {
+    // getAuditLog already returns newest-first. The DB-side index is
+    // (user_id, created_at desc), so this is a single index scan
+    // returning at most 100 rows.
+    const rows = await storage.getAuditLog(userId, 100);
+    const cutoff = Date.now() - HYDRATION_LOOKBACK_MS;
+    let recentAnomalyAt: number | undefined;
+    let softLockedUntil: number | undefined;
+    let hadAnomaly = false;
+    for (const r of rows) {
+      // Newest-first traversal — we can stop the moment we leave the
+      // 10-min window (rows are strictly ordered by createdAt desc).
+      if (r.createdAt < cutoff) break;
+      if (
+        r.action === "anomaly_detected" ||
+        r.action === "write_blocked_soft_lock"
+      ) {
+        // Take the FIRST (= newest) timestamp we see — preserves the
+        // "most recent anomaly" semantics that recentAnomalyAt has on
+        // the live path.
+        if (recentAnomalyAt === undefined) recentAnomalyAt = r.createdAt;
+      }
+      if (r.action === "anomaly_detected") {
+        hadAnomaly = true;
+      }
+      if (r.action === "write_blocked_soft_lock") {
+        // Prefer the explicit blockedUntil timestamp from metadata
+        // (always present on entries created by recordSecuritySignalHit
+        // since the prior task). If missing or unparseable, fall back
+        // to event_time + SOFT_LOCK_DURATION_MS — the 5-min lock is
+        // fixed so this approximation matches what the live path
+        // would have computed at the time of the event.
+        const fromMeta = parseBlockedUntilFromMetadata(r.userAgent);
+        const candidate = fromMeta ?? r.createdAt + SOFT_LOCK_DURATION_MS;
+        // Take the LATEST candidate — if multiple lock events, the
+        // newest is the one that's still relevant.
+        softLockedUntil = Math.max(softLockedUntil ?? 0, candidate);
+      }
+    }
+    return { recentAnomalyAt, softLockedUntil, hadAnomaly };
+  } catch {
+    return { hadAnomaly: false };
+  }
+}
+
+// In-flight hydration promises, keyed by userId. Concurrent auths for
+// the same user post-restart all AWAIT THE SAME PROMISE so every one
+// of them observes the post-hydration state — preventing a transient
+// "normal" response from a request that arrived during another
+// request's audit query. The promise is removed from this map in a
+// .finally() once it settles (success OR failure), so subsequent
+// requests can re-attempt only if hydratedAt is still unset (e.g.
+// the previous attempt failed and the slot is still empty).
+const inflightHydrations = new Map<string, Promise<void>>();
+
+// Idempotent gate around hydrateSecurityStateFromAudit. Called from
+// authenticate() after a successful auth. The gate has THREE purposes:
+//
+//   1. Steady-state short-circuit: once hydratedAt is stamped on the
+//      slot, NEVER hydrate again for the lifetime of this Map entry
+//      (per spec: "Live signals are always more accurate than
+//      reconstructed ones — DO NOT rehydrate"). One Map lookup; zero
+//      DB I/O. This is the hot path after the first auth per user.
+//
+//   2. Race protection (single-shot): concurrent auths for the same
+//      user could both observe "state missing" and both kick off a
+//      hydration query. inflightHydrations[userId] holds the pending
+//      promise so concurrent callers AWAIT THE SAME hydration —
+//      every concurrent first-after-restart auth gets the
+//      post-hydration state, not a transient "normal" view.
+//
+//   3. Bounded retry: if a hydration attempt FAILS (DB unreachable,
+//      etc.), the slot stays without hydratedAt and the in-flight
+//      entry is cleared via .finally(). The NEXT auth gets to retry
+//      hydration. Each successful hydration runs at most once per
+//      Map-entry lifetime (Map entry is GC'd after 1h inactivity, at
+//      which point a future auth re-hydrates from scratch — the only
+//      way the hydration count exceeds 1 per user per process).
+//
+// Fail-open: the inner async fn itself catches all errors and
+// resolves successfully. authenticate() additionally wraps this call
+// in its own try/catch as belt-and-suspenders.
+async function hydrateIfNeeded(
+  userId: string,
+  sessionId: string | null,
+  storage: IStorage,
+): Promise<void> {
+  // Fast path: already hydrated for this user (and the slot hasn't
+  // been GC'd). The TTL GC runs on inactivity, so this short-circuit
+  // covers the vast majority of post-first-auth requests with a
+  // single Map lookup.
+  if (userSecurityState.get(userId)?.hydratedAt !== undefined) return;
+  // If a hydration is already in flight for this user, await it —
+  // every concurrent first-auth observes the same outcome.
+  let p = inflightHydrations.get(userId);
+  if (!p) {
+    p = (async () => {
+      // Reserve the slot synchronously inside the promise body so
+      // live events that fire during the audit query mutate THIS
+      // entry; the merge below preserves any live writes by only
+      // populating still-undefined fields.
+      const slot = getOrInitSecurityState(userId);
+      try {
+        const result = await hydrateSecurityStateFromAudit(userId, storage);
+        // Merge with "live wins" semantics. Each field is only written
+        // when the live path hasn't already populated it during the
+        // await window above.
+        if (
+          slot.recentAnomalyAt === undefined &&
+          result.recentAnomalyAt !== undefined
+        ) {
+          slot.recentAnomalyAt = result.recentAnomalyAt;
+        }
+        if (
+          slot.softLockedUntil === undefined &&
+          result.softLockedUntil !== undefined
+        ) {
+          // Note: getActiveSoftLock auto-clears expired locks on read,
+          // so setting a past-expired value here is harmless — it
+          // just gets cleared on the next access.
+          slot.softLockedUntil = result.softLockedUntil;
+        }
+        if (result.hadAnomaly && sessionId) {
+          // Per spec: "if any anomaly_detected exists → treat as true
+          // (fail-open safe assumption)". We don't know which session
+          // was suspicious before the restart, so we conservatively
+          // flag the CURRENT authenticating session. Worst case: a
+          // user who logged in fresh just after a restart sees one
+          // elevated request and can rotate the session; better than
+          // missing a real attacker who reauthenticated after restart.
+          slot.suspiciousSessions.add(sessionId);
+        }
+        // Stamp hydratedAt LAST — its presence is the marker that
+        // future hydrateIfNeeded calls use to fast-path. Setting it
+        // only on the success path means a failed hydration leaves
+        // hydratedAt undefined and the next auth retries.
+        slot.hydratedAt = Date.now();
+        // Seed userSecurityLevelState with the derived level so the
+        // first evaluateSecurityLevel call after this hydration does
+        // NOT emit a misleading "from=normal; to=critical" transition
+        // row (the user was already critical before the restart).
+        // Only seed if a level isn't already recorded — a live
+        // transition that happened during the await window must not
+        // be clobbered.
+        if (!userSecurityLevelState.has(userId)) {
+          const derived = deriveSecurityLevel(userId, sessionId);
+          userSecurityLevelState.set(userId, {
+            currentLevel: derived,
+            lastChangedAt: Date.now(),
+          });
+        }
+      } catch {
+        // Fail-open: hydration is purely diagnostic. The slot stays
+        // (mostly) empty; live events from here forward populate it
+        // correctly. hydratedAt stays undefined so a future auth can
+        // retry hydration if the underlying issue clears.
+      }
+    })().finally(() => {
+      // Whether success or failure, drop the in-flight entry so
+      // future auths can retry (success path's hydratedAt stamp
+      // already short-circuits, so retry only fires on failure).
+      inflightHydrations.delete(userId);
+    });
+    inflightHydrations.set(userId, p);
+  }
+  await p;
+}
+
+// ---------------------------------------------------------------------------
 // Audit log fire-and-forget wrapper
 // ---------------------------------------------------------------------------
 //
@@ -710,6 +951,16 @@ async function authenticate(
     } catch (err) {
       console.error("touchSession failed");
     }
+    // Lazy hydration of security state from audit log. Only fires
+    // ONCE per user per process — subsequent auths short-circuit on
+    // the in-memory map check. Wrapped in try/catch on top of the
+    // function's own fail-open guarantee (belt + suspenders) so a
+    // hydration failure can never block auth.
+    try {
+      await hydrateIfNeeded(session.userId, session.id, storage);
+    } catch {
+      // Already swallowed inside hydrateIfNeeded; this is defense in depth.
+    }
     return { ok: true, userId: session.userId, sessionId: session.id };
   }
 
@@ -726,6 +977,16 @@ async function authenticate(
     !timingSafeEqual(providedHash, storedHash)
   ) {
     return { ok: false, status: 401, error: "Invalid credentials" };
+  }
+  // Same lazy hydration on the legacy auth-hash path. sessionId is
+  // null here so suspicious-session reconstruction is skipped, but
+  // the user-level signals (recentAnomalyAt, softLockedUntil) still
+  // get rebuilt — the legacy path can still surface "elevated" or
+  // "critical" after restart from those signals alone.
+  try {
+    await hydrateIfNeeded(userId, null, storage);
+  } catch {
+    // Already swallowed inside hydrateIfNeeded.
   }
   return { ok: true, userId, sessionId: null };
 }

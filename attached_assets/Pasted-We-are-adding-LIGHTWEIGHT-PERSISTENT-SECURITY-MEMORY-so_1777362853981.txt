@@ -1,0 +1,130 @@
+We are adding LIGHTWEIGHT PERSISTENT SECURITY MEMORY so that securityLevel remains consistent across server restarts.
+
+IMPORTANT CONSTRAINTS:
+- DO NOT modify crypto/
+- DO NOT change any existing primary key column types
+- DO NOT introduce heavy DB coupling into hot paths
+- MUST remain fail-open (if anything fails → default to "normal")
+- MUST NOT block requests or add latency to critical endpoints
+
+GOAL:
+Hydrate in-memory security signals from recent audit history so that securityLevel does not reset incorrectly after restart.
+
+--------------------------------------------------
+
+1. ADD HYDRATION FUNCTION
+
+Create:
+
+async function hydrateSecurityStateFromAudit(userId: string)
+
+Purpose:
+Reconstruct recent security signals from audit log (last 10 minutes only)
+
+Steps:
+
+- Query vault_audit_log for this user:
+  WHERE created_at > now - 10 minutes
+  ORDER BY created_at DESC
+  LIMIT 100
+
+- Derive:
+
+recentAnomalyAt:
+  if any of:
+    action IN ("anomaly_detected", "write_blocked_soft_lock")
+
+suspiciousSessions:
+  if any anomaly_detected exists → treat as true (fail-open safe assumption)
+
+softLockedUntil:
+  if any write_blocked_soft_lock exists:
+    extract blockedUntil from metadata (if present)
+    OR fallback to (event_time + 5 minutes)
+
+--------------------------------------------------
+
+2. LAZY HYDRATION (NO GLOBAL SCAN)
+
+DO NOT hydrate all users at startup.
+
+Instead:
+
+In authenticate() helper:
+
+After successful auth:
+
+IF userSecurityState does NOT exist for this user:
+  → call hydrateSecurityStateFromAudit(userId)
+  → populate:
+      userSecurityState
+      userSecurityLevelState
+
+This ensures:
+- only active users incur cost
+- no cold-start spike
+
+--------------------------------------------------
+
+3. SAFE PARSING
+
+Audit metadata is stored loosely (user_agent field).
+
+When parsing:
+- wrap everything in try/catch
+- if parsing fails → ignore and continue
+
+Fail-open rule:
+- never throw
+- never block auth
+
+--------------------------------------------------
+
+4. DO NOT OVERRIDE LIVE STATE
+
+If userSecurityState already exists in memory:
+→ DO NOT rehydrate
+
+Live signals are always more accurate than reconstructed ones.
+
+--------------------------------------------------
+
+5. OPTIONAL: CACHE HYDRATION TIMESTAMP
+
+Add:
+
+hydratedAt: number
+
+Skip hydration if already hydrated in last 5 minutes.
+
+--------------------------------------------------
+
+6. VERIFY
+
+Test:
+
+1) Trigger anomaly → confirm:
+   - securityLevel = elevated/high/critical
+
+2) Restart server
+
+3) Immediately call:
+   GET /api/vault/fetch
+
+→ EXPECT:
+   securityLevel is STILL elevated/high/critical (not reset to normal)
+
+4) Wait >10 minutes → level naturally decays to "normal"
+
+--------------------------------------------------
+
+7. NO NEW API FIELDS
+
+This is internal only.
+Do NOT change response shapes.
+
+--------------------------------------------------
+
+DELIVER:
+- Implementation
+- Summary of hydration logic
