@@ -469,6 +469,54 @@ export type PasskeyRegisterFinishInput = z.infer<
   typeof passkeyRegisterFinishSchema
 >;
 
+// Passkey login start: client tells us which user is trying to sign
+// in so we can scope the challenge and look up their allowed
+// credential ids for the authenticator allowlist. Username bounds
+// match registerSchema/loginSchema (3-64 chars). Strict-checked so
+// any unexpected field is a 400.
+export const passkeyLoginStartSchema = z
+  .object({
+    username: z.string().min(3).max(64),
+  })
+  .strict();
+
+// Mirror of the registration response schema: strict outer envelope,
+// passthrough inner response. The required strings (clientDataJSON,
+// authenticatorData, signature) are bounded non-empty so an obviously
+// junk body never reaches the verifier; userHandle is optional and
+// allowed-empty (the spec lets the authenticator omit it on the
+// non-discoverable path).
+const webauthnAuthenticationInnerResponseSchema = z
+  .object({
+    clientDataJSON: z.string().min(1).max(50_000),
+    authenticatorData: z.string().min(1).max(50_000),
+    signature: z.string().min(1).max(2000),
+    userHandle: z.string().max(2000).optional(),
+  })
+  .passthrough();
+
+const webauthnAuthenticationResponseSchema = z
+  .object({
+    id: z.string().min(1).max(2000),
+    rawId: z.string().min(1).max(2000),
+    type: z.literal("public-key"),
+    response: webauthnAuthenticationInnerResponseSchema,
+    authenticatorAttachment: z
+      .enum(["platform", "cross-platform"])
+      .optional(),
+    clientExtensionResults: z.record(z.unknown()).optional(),
+  })
+  .strict();
+
+export const passkeyLoginFinishSchema = z
+  .object({
+    response: webauthnAuthenticationResponseSchema,
+  })
+  .strict();
+
+export type PasskeyLoginStartInput = z.infer<typeof passkeyLoginStartSchema>;
+export type PasskeyLoginFinishInput = z.infer<typeof passkeyLoginFinishSchema>;
+
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type VaultSyncInput = z.infer<typeof vaultSyncSchema>;

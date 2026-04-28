@@ -20,6 +20,8 @@ import {
   validateTotpLogin,
   validatePasskeyRegisterStart,
   validatePasskeyRegisterFinish,
+  validatePasskeyLoginStart,
+  validatePasskeyLoginFinish,
 } from "./validation";
 import {
   generateTotpSecret,
@@ -31,6 +33,8 @@ import {
 import {
   generateRegistrationOptionsFor,
   verifyRegistrationResponseFor,
+  generateAuthenticationOptionsFor,
+  verifyAuthenticationResponseFor,
 } from "./webauthn";
 
 // Per-route JSON parsers with explicit, route-appropriate size limits.
@@ -3407,6 +3411,386 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         });
       } catch (err) {
         console.error("Passkey register/finish error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // POST /api/passkeys/login/start — UNAUTHENTICATED. The whole point
+  // of passkey login is that the client doesn't have a session yet;
+  // they're trying to mint one via the assertion. Body carries just
+  // the username (so we can scope the challenge + load the user's
+  // allowed credential ids for the authenticator allowlist).
+  //
+  // Failure shape is generic by design (everything that goes wrong
+  // here — unknown user, no passkeys registered, internal options
+  // generation error — collapses into the same 401 the password
+  // login flow uses) so an attacker probing usernames cannot tell
+  // "this user doesn't exist" from "this user exists but has no
+  // passkey configured". The username enumeration surface is no
+  // worse than the existing /api/auth/login (which already returns
+  // 401 on unknown user); keeping the shape identical means a
+  // probe of one is indistinguishable from a probe of the other.
+  app.post(
+    "/api/passkeys/login/start",
+    jsonBody(AUTH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+
+        const clientIp = getClientIp(req);
+        // Reuse the existing per-IP `login:` bucket — passkey login
+        // and password login are two paths to the same outcome
+        // (a fresh session for the same user), so a single bucket
+        // prevents an attacker from doubling their guess budget by
+        // alternating between the two endpoints.
+        if (isRateLimited(`login:${clientIp}`)) {
+          return res
+            .status(429)
+            .json({ error: "Too many attempts. Please try again later." });
+        }
+
+        const parsed = validatePasskeyLoginStart(req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        const { username } = parsed.data;
+
+        const user = await storage.getUserByUsername(username);
+        if (!user) {
+          // No audit event here: we have no userId to attach it to
+          // and an audit row keyed off "the username an attacker
+          // guessed" would itself become a username-enumeration
+          // oracle (visible to anyone with admin DB access).
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+
+        const credentials = await storage.listCredentialsForUser(user.id);
+        if (credentials.length === 0) {
+          // User exists but has no usable passkeys. We DO audit this
+          // (under the real userId) so the legitimate user sees the
+          // probe in their activity log, but the client response is
+          // the same generic 401 — never leak "this account has no
+          // passkey configured".
+          recordAudit(storage, {
+            userId: user.id,
+            action: "passkey_login_failure",
+            ipAddress: clientIp,
+            userAgent: captureUserAgent(req),
+          });
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+
+        const result = await generateAuthenticationOptionsFor({
+          userId: user.id,
+          request: req,
+          allowCredentialIds: credentials.map((c) => ({
+            id: c.credentialId,
+            transports: c.transports,
+          })),
+        });
+        if (!result.ok) {
+          // Internal failure inside the helper. Surface as 500 (this
+          // is a real server problem, not a credential failure) but
+          // don't echo the underlying reason to the client.
+          console.error(
+            `passkey login/start failed: code=${result.code}`,
+          );
+          return res
+            .status(500)
+            .json({ error: "Internal server error" });
+        }
+
+        return res.status(200).json(result.options);
+      } catch (err) {
+        console.error("Passkey login/start error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // POST /api/passkeys/login/finish — UNAUTHENTICATED. The assertion
+  // IS the auth: the client posts what `navigator.credentials.get()`
+  // returned and we verify the signature against the stored public
+  // key + active challenge. On success we mint a regular session row
+  // (same shape as /api/auth/login) and return the session token.
+  //
+  // Failure handling is deliberately uniform: every failure path
+  // — unknown credential, expired/missing challenge, signature
+  // verification failed, counter replay, internal verifier error —
+  // returns the same 401 with a single generic error string. The
+  // detail goes to the audit log (under the credential's owner)
+  // and the server console, never to the client.
+  //
+  // Counter-replay is special-cased BEFORE the generic failure
+  // bucket: a counter that didn't advance is the WebAuthn anti-
+  // replay signal, and the credential is immediately revoked +
+  // an anomaly is audited. The client still gets the same 401.
+  //
+  // Note on TOTP: a successful passkey assertion is itself a
+  // multi-factor proof (the credential is something-you-have, the
+  // authenticator's UV is something-you-are/know), so this path
+  // does NOT gate on user.totpEnabled the way /api/auth/login
+  // does. The session it creates is fully authenticated.
+  app.post(
+    "/api/passkeys/login/finish",
+    jsonBody(PASSKEY_FINISH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+
+        const clientIp = getClientIp(req);
+        if (isRateLimited(`login:${clientIp}`)) {
+          return res
+            .status(429)
+            .json({ error: "Too many attempts. Please try again later." });
+        }
+
+        const parsed = validatePasskeyLoginFinish(req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        // The browser hands us back the credential id it used. Look
+        // it up — getCredentialById already filters out revoked
+        // rows, so a previously-revoked credential reads as
+        // "unknown" with no special-case branch needed.
+        const stored = await storage.getCredentialById(
+          parsed.data.response.id,
+        );
+        if (!stored) {
+          // No audit row: we have no userId to attach it to (the
+          // credential is unknown). Generic 401.
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+
+        const userAgent = captureUserAgent(req);
+
+        const verified = await verifyAuthenticationResponseFor({
+          userId: stored.userId,
+          // Same passthrough/strict mismatch as the registration
+          // verify call: the validator's inner response uses
+          // .passthrough() so authenticator extras survive, but
+          // SimpleWebAuthn's AuthenticationResponseJSON type
+          // narrows to known fields. The runtime contract is
+          // unchanged — the verifier rejects anything it doesn't
+          // understand.
+          response: parsed.data.response as Parameters<
+            typeof verifyAuthenticationResponseFor
+          >[0]["response"],
+          request: req,
+          storedCredential: {
+            credentialId: stored.credentialId,
+            publicKey: stored.publicKey,
+            counter: stored.counter,
+            transports: stored.transports,
+          },
+        });
+
+        if (!verified.ok) {
+          // Counter replay: the WebAuthn library raised the
+          // signCount-didn't-advance signal. This is a strong
+          // indicator the credential has been cloned (or replayed
+          // from a captured assertion). Revoke it immediately so
+          // it cannot authenticate again, and audit a distinct
+          // anomaly event so the user can see what happened.
+          // The credential's owner sees both the anomaly and the
+          // generic failure rows in their activity log.
+          if (verified.code === "counter_replay") {
+            try {
+              await storage.revokeCredential(stored.credentialId);
+            } catch (revokeErr) {
+              // Revoke is best-effort here — even if it fails the
+              // client still sees a 401 and we still emit the audit
+              // row. A second clone-replay attempt would simply hit
+              // the same revoke path.
+              console.error(
+                "Failed to revoke credential after counter replay",
+              );
+            }
+            recordAudit(storage, {
+              userId: stored.userId,
+              action: "passkey_counter_anomaly",
+              ipAddress: clientIp,
+              userAgent,
+            });
+            recordAudit(storage, {
+              userId: stored.userId,
+              action: "passkey_login_failure",
+              ipAddress: clientIp,
+              userAgent,
+            });
+            return res
+              .status(401)
+              .json({ error: "Invalid credentials" });
+          }
+
+          // All other verifier failures (no_challenge,
+          // challenge_expired, verification_failed, internal_error)
+          // collapse into the same 401. We DO emit the failure
+          // audit so the legitimate owner sees probe attempts.
+          recordAudit(storage, {
+            userId: stored.userId,
+            action: "passkey_login_failure",
+            ipAddress: clientIp,
+            userAgent,
+          });
+          if (verified.code === "internal_error") {
+            console.error(
+              `passkey login/finish internal error: ${verified.reason ?? "unknown"}`,
+            );
+          }
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+
+        // Verified. Persist the new signCount BEFORE issuing the
+        // session OR the temp token — if the counter update fails
+        // we MUST NOT advance the flow, because the next assertion
+        // attempt would let the same counter value through again
+        // (replay vector). If the update throws we surface a 500
+        // (real server failure) rather than the generic 401: the
+        // credential is valid, the storage layer just couldn't
+        // write.
+        try {
+          await storage.updateCredentialCounter(
+            stored.credentialId,
+            verified.newCounter,
+          );
+        } catch (counterErr) {
+          console.error(
+            "Failed to persist new signCount after passkey verify",
+          );
+          return res
+            .status(500)
+            .json({ error: "Internal server error" });
+        }
+
+        // TOTP gate. The verifier currently runs with
+        // requireUserVerification: false, which means an assertion
+        // may have been satisfied by user-presence alone (e.g. a
+        // YubiKey touch with no PIN configured) rather than a true
+        // user-verification (biometric/PIN). In that case the
+        // assertion is single-factor — possession only. If the
+        // user has explicitly enabled TOTP, we MUST NOT downgrade
+        // their security posture by issuing a session on a
+        // single-factor proof: surface the same tempToken /
+        // requiresTOTP flow the password login uses. The client
+        // then completes the second factor via
+        // /api/auth/totp/login. We DO emit the success audit so
+        // the activity log records "the passkey check passed";
+        // the totp_required event is added for parity with the
+        // password path so a reader of the audit log can see
+        // which gate the user is sitting at.
+        const owner = await storage.getUser(stored.userId);
+        if (owner?.totpEnabled === true) {
+          const rawTempToken = randomBytes(32).toString("hex");
+          const tempTokenHash = createHash("sha256")
+            .update(rawTempToken)
+            .digest("hex");
+          tempLoginTokens.set(tempTokenHash, {
+            tokenHash: tempTokenHash,
+            userId: stored.userId,
+            expiresAt: Date.now() + TEMP_LOGIN_TTL_MS,
+          });
+          recordAudit(storage, {
+            userId: stored.userId,
+            action: "passkey_login_success",
+            ipAddress: clientIp,
+            userAgent,
+          });
+          recordAudit(storage, {
+            userId: stored.userId,
+            action: "totp_required",
+            ipAddress: clientIp,
+            userAgent,
+          });
+          // The ABSENCE of sessionToken is the signal that more
+          // factors are needed. requiresTOTP + tempToken matches
+          // /api/auth/login's 2FA-required response shape exactly.
+          return res.status(200).json({
+            requiresTOTP: true,
+            tempToken: rawTempToken,
+            tempTokenExpiresAt: Date.now() + TEMP_LOGIN_TTL_MS,
+          });
+        }
+
+        // No TOTP gate. Mint a session: same shape as /api/auth/login. Token is
+        // 32 random bytes hex; we persist only the SHA-256 hash so
+        // a DB leak cannot impersonate the user. Device-trust
+        // decision happens here, BEFORE createSession, so the row
+        // is correctly stamped trusted=true|false at insert time.
+        const rawToken = randomBytes(32).toString("hex");
+        const tokenHash = createHash("sha256")
+          .update(rawToken)
+          .digest("hex");
+        const deviceFingerprint = getDeviceFingerprint(req);
+        const isKnownDevice = await storage.hasDeviceFingerprintForUser(
+          stored.userId,
+          deviceFingerprint,
+        );
+        const session = await storage.createSession({
+          userId: stored.userId,
+          tokenHash,
+          expiresAt: Date.now() + SESSION_LIFETIME_MS,
+          userAgent,
+          ipAddress: clientIp,
+          deviceFingerprint,
+          trusted: isKnownDevice,
+        });
+
+        // Audit AFTER the session is persisted: passkey_login_success
+        // is the credential-exchange event, session_created is the
+        // session-row event (matching the password login pattern).
+        // Both fire-and-forget.
+        recordAudit(storage, {
+          userId: stored.userId,
+          action: "passkey_login_success",
+          ipAddress: clientIp,
+          userAgent,
+        });
+        recordAudit(storage, {
+          userId: stored.userId,
+          action: "session_created",
+          ipAddress: clientIp,
+          userAgent,
+        });
+        if (!isKnownDevice) {
+          // Mirror the new-device handling from /api/auth/login:
+          // log the event, raise the in-memory threat signal, and
+          // mark the session untrusted so sync/restore are gated
+          // until the user explicitly approves the device. Same
+          // rationale as the password login path — a brand-new
+          // device is not a hard fail, but writes are gated.
+          recordAudit(storage, {
+            userId: stored.userId,
+            action: "new_device_detected",
+            ipAddress: clientIp,
+            userAgent: `fingerprint=${deviceFingerprint.slice(0, 16)}`,
+          });
+          recordSecuritySignalHit(stored.userId, session.id, false);
+          recordUntrustedSession(stored.userId, session.id);
+        }
+
+        // 200 (not 201): we are issuing a session, not creating a
+        // new persistent resource the client can address by id —
+        // matches /api/auth/login's status code exactly. Response
+        // shape is the minimal set the spec requires
+        // (sessionToken + expiresAt). NOT echoed: the credential
+        // public key (never), the credential's internal id, or the
+        // updated counter — all are server-side state.
+        return res.status(200).json({
+          sessionToken: rawToken,
+          expiresAt: session.expiresAt,
+        });
+      } catch (err) {
+        console.error("Passkey login/finish error");
         return res.status(500).json({ error: "Internal server error" });
       }
     },

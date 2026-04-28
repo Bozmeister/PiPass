@@ -13,6 +13,8 @@ import {
   totpLoginSchema,
   passkeyRegisterStartSchema,
   passkeyRegisterFinishSchema,
+  passkeyLoginStartSchema,
+  passkeyLoginFinishSchema,
   type RegisterInput,
   type LoginInput,
   type VaultSyncInput,
@@ -20,6 +22,8 @@ import {
   type TotpLoginInput,
   type PasskeyRegisterStartInput,
   type PasskeyRegisterFinishInput,
+  type PasskeyLoginStartInput,
+  type PasskeyLoginFinishInput,
 } from "../shared/schema";
 import type { z } from "zod";
 
@@ -31,6 +35,8 @@ export type {
   TotpLoginInput,
   PasskeyRegisterStartInput,
   PasskeyRegisterFinishInput,
+  PasskeyLoginStartInput,
+  PasskeyLoginFinishInput,
 };
 export type VaultRestoreInput = z.infer<typeof vaultRestoreSchema>;
 
@@ -119,6 +125,23 @@ export function validatePasskeyRegisterFinish(
   body: unknown,
 ): Result<PasskeyRegisterFinishInput> {
   return parse(body, passkeyRegisterFinishSchema);
+}
+
+// Passkey-login body validators. /start carries the username so we
+// can scope the challenge + load the user's allowCredentials list;
+// /finish carries the WebAuthn assertion produced by the
+// authenticator. Same parse helper as the registration validators
+// above for uniform error shapes.
+export function validatePasskeyLoginStart(
+  body: unknown,
+): Result<PasskeyLoginStartInput> {
+  return parse(body, passkeyLoginStartSchema);
+}
+
+export function validatePasskeyLoginFinish(
+  body: unknown,
+): Result<PasskeyLoginFinishInput> {
+  return parse(body, passkeyLoginFinishSchema);
 }
 
 export function validateUsernameParam(value: unknown): Result<string> {
