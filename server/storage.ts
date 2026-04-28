@@ -6,9 +6,11 @@ import {
   vaultBlobHistory,
   sessions,
   vaultAuditLog,
+  webauthnCredentials,
   type User,
   type VaultBlob,
   type Session,
+  type WebauthnCredential,
 } from "../shared/schema";
 
 // Maximum historical encrypted blobs retained per user. Bounded to keep
@@ -109,6 +111,37 @@ export type AuditLogItem = {
 // spec). 100 is enough for a "recent activity" UI without paying the
 // cost of the full table on every query.
 export const AUDIT_LOG_LIMIT = 100;
+
+// Public-safe projection of a WebAuthn credential for management
+// screens ("here are the passkeys you've registered"). DELIBERATELY
+// omits public_key (the COSE-encoded key material is only ever needed
+// server-side during assertion verification, never on the wire to the
+// user) and counter (an internal anti-replay scalar, not user-facing).
+// Mirrors the same "minimum fields needed for the UI" discipline as
+// SessionListItem and AuditLogItem.
+export type CredentialListItem = {
+  id: string;
+  credentialId: string;
+  deviceName: string | null;
+  transports: string | null;
+  createdAt: number;
+  lastUsedAt: number | null;
+};
+
+// Input for createWebAuthnCredential. Required fields mirror what the
+// @simplewebauthn-style verifyRegistrationResponse output gives us:
+// the credentialId + COSE publicKey + initial signCount. deviceName /
+// transports are caller-provided convenience fields (transports is
+// reported by the authenticator; deviceName is typically a
+// user-supplied label or a default like "iPhone passkey").
+export type CreateWebAuthnCredentialInput = {
+  userId: string;
+  credentialId: string;
+  publicKey: string;
+  counter: number;
+  deviceName: string | null;
+  transports: string | null;
+};
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -221,6 +254,73 @@ export interface IStorage {
   // internal `id` column is NEVER included in the result — see
   // AuditLogItem doc for why.
   getAuditLog(userId: string, limit?: number): Promise<AuditLogItem[]>;
+
+  // ----- WebAuthn / passkeys -----
+  //
+  // Insert a freshly-verified credential. Caller (the registration
+  // verify route) is responsible for having validated the attestation
+  // against the active challenge before calling this — storage just
+  // persists. Returns the inserted row (including the generated id);
+  // the caller decides what to surface to the client.
+  // Throws on DB error: registration is on the critical path of "did
+  // we actually save this passkey?" and silently succeeding would
+  // leave the user with a passkey that never actually authenticates.
+  createWebAuthnCredential(
+    input: CreateWebAuthnCredentialInput,
+  ): Promise<WebauthnCredential>;
+
+  // Lookup by the WebAuthn credential id (NOT the internal uuid PK).
+  // Drives assertion verification — given the credentialId the
+  // browser sends in `navigator.credentials.get`, fetch the stored
+  // public_key + counter so we can verify the signature.
+  // EXCLUDES revoked rows: a revoked credential MUST NOT authenticate
+  // even if the client somehow still has it cached locally. Returns
+  // undefined if no row matches OR if the row exists but is revoked
+  // (the route layer treats both as "unknown credential" with the
+  // same error to avoid leaking which case applies).
+  getCredentialById(
+    credentialId: string,
+  ): Promise<WebauthnCredential | undefined>;
+
+  // List a user's NON-REVOKED credentials for the management screen.
+  // Returns the public-safe projection — public_key and counter are
+  // intentionally NOT included (see CredentialListItem doc). Ordered
+  // by created_at DESC so the most-recently-registered passkey is
+  // first, matching the convention of listActiveSessionsForUser.
+  listCredentialsForUser(userId: string): Promise<CredentialListItem[]>;
+
+  // Persist the new signCount returned by verifyAuthenticationResponse.
+  // The WebAuthn spec requires the server to refuse any future
+  // assertion whose counter is <= the stored counter (anti-replay) so
+  // this write is on the critical path: we MUST throw on DB error so
+  // the route can fail the assertion rather than blindly returning a
+  // session that the next assertion can replay. Also bumps last_used_at
+  // in the same UPDATE — assertion success is the natural "used" event,
+  // so combining the writes saves a round trip and keeps the two
+  // values in sync.
+  // Refuses to update revoked rows (defense in depth — the route
+  // already filters via getCredentialById, but a revoked row should
+  // never get its counter advanced).
+  updateCredentialCounter(
+    credentialId: string,
+    counter: number,
+  ): Promise<void>;
+
+  // Standalone "I was just used" stamp for codepaths that don't bump
+  // the counter (e.g. user-initiated re-verification flows that don't
+  // produce a new signCount, or future passkey-list pings). Fail-open
+  // per the same contract as markSessionTrusted: MUST NOT throw —
+  // last_used_at is metadata, never load-bearing for auth correctness.
+  // Refuses to update revoked rows.
+  updateCredentialLastUsed(credentialId: string): Promise<void>;
+
+  // Soft-delete: set revoked = true. Returns true if a non-revoked
+  // row was actually flipped, false if no matching row was found OR
+  // the row was already revoked. Idempotent at the DB level: a second
+  // call simply returns false. Throws on DB error — revoke is a
+  // user-facing security action ("remove this passkey") that MUST
+  // surface failure rather than silently leaving the credential live.
+  revokeCredential(credentialId: string): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -808,5 +908,151 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(vaultAuditLog.createdAt))
       .limit(limit);
     return rows;
+  }
+
+  // ----- WebAuthn / passkeys -----
+  //
+  // Persist a freshly-verified credential. We deliberately do NOT log
+  // the publicKey (or any prefix of it) anywhere — it's the public
+  // half of an asymmetric key, but echoing it through stdout would
+  // both bloat operator logs and create a precedent we don't want.
+  // The credentialId is fine to log if needed for triage; it's already
+  // sent over the wire on every assertion.
+  async createWebAuthnCredential(
+    input: CreateWebAuthnCredentialInput,
+  ): Promise<WebauthnCredential> {
+    const [row] = await db
+      .insert(webauthnCredentials)
+      .values({
+        userId: input.userId,
+        credentialId: input.credentialId,
+        publicKey: input.publicKey,
+        counter: input.counter,
+        deviceName: input.deviceName,
+        transports: input.transports,
+      })
+      .returning();
+    return row;
+  }
+
+  // Auth-path lookup. Filters revoked = false at the SQL layer so a
+  // revoked credential is indistinguishable from a missing one as far
+  // as callers are concerned. Index hit is on
+  // webauthn_credentials_credential_id_idx (or the unique index for
+  // the same column) — single-row fetch.
+  async getCredentialById(
+    credentialId: string,
+  ): Promise<WebauthnCredential | undefined> {
+    const [row] = await db
+      .select()
+      .from(webauthnCredentials)
+      .where(
+        and(
+          eq(webauthnCredentials.credentialId, credentialId),
+          eq(webauthnCredentials.revoked, false),
+        ),
+      )
+      .limit(1);
+    return row;
+  }
+
+  // Management screen reader. Public-safe projection only — public_key
+  // and counter are EXCLUDED from the SELECT so a future change that
+  // accidentally returns these rows over the API still cannot leak
+  // them (defense in depth: the type narrows the shape, the SELECT
+  // narrows the bytes that ever leave the DB). Revoked rows are
+  // filtered out — a revoked passkey shouldn't appear in the user's
+  // "active credentials" list.
+  // Index hit: webauthn_credentials_user_idx on (user_id). Sorting
+  // by created_at is an in-memory sort over a per-user result set,
+  // bounded in practice (a user has on the order of a handful of
+  // passkeys, not thousands).
+  async listCredentialsForUser(
+    userId: string,
+  ): Promise<CredentialListItem[]> {
+    const rows = await db
+      .select({
+        id: webauthnCredentials.id,
+        credentialId: webauthnCredentials.credentialId,
+        deviceName: webauthnCredentials.deviceName,
+        transports: webauthnCredentials.transports,
+        createdAt: webauthnCredentials.createdAt,
+        lastUsedAt: webauthnCredentials.lastUsedAt,
+      })
+      .from(webauthnCredentials)
+      .where(
+        and(
+          eq(webauthnCredentials.userId, userId),
+          eq(webauthnCredentials.revoked, false),
+        ),
+      )
+      .orderBy(desc(webauthnCredentials.createdAt));
+    return rows;
+  }
+
+  // Critical-path: signCount persistence drives WebAuthn anti-replay.
+  // We update counter AND last_used_at in the same UPDATE so a
+  // successful assertion advances both atomically. The WHERE clause
+  // also requires revoked = false: even if some buggy caller reaches
+  // this method without going through getCredentialById first, a
+  // revoked row will not have its counter advanced (defense in
+  // depth). NOT wrapped in try/catch — see IStorage doc for why this
+  // method must surface errors rather than fail-open.
+  async updateCredentialCounter(
+    credentialId: string,
+    counter: number,
+  ): Promise<void> {
+    await db
+      .update(webauthnCredentials)
+      .set({ counter, lastUsedAt: Date.now() })
+      .where(
+        and(
+          eq(webauthnCredentials.credentialId, credentialId),
+          eq(webauthnCredentials.revoked, false),
+        ),
+      );
+  }
+
+  // Fail-open metadata writer. Mirrors markSessionTrusted's redaction
+  // discipline: log only the exception type, never the error message
+  // (driver errors can include connection strings or query bodies).
+  // Includes the same revoked = false guard as updateCredentialCounter.
+  async updateCredentialLastUsed(credentialId: string): Promise<void> {
+    try {
+      await db
+        .update(webauthnCredentials)
+        .set({ lastUsedAt: Date.now() })
+        .where(
+          and(
+            eq(webauthnCredentials.credentialId, credentialId),
+            eq(webauthnCredentials.revoked, false),
+          ),
+        );
+    } catch (err) {
+      const errType =
+        err instanceof Error ? err.constructor.name : typeof err;
+      console.error(
+        `updateCredentialLastUsed swallowed error: ${errType}`,
+      );
+    }
+  }
+
+  // Soft-delete via UPDATE ... WHERE revoked = false. Returning the
+  // (id) of any row that was actually flipped lets us distinguish
+  // "credential just revoked" from "credential was already revoked
+  // or never existed" without a separate SELECT round-trip. Throws
+  // on DB error per IStorage doc.
+  async revokeCredential(credentialId: string): Promise<boolean> {
+    const flipped = await db
+      .update(webauthnCredentials)
+      .set({ revoked: true })
+      .where(
+        and(
+          eq(webauthnCredentials.credentialId, credentialId),
+          eq(webauthnCredentials.revoked, false),
+        ),
+      )
+      .returning({ id: webauthnCredentials.id });
+    return flipped.length > 0;
   }
 }
