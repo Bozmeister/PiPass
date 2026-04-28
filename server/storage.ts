@@ -68,6 +68,13 @@ export type SessionListItem = {
   userAgent: string | null;
   ipAddress: string | null;
   suspicious: boolean;
+  // TRUE if this device has been approved for sensitive actions (sync /
+  // restore). Drives the per-row "Trusted device" / "New device — needs
+  // approval" badge in the user-facing sessions UI. Coerced from the
+  // nullable DB column so old pre-feature rows surface as false (the
+  // safe default — old sessions are treated as untrusted on the read
+  // path until the user explicitly trusts them).
+  trusted: boolean;
 };
 
 // Input shape for the audit-log writer. `action` is intentionally a
@@ -130,12 +137,42 @@ export interface IStorage {
     expiresAt: number;
     userAgent: string | null;
     ipAddress: string | null;
+    // Per-device hash computed by getDeviceFingerprint() in routes.ts.
+    // Nullable so background tasks / future callers without a Request
+    // object can still create sessions; the login route always passes
+    // a non-null value.
+    deviceFingerprint: string | null;
+    // TRUE if the route layer determined this device has been seen
+    // before for this user. The route is responsible for the lookup;
+    // this method just persists the decision.
+    trusted: boolean;
   }): Promise<Session>;
   getActiveSessionByTokenHash(tokenHash: string): Promise<Session | undefined>;
   touchSession(id: string, lastSeenAt: number): Promise<void>;
   deleteSessionById(id: string): Promise<boolean>;
   deleteAllSessionsForUser(userId: string): Promise<number>;
   listActiveSessionsForUser(userId: string): Promise<SessionListItem[]>;
+
+  // Returns true if this user has at least one EXISTING session row with
+  // the given device fingerprint. Drives the "is this a new device?"
+  // decision on login. We deliberately do NOT filter by expires_at: a
+  // user logging back in after a session expires from a device we've
+  // seen before should still be treated as a known device. (Logout-all
+  // / explicit row deletion is the user's "forget my devices" reset.)
+  // Fail-open: a NULL fingerprint never matches (callers should treat
+  // a null fingerprint as "unknown device" without even calling this).
+  hasDeviceFingerprintForUser(
+    userId: string,
+    fingerprint: string,
+  ): Promise<boolean>;
+
+  // Set sessions.trusted = true for the current session. Same fail-open
+  // contract as markSessionSuspicious: MUST NOT throw — implementations
+  // swallow errors internally. Called from POST /api/auth/trust-device
+  // after the route has already issued its 200, so a DB hiccup here
+  // cannot break the user-facing flow. Idempotent: marking an already-
+  // trusted session is a no-op single-column UPDATE.
+  markSessionTrusted(sessionId: string): Promise<void>;
 
   // Set sessions.suspicious = true. Same fail-open contract as
   // logAuditEvent: this method MUST NOT throw — implementations
@@ -474,6 +511,8 @@ export class DatabaseStorage implements IStorage {
     expiresAt: number;
     userAgent: string | null;
     ipAddress: string | null;
+    deviceFingerprint: string | null;
+    trusted: boolean;
   }): Promise<Session> {
     const rows = await db
       .insert(sessions)
@@ -483,6 +522,8 @@ export class DatabaseStorage implements IStorage {
         expiresAt: input.expiresAt,
         userAgent: input.userAgent,
         ipAddress: input.ipAddress,
+        deviceFingerprint: input.deviceFingerprint,
+        trusted: input.trusted,
       })
       .returning();
     return rows[0];
@@ -559,14 +600,63 @@ export class DatabaseStorage implements IStorage {
         userAgent: sessions.userAgent,
         ipAddress: sessions.ipAddress,
         suspicious: sessions.suspicious,
+        trusted: sessions.trusted,
       })
       .from(sessions)
       .where(and(eq(sessions.userId, userId), gt(sessions.expiresAt, now)))
       .orderBy(desc(sessions.lastSeenAt));
-    // Coerce nullable column → boolean so the API contract is the
-    // narrower SessionListItem.suspicious: boolean. Old pre-feature
-    // rows where the column is NULL surface as false to the client.
-    return rows.map((r) => ({ ...r, suspicious: r.suspicious === true }));
+    // Coerce nullable columns → boolean so the API contract is the
+    // narrower SessionListItem shape. Old pre-feature rows where the
+    // columns are NULL surface as false to the client (the safe
+    // default for both flags).
+    return rows.map((r) => ({
+      ...r,
+      suspicious: r.suspicious === true,
+      trusted: r.trusted === true,
+    }));
+  }
+
+  // See IStorage.hasDeviceFingerprintForUser for the contract. We use
+  // a LIMIT 1 SELECT (rather than COUNT) so the planner can short-
+  // circuit on the first match — combined with the
+  // sessions_user_fingerprint_idx index this is a single index probe.
+  async hasDeviceFingerprintForUser(
+    userId: string,
+    fingerprint: string,
+  ): Promise<boolean> {
+    const rows = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(
+        and(
+          eq(sessions.userId, userId),
+          eq(sessions.deviceFingerprint, fingerprint),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  // Fail-open per IStorage contract — same shape as markSessionSuspicious.
+  // We deliberately do not gate on the current value: the UPDATE is
+  // idempotent and PG will simply rewrite the row with the same value
+  // on a no-op call, which is cheaper than the round-trip + branch.
+  async markSessionTrusted(sessionId: string): Promise<void> {
+    try {
+      await db
+        .update(sessions)
+        .set({ trusted: true })
+        .where(eq(sessions.id, sessionId));
+    } catch (err) {
+      // Same redaction discipline as markSessionSuspicious: log only
+      // the exception type, not the error message (DB drivers can
+      // include connection strings or query bodies in error.message).
+      const errType =
+        err instanceof Error ? err.constructor.name : typeof err;
+      console.error(
+        `markSessionTrusted swallowed error for ${sessionId}: ${errType}`,
+      );
+    }
   }
 
   // Fail-open per IStorage contract: any DB error is logged and

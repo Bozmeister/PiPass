@@ -116,9 +116,39 @@ export const sessions = pgTable(
     // that ever tripped a flag stays flagged for the life of the row;
     // logout-all is the user's reset button.
     suspicious: boolean("suspicious").default(false),
+    // Stable per-device identifier — SHA-256(user-agent || ip || platform).
+    // Computed at login time and stored verbatim. We use it on subsequent
+    // logins to decide whether the user is signing in from a device this
+    // account has seen before. Nullable so old pre-feature rows survive
+    // the additive column add unchanged; a NULL fingerprint never matches
+    // a new login (which always has a non-null hash) so legacy sessions
+    // are treated as "unknown device" if the user logs in fresh — exactly
+    // the safe default. We deliberately do NOT store the raw user-agent
+    // / ip in this column (those already live in user_agent / ip_address);
+    // the hash is opaque so a DB leak cannot reconstruct browser
+    // fingerprints from this column alone.
+    deviceFingerprint: text("device_fingerprint"),
+    // TRUE if the user has actively approved this device for sensitive
+    // actions (sync / restore). Set on login when the same fingerprint
+    // has been seen for this user before, OR on POST /api/auth/trust-device
+    // for the current session. Never reset to false (the "I changed my
+    // mind" path is logout / logout-all, not a trust toggle). Default
+    // false matches the secure-by-default "treat unknown devices as
+    // untrusted until proven otherwise" stance. Old pre-feature rows
+    // surface as false to the client (see DatabaseStorage.listActiveSessionsForUser
+    // for the coercion).
+    trusted: boolean("trusted").default(false),
   },
   (table) => [
     index("sessions_user_expires_idx").on(table.userId, table.expiresAt),
+    // Drives the new-device check on login: "has this (userId, fingerprint)
+    // been seen before?" — a single indexed lookup. Without this index the
+    // login path would full-scan the sessions table on every login, which
+    // becomes painful as the table grows.
+    index("sessions_user_fingerprint_idx").on(
+      table.userId,
+      table.deviceFingerprint,
+    ),
   ],
 );
 

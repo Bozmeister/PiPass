@@ -1,0 +1,180 @@
+We are adding Device Trust and New Device Challenge to PiPass.
+
+STRICT RULES:
+- DO NOT modify crypto/
+- DO NOT change any existing primary key column types
+- Schema changes must be ADDITIVE ONLY
+- System must remain fail-open (never permanently lock legitimate users out)
+- No sensitive values (tokens, auth hashes, blobs) may be logged
+
+----------------------------------------
+OBJECTIVE
+----------------------------------------
+
+Introduce device awareness so the system can:
+
+1. Detect new/unrecognized devices
+2. Mark sessions as trusted or untrusted
+3. Restrict sensitive actions from untrusted devices
+4. Surface this clearly to the user and audit log
+
+----------------------------------------
+T1 — Schema (ADDITIVE ONLY)
+----------------------------------------
+
+Extend sessions table:
+
+ADD COLUMN device_fingerprint text
+ADD COLUMN trusted boolean DEFAULT false
+
+DO NOT modify existing PKs or columns.
+
+----------------------------------------
+T2 — Device Fingerprint
+----------------------------------------
+
+In routes.ts, implement:
+
+function getDeviceFingerprint(req):
+
+Combine:
+- user-agent
+- ip (from getClientIp)
+- platform header if available
+
+Return:
+sha256 hash (string)
+
+----------------------------------------
+T3 — Session Creation Logic
+----------------------------------------
+
+On login:
+
+- Generate deviceFingerprint
+- Check existing sessions for same user:
+    if fingerprint seen before → trusted = true
+    else → trusted = false
+
+Store fingerprint + trusted flag in session
+
+----------------------------------------
+T4 — New Device Detection
+----------------------------------------
+
+If trusted === false:
+
+- Log audit event:
+  action: "new_device_detected"
+
+- Raise security signal:
+  treat as "elevated" minimum (even if no anomaly)
+
+----------------------------------------
+T5 — Trust Elevation (User Approval)
+----------------------------------------
+
+Add endpoint:
+
+POST /api/auth/trust-device
+
+Auth required (session token only)
+
+Behavior:
+- Marks current session as trusted = true
+- Logs:
+  "device_trusted"
+
+----------------------------------------
+T6 — Restrict Sensitive Actions
+----------------------------------------
+
+If session.trusted === false:
+
+BLOCK:
+- POST /api/vault/sync
+- POST /api/vault/restore
+
+Return:
+403 { error: "Untrusted device - approval required" }
+
+ALLOW:
+- fetch
+- history
+- audit
+- sessions
+
+----------------------------------------
+T7 — API Response Shape
+----------------------------------------
+
+Extend responses:
+
+GET /api/auth/sessions
+→ include:
+  trusted: boolean
+  current: boolean
+
+GET /api/vault/fetch
+→ include:
+  deviceTrusted: boolean
+
+----------------------------------------
+T8 — Security Level Integration
+----------------------------------------
+
+Modify deriveSecurityLevel:
+
+If session.trusted === false:
+→ minimum level = "elevated"
+
+This stacks with existing anomaly logic.
+
+----------------------------------------
+T9 — Audit Logging
+----------------------------------------
+
+Log:
+
+- new_device_detected
+- device_trusted
+- untrusted_device_blocked
+
+Use existing audit system (fire-and-forget)
+
+----------------------------------------
+T10 — Safety Rules
+----------------------------------------
+
+Ensure:
+
+- A user can ALWAYS recover by:
+    → calling /api/auth/trust-device
+- No permanent lockout
+- Restart does NOT wipe trusted devices (stored in DB)
+- System remains functional without frontend changes
+
+----------------------------------------
+VERIFICATION
+----------------------------------------
+
+1. Login from Device A → trusted=true
+2. Login from Device B → trusted=false
+3. Device B fetch → allowed
+4. Device B sync → 403
+5. POST /auth/trust-device
+6. Device B sync → 200
+7. Audit log shows all events
+8. securityLevel ≥ elevated for untrusted session
+
+----------------------------------------
+DELIVERABLE
+----------------------------------------
+
+Minimal, clean diff touching:
+
+- shared/schema.ts (additive columns only)
+- server/storage.ts (session fields)
+- server/routes.ts (logic + endpoints)
+
+Do not refactor unrelated code.

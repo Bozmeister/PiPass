@@ -77,10 +77,15 @@ Preferred communication style: Simple, everyday language.
   - **Documented divergences** from the previous hand-written validators: (1) JSON array bodies (e.g. `[]`) return 400 `"Invalid body"` instead of `"Invalid <first_field>"` — the legacy reply was an artifact of object destructuring. (2) Unknown fields now return 400 `"Unknown field"` (intentional, see strict mode above) instead of being silently accepted.
 - **API Routes** (`server/routes.ts`):
   - `POST /api/auth/register` — Create user with username, authHash, salt, iterations
-  - `POST /api/auth/login` — Verify credentials with timing-safe comparison
+  - `POST /api/auth/login` — Verify credentials with timing-safe comparison; computes device fingerprint, sets sessions.trusted at creation, audits `new_device_detected` for first-time-device logins
   - `GET /api/auth/salt/:username` — Retrieve salt/iterations for client-side key derivation
-  - `POST /api/vault/sync` — Upload encrypted vault blob (version-checked)
-  - `GET /api/vault/fetch` — Download encrypted vault blob
+  - `GET /api/auth/sessions` — List active sessions (returns `{sessions, securityLevel, recoveryMode, threatLevel}`); each session row includes `trusted` (device approval state) and `current` (true for the requesting session)
+  - `POST /api/auth/trust-device` — User-initiated approval of the current session/device; rate-limited (5/min); 400 for legacy auth-hash callers; idempotent
+  - `POST /api/vault/sync` — Upload encrypted vault blob (version-checked); returns 423 (recovery mode), 423 (soft-lock), or 403 (untrusted device) before write
+  - `POST /api/vault/restore` — Restore from history; same gating order as sync
+  - `GET /api/vault/fetch` — Download encrypted vault blob; response includes `deviceTrusted` per-session flag
+  - `GET /api/vault/audit` — Latest audit entries for the user
+  - `POST /api/vault/recovery/acknowledge` — User-initiated exit from recovery mode
   - `GET /api/health` — Health check
 - **Storage** (`server/storage.ts`): `DatabaseStorage` class implementing `IStorage`, backed by PostgreSQL via Drizzle ORM (`server/db.ts` — pg `Pool` + node-postgres adapter, fail-fast on missing `DATABASE_URL`). Instantiated explicitly in `server/index.ts` and injected into `registerRoutes(app, storage)`.
 - **Body-size limits**: JSON body parsing is mounted **per-route** (not globally) via the `jsonBody(limit)` helper in `server/routes.ts`, with limits tuned to each endpoint's actual contract: `AUTH_BODY_LIMIT = "4kb"` for `/api/auth/register` and `/api/auth/login` (their bodies max out around 500 bytes — see `registerSchema`/`loginSchema`), and `VAULT_SYNC_BODY_LIMIT = "11mb"` for `/api/vault/sync` (10 MiB `encryptedBlob` cap from `vaultSyncSchema` + ~1 MiB headroom for the JSON envelope and field overhead). The global `setupBodyParsing` in `server/index.ts` no longer mounts `express.json()` at all — only `urlencoded` (also size-capped at 4kb), since no API route consumes form-encoded bodies. This means an attacker cannot DoS an auth endpoint with an 11 MiB payload; oversized requests are rejected by the body parser before hitting the validator. Express body-parser surfaces oversize errors as `status: 413`, and the error handler in `server/index.ts` returns `{ error: "Payload too large" }` for that status (consistent with other API error shapes) instead of the generic `{ message: "Internal Server Error" }`. The `verify` hook stamping `req.rawBody = buf` is preserved in `jsonBody()` for any future webhook-signature use case.
@@ -96,6 +101,7 @@ Preferred communication style: Simple, everyday language.
   - Request logging omits response bodies
   - Rate limit map auto-cleaned every 5 minutes to prevent memory leaks
   - Server never sees plaintext passwords or vault data
+  - **Device Trust** (`sessions.deviceFingerprint` + `sessions.trusted`): Every new login captures `SHA-256(userAgent || \0 || ip || \0 || x-platform)` as an opaque per-device fingerprint. A login is automatically trusted iff the user has a prior session row with the same fingerprint (indexed by `sessions_user_fingerprint_idx`); first-ever device for a user starts untrusted. Untrusted sessions are blocked from `/api/vault/sync` and `/api/vault/restore` with 403 `"Untrusted device - approval required"` (BELOW the 423 recovery-mode and 423 soft-lock gates), bump `securityLevel` floor to `elevated`, and emit `new_device_detected` + `untrusted_device_blocked` audit events. The user clears the gate by calling `POST /api/auth/trust-device` from the new device, which writes `trusted=true` on the current session row, clears the in-memory untrusted set, and audits `device_trusted`. `markSessionTrusted` is fail-open (never throws) and the in-memory `untrustedSessions` cache is rebuilt by `authenticate()` from each session row on every request, so a server restart cannot weaken the gate. `/api/vault/fetch` returns `deviceTrusted` so the client can show an in-app banner.
 - **CORS**: Configured for Replit dev/deployment domains and localhost
 - **IMPORTANT**: Server files must use `node:crypto` (not `crypto`) to avoid resolving to the local `crypto/` directory
 

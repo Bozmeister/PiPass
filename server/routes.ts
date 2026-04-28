@@ -68,6 +68,13 @@ const PER_USER_RATE_LIMITS = {
   // any single user trying to acknowledge faster than once every
   // 6 seconds is almost certainly a script, not a person.
   recovery_ack: 10,
+  // POST /api/auth/trust-device — user-initiated approval of a new
+  // device. Tighter than the read endpoints (this mutates session
+  // state and could be abused to silently elevate privileges) but
+  // not so tight that a user re-trusting after a typo'd request
+  // gets locked out. 5/min matches logout_all (the other "I'm
+  // taking charge of my account" mutation).
+  trust_device: 5,
 } as const;
 type RateLimitedEndpoint = keyof typeof PER_USER_RATE_LIMITS;
 
@@ -156,6 +163,35 @@ function checkUserRateLimit(
 
 function getClientIp(req: Request): string {
   return req.ip || req.socket.remoteAddress || "unknown";
+}
+
+// Stable per-device hash. SHA-256(user-agent || \0 || ip || \0 || x-platform).
+// Three notes:
+//
+//   - We use NUL bytes between fields rather than a printable separator so a
+//     pathological user-agent like `"foo\u0000bar"` cannot collide with a
+//     different (UA, IP) pair under string concatenation.
+//   - x-platform is a soft hint sent by the Expo client (e.g. "ios" / "web").
+//     Missing → empty string. We deliberately tolerate its absence: even
+//     without it the (UA, IP) pair already gives us a usable fingerprint,
+//     and refusing logins from clients that don't send the header would
+//     break legacy callers.
+//   - The fingerprint is INTENTIONALLY coarse — moving between Wi-Fi and
+//     cellular changes the IP and re-trips "new device". That's the
+//     correct security tradeoff: better to ask for trust again than to
+//     silently accept a session from a network the user has never used.
+function getDeviceFingerprint(req: Request): string {
+  const ua = captureUserAgent(req) ?? "";
+  const ip = getClientIp(req);
+  const platformRaw = req.headers["x-platform"];
+  const platform = typeof platformRaw === "string" ? platformRaw : "";
+  return createHash("sha256")
+    .update(ua)
+    .update("\u0000")
+    .update(ip)
+    .update("\u0000")
+    .update(platform)
+    .digest("hex");
 }
 
 const DUMMY_SECRET = randomBytes(32);
@@ -386,6 +422,18 @@ type UserSecurityState = {
   // this Set is purely a hot-path cache. Lost on restart but
   // hydrated lazily from the audit log — see hydrateSecurityStateFromAudit.
   suspiciousSessions: Set<string>;
+  // In-memory mirror of session ids whose sessions.trusted column is
+  // FALSE in the DB (i.e. a new device that has not yet been approved
+  // for sync/restore). Populated lazily by `authenticate` whenever it
+  // resolves a session — DB column is the source of truth, this Set is
+  // a hot-path cache for deriveSecurityLevel and the sync/restore 403
+  // gate. Removed from the set when the device is trusted (login on a
+  // known device, or POST /api/auth/trust-device). Lost on restart but
+  // that's fail-OPEN by design: a forgotten "untrusted" entry only
+  // matters until the next authenticate() call rebuilds it from the DB
+  // row, and the sync/restore endpoints re-check the in-memory set
+  // populated by their own authenticate() call this same request.
+  untrustedSessions: Set<string>;
   // Wall-clock epoch-ms of the last successful hydration from the
   // audit log. Set by hydrateSecurityStateFromAudit. Its mere
   // presence (alongside the entry being in userSecurityState at all)
@@ -422,10 +470,50 @@ function getOrInitSecurityState(userId: string): UserSecurityState {
       ipHistory: [],
       lastTouchedAt: Date.now(),
       suspiciousSessions: new Set(),
+      untrustedSessions: new Set(),
     };
     userSecurityState.set(userId, s);
   }
   return s;
+}
+
+// Mark a session as untrusted in the in-memory cache. Called by
+// `authenticate` whenever the resolved session row has trusted=false
+// (i.e. the user is on a device they have not yet approved). Idempotent
+// — re-marking is a no-op Set.add. We deliberately do NOT touch the DB
+// here: the DB column is the durable source of truth and was set at
+// session-creation time; this Set just lets the hot-path checks (sync /
+// restore 403, deriveSecurityLevel) avoid a DB hit.
+function recordUntrustedSession(userId: string, sessionId: string): void {
+  const s = getOrInitSecurityState(userId);
+  s.untrustedSessions.add(sessionId);
+  s.lastTouchedAt = Date.now();
+}
+
+// Inverse of recordUntrustedSession — called when a session becomes
+// trusted (POST /api/auth/trust-device, or `authenticate` resolving a
+// session row where trusted=true). No DB write here either; the route
+// that owns the trust transition is responsible for the DB UPDATE.
+function clearUntrustedSession(userId: string, sessionId: string): void {
+  const s = userSecurityState.get(userId);
+  if (!s) return;
+  s.untrustedSessions.delete(sessionId);
+  s.lastTouchedAt = Date.now();
+}
+
+// Synchronous hot-path check for "is this session currently flagged as
+// untrusted?". Returns false on any missing-state path so an empty
+// in-memory cache (e.g. right after restart) is treated as trusted —
+// authenticate() will repopulate from the DB on the next request,
+// which is the only place the cache mismatch could leak through.
+function isSessionUntrusted(
+  userId: string,
+  sessionId: string | null,
+): boolean {
+  if (!sessionId) return false;
+  const s = userSecurityState.get(userId);
+  if (!s) return false;
+  return s.untrustedSessions.has(sessionId);
 }
 
 // Stamp the in-memory "recent anomaly" timestamp and optionally mirror
@@ -784,12 +872,17 @@ function deriveSecurityLevel(
     if (getActiveSoftLock(userId) !== undefined) return "critical";
     const s = userSecurityState.get(userId);
     if (s && sessionId && s.suspiciousSessions.has(sessionId)) return "high";
-    if (
+    const recentAnomaly =
       s?.recentAnomalyAt !== undefined &&
-      Date.now() - s.recentAnomalyAt <= ANOMALY_RECENT_WINDOW_MS
-    ) {
-      return "elevated";
-    }
+      Date.now() - s.recentAnomalyAt <= ANOMALY_RECENT_WINDOW_MS;
+    if (recentAnomaly) return "elevated";
+    // Untrusted device → minimum "elevated". Stacks BELOW the
+    // recentAnomaly check (same level) but ABOVE "normal" so a
+    // freshly-logged-in unknown device shows up as elevated even
+    // without any other signal. Per spec: untrusted should never
+    // surface as "normal" — the user-facing client uses this to
+    // gate the "trust this device?" prompt.
+    if (s && sessionId && s.untrustedSessions.has(sessionId)) return "elevated";
     return "normal";
   } catch {
     return "normal";
@@ -1212,6 +1305,19 @@ async function authenticate(
     } catch {
       // Already swallowed inside hydrateIfNeeded; this is defense in depth.
     }
+    // Populate the in-memory untrusted-session cache from the DB row.
+    // The DB column is the source of truth (set at session-creation
+    // time, flipped only by /api/auth/trust-device); we mirror it into
+    // the Set here so the synchronous hot-path checks (sync/restore
+    // 403, deriveSecurityLevel) don't need an extra DB read. Both
+    // branches must run on every authenticate so a session that gets
+    // trusted between requests transitions correctly without waiting
+    // for the next process restart to clear stale state.
+    if (session.trusted === true) {
+      clearUntrustedSession(session.userId, session.id);
+    } else {
+      recordUntrustedSession(session.userId, session.id);
+    }
     return { ok: true, userId: session.userId, sessionId: session.id };
   }
 
@@ -1338,12 +1444,26 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // to the client exactly once, in this response, and never again.
       const rawToken = randomBytes(32).toString("hex");
       const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+      // Device-trust decision happens HERE, BEFORE createSession, so the
+      // resulting row is correctly stamped trusted=true|false at insert
+      // time. We look the fingerprint up against this user's existing
+      // sessions: if we've ever seen this device for this account, it's
+      // trusted automatically; otherwise it lands as untrusted and the
+      // user has to approve it via POST /api/auth/trust-device before
+      // sync/restore unlock.
+      const deviceFingerprint = getDeviceFingerprint(req);
+      const isKnownDevice = await storage.hasDeviceFingerprintForUser(
+        user.id,
+        deviceFingerprint,
+      );
       const session = await storage.createSession({
         userId: user.id,
         tokenHash,
         expiresAt: Date.now() + SESSION_LIFETIME_MS,
         userAgent: captureUserAgent(req),
         ipAddress: getClientIp(req),
+        deviceFingerprint,
+        trusted: isKnownDevice,
       });
 
       // Audit hooks AFTER successful auth + session creation. Two
@@ -1364,6 +1484,30 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         ipAddress: ip,
         userAgent,
       });
+      // New-device path: log the event AND raise the in-memory threat
+      // signal so the very first request after login (the client's
+      // initial /api/vault/fetch) already sees securityLevel=elevated.
+      // We deliberately do NOT call triggerSoftLock — a brand-new
+      // device is not necessarily an attack, and locking writes for
+      // the legitimate user installing on a second phone would be
+      // user-hostile. The 403 on sync/restore (gated below) is the
+      // proper enforcement; recordSecuritySignalHit just paints the
+      // UI banner. flagSession=false on purpose: untrusted is a
+      // PER-DEVICE signal, not a per-session anomaly flag.
+      if (!isKnownDevice) {
+        recordAudit(storage, {
+          userId: user.id,
+          action: "new_device_detected",
+          ipAddress: ip,
+          // Stash the fingerprint hash in user_agent (same convention
+          // as anomaly_detected) so an operator reading the audit log
+          // can correlate this row with the specific session row by
+          // joining on sessions.device_fingerprint.
+          userAgent: `fingerprint=${deviceFingerprint.slice(0, 16)}`,
+        });
+        recordSecuritySignalHit(user.id, session.id, false);
+        recordUntrustedSession(user.id, session.id);
+      }
 
       // Existing fields are preserved for backward compatibility — clients
       // that have not yet adopted session tokens continue to receive
@@ -1486,6 +1630,28 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res
           .status(423)
           .json({ error: "Vault temporarily locked due to suspicious activity" });
+      }
+
+      // Untrusted-device write block. Sits BELOW recovery mode (423)
+      // and soft-lock (423) because those are stronger account-wide
+      // states — surfacing 403 first would mislead the user into
+      // believing trust-device would unblock them when actually their
+      // account is in a deeper lockdown. 403 (Forbidden) is the right
+      // status: this is an authorization decision (the request is
+      // well-formed and the credentials valid; the server is refusing
+      // to act on this device specifically). The audit row gives the
+      // user a paper trail in their own audit log so they can see
+      // "I tried to sync from a new device and was blocked".
+      if (isSessionUntrusted(userId, auth.sessionId)) {
+        recordAudit(storage, {
+          userId,
+          action: "untrusted_device_blocked",
+          ipAddress: getClientIp(req),
+          userAgent: `attemptedAction=sync`,
+        });
+        return res
+          .status(403)
+          .json({ error: "Untrusted device - approval required" });
       }
 
       // syncVault is fully transactional: it locks the existing row,
@@ -1664,6 +1830,15 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       const recoveryMode = isRecoveryModeActive(userId, storage);
       const threatLevel = getThreatLevel(userId, auth.sessionId, storage);
 
+      // Surface the per-session device-trust state on every fetch so
+      // the client can show the "trust this device?" prompt without an
+      // extra round-trip. Computed from the in-memory cache populated
+      // by authenticate() on this same request — no DB hit. Legacy
+      // auth-hash callers (sessionId === null) always see true: they
+      // have no session row to gate, and the device-trust gate only
+      // applies to session-token auth.
+      const deviceTrusted = !isSessionUntrusted(userId, auth.sessionId);
+
       if (!blob) {
         return res.status(200).json({
           encryptedBlob: null,
@@ -1671,6 +1846,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           securityLevel,
           recoveryMode,
           threatLevel,
+          deviceTrusted,
         });
       }
 
@@ -1681,6 +1857,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         securityLevel,
         recoveryMode,
         threatLevel,
+        deviceTrusted,
       });
     } catch (err) {
       console.error("Vault fetch error");
@@ -1773,6 +1950,22 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res
           .status(423)
           .json({ error: "Vault temporarily locked due to suspicious activity" });
+      }
+
+      // Untrusted-device write block — same placement / rationale as
+      // /api/vault/sync. Restore IS a write (it archives the current
+      // blob and replaces it with a historical version), so it must
+      // be blocked from untrusted devices for the same reason sync is.
+      if (isSessionUntrusted(userId, auth.sessionId)) {
+        recordAudit(storage, {
+          userId,
+          action: "untrusted_device_blocked",
+          ipAddress: getClientIp(req),
+          userAgent: `attemptedAction=restore`,
+        });
+        return res
+          .status(403)
+          .json({ error: "Untrusted device - approval required" });
       }
 
       // restoreVault is itself transactional and idempotent: it picks the
@@ -1966,9 +2159,22 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // as /api/vault/fetch. Existing fields untouched.
       const recoveryMode = isRecoveryModeActive(auth.userId, storage);
       const threatLevel = getThreatLevel(auth.userId, auth.sessionId, storage);
-      return res
-        .status(200)
-        .json({ sessions: list, securityLevel, recoveryMode, threatLevel });
+      // Tag the requesting session with `current: true` so the UI can
+      // highlight "this device" without having to round-trip the session
+      // id separately. SessionListItem already includes `trusted` (set
+      // by the storage layer); we only need to layer `current` on top.
+      // For legacy auth-hash callers (sessionId === null) every row
+      // surfaces as current=false — they have no session row to match.
+      const sessionsWithCurrent = list.map((s) => ({
+        ...s,
+        current: auth.sessionId !== null && s.id === auth.sessionId,
+      }));
+      return res.status(200).json({
+        sessions: sessionsWithCurrent,
+        securityLevel,
+        recoveryMode,
+        threatLevel,
+      });
     } catch (err) {
       console.error("List-sessions error");
       return res.status(500).json({ error: "Internal server error" });
@@ -2126,6 +2332,69 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       return res.status(200).json({ success: true });
     } catch (err) {
       console.error("Recovery acknowledge error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // POST /api/auth/trust-device — user-initiated approval of the CURRENT
+  // session/device for sensitive actions. Idempotent: trusting an
+  // already-trusted session returns 200 without surfacing an error
+  // (clients can retry freely on transient failures). Returns 400 for
+  // legacy auth-hash callers — they have no session row to mark, and
+  // silently succeeding would mislead the client into thinking they
+  // had unblocked sync/restore when in fact the next request would
+  // still trip the 403 (auth-hash callers are exempt from the device-
+  // trust gate, but they're also incapable of toggling the flag).
+  app.post("/api/auth/trust-device", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      const { userId, sessionId } = auth;
+
+      // Rate-limit AFTER authenticate (real userId only). 5/min — see
+      // PER_USER_RATE_LIMITS comment for rationale.
+      if (checkUserRateLimit("trust_device", getClientIp(req), userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+
+      // Legacy auth-hash callers have no session row to update. Reject
+      // explicitly rather than silently succeeding — see endpoint doc
+      // comment above for why.
+      if (sessionId === null) {
+        return res
+          .status(400)
+          .json({ error: "Session token required to trust device" });
+      }
+
+      // DB UPDATE first (fail-open per IStorage contract — does not
+      // throw), then in-memory cache, then audit. Order matters:
+      //   - DB before cache so the durable state is correct even if
+      //     the process crashes between the two writes;
+      //   - Cache before audit so the next request from this same
+      //     session in the same window sees the cleared state even if
+      //     the audit insert is slow.
+      await storage.markSessionTrusted(sessionId);
+      clearUntrustedSession(userId, sessionId);
+      recordAudit(storage, {
+        userId,
+        action: "device_trusted",
+        ipAddress: getClientIp(req),
+        // Stash the (truncated) fingerprint for cross-referencing with
+        // the corresponding new_device_detected entry — same convention
+        // as the login path.
+        userAgent: `fingerprint=${getDeviceFingerprint(req).slice(0, 16)}`,
+      });
+
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      console.error("Trust-device error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });
