@@ -236,6 +236,56 @@ export const vaultAuditLog = pgTable(
   ],
 );
 
+// WebAuthn credentials registered by users for passkey / hardware-key
+// based authentication. This table is purely additive — it does not
+// touch users or any other existing table.
+//
+// Notes on column choices:
+// - credentialId is text (the credential id the authenticator returns
+//   is base64url-encoded and variable length — text avoids byte-length
+//   surprises). Marked unique so duplicate registrations are rejected
+//   at the DB level rather than only in app code.
+// - publicKey is text (COSE key serialised by @simplewebauthn/server,
+//   stored base64url) — same reasoning.
+// - counter is integer per the WebAuthn spec's signCount.
+// - transports is a nullable JSON string ("usb", "nfc", "ble",
+//   "internal", "hybrid"); the authenticator may report none.
+// - createdAt / lastUsedAt are bigint epoch-ms to match every other
+//   timestamp column in this codebase (users, sessions, vault*, audit).
+// - revoked is a soft-delete flag so we keep the audit trail of who
+//   ever registered what, without losing history on revoke.
+export const webauthnCredentials = pgTable(
+  "webauthn_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    credentialId: text("credential_id").notNull().unique(),
+    publicKey: text("public_key").notNull(),
+    counter: integer("counter").notNull(),
+    deviceName: text("device_name"),
+    transports: text("transports"),
+    createdAt: bigint("created_at", { mode: "number" })
+      .notNull()
+      .$defaultFn(() => Date.now()),
+    lastUsedAt: bigint("last_used_at", { mode: "number" }),
+    revoked: boolean("revoked").notNull().default(false),
+  },
+  (table) => [
+    // "List a user's passkeys" — drives the credentials management
+    // screen and is also the prefilter before joining on credentialId.
+    index("webauthn_credentials_user_idx").on(table.userId),
+    // "Look up a credential by its WebAuthn credential id" — drives
+    // every assertion verification (`navigator.credentials.get`).
+    // Even though credentialId is UNIQUE (which already implies an
+    // index), declaring it explicitly keeps the access pattern legible
+    // and matches the rest of this file's convention of co-locating
+    // hot-path indexes with the table definition.
+    index("webauthn_credentials_credential_id_idx").on(table.credentialId),
+  ],
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type VaultBlob = typeof vaultBlobs.$inferSelect;
@@ -243,6 +293,8 @@ export type NewVaultBlob = typeof vaultBlobs.$inferInsert;
 export type VaultBlobHistoryEntry = typeof vaultBlobHistory.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
 export type VaultAuditLogEntry = typeof vaultAuditLog.$inferSelect;
+export type WebauthnCredential = typeof webauthnCredentials.$inferSelect;
+export type NewWebauthnCredential = typeof webauthnCredentials.$inferInsert;
 
 export const insertUserSchema = createInsertSchema(users, {
   username: (col) => col.min(3).max(64),
