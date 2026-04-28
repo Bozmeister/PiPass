@@ -410,6 +410,65 @@ export const totpLoginSchema = z
   })
   .strict();
 
+// ----- WebAuthn / passkey registration request bodies -----
+//
+// /api/passkeys/register/start currently takes no body — the server
+// derives everything from the authenticated session (userId,
+// username) and the existing credential list. We still validate
+// .strict() so a client that sends an unexpected field gets a clear
+// 400 instead of a silently-ignored payload (consistent with every
+// other endpoint in this file).
+export const passkeyRegisterStartSchema = z.object({}).strict();
+
+// Per the WebAuthn spec, the response object the browser hands back
+// from `navigator.credentials.create()` has a known top-level shape
+// (id, rawId, type, response, optional authenticatorAttachment +
+// clientExtensionResults). We strict-check the OUTER object so a
+// malformed wrapper is rejected, but pass through the INNER
+// `response` sub-object: authenticators legitimately add fields
+// (e.g. publicKey/publicKeyAlgorithm in newer browsers) and we want
+// the @simplewebauthn library to be the source of truth on what's
+// inside it, not this file. We DO validate the required strings
+// (clientDataJSON, attestationObject) are non-empty so an obviously
+// junk body never reaches the verifier.
+//
+// deviceName is collected here (not on /start) so the user can label
+// the credential AFTER the authenticator ceremony succeeds. Bounded
+// 1-128 chars, optional.
+const webauthnRegistrationInnerResponseSchema = z
+  .object({
+    clientDataJSON: z.string().min(1).max(50_000),
+    attestationObject: z.string().min(1).max(100_000),
+  })
+  .passthrough();
+
+const webauthnRegistrationResponseSchema = z
+  .object({
+    id: z.string().min(1).max(2000),
+    rawId: z.string().min(1).max(2000),
+    type: z.literal("public-key"),
+    response: webauthnRegistrationInnerResponseSchema,
+    authenticatorAttachment: z
+      .enum(["platform", "cross-platform"])
+      .optional(),
+    clientExtensionResults: z.record(z.unknown()).optional(),
+  })
+  .strict();
+
+export const passkeyRegisterFinishSchema = z
+  .object({
+    response: webauthnRegistrationResponseSchema,
+    deviceName: z.string().min(1).max(128).optional(),
+  })
+  .strict();
+
+export type PasskeyRegisterStartInput = z.infer<
+  typeof passkeyRegisterStartSchema
+>;
+export type PasskeyRegisterFinishInput = z.infer<
+  typeof passkeyRegisterFinishSchema
+>;
+
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type VaultSyncInput = z.infer<typeof vaultSyncSchema>;

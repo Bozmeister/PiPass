@@ -18,6 +18,8 @@ import {
   validateNoQueryParams,
   validateTotpVerify,
   validateTotpLogin,
+  validatePasskeyRegisterStart,
+  validatePasskeyRegisterFinish,
 } from "./validation";
 import {
   generateTotpSecret,
@@ -26,6 +28,10 @@ import {
   encryptTotpSecret,
   decryptTotpSecret,
 } from "./totp";
+import {
+  generateRegistrationOptionsFor,
+  verifyRegistrationResponseFor,
+} from "./webauthn";
 
 // Per-route JSON parsers with explicit, route-appropriate size limits.
 // Auth bodies are small (~500 bytes max — see registerSchema/loginSchema bounds);
@@ -43,6 +49,16 @@ function jsonBody(limit: string) {
 }
 const AUTH_BODY_LIMIT = "4kb";
 const VAULT_SYNC_BODY_LIMIT = "11mb";
+// POST /api/passkeys/register/finish — the request body wraps a
+// WebAuthn RegistrationResponseJSON whose attestationObject can be
+// several kilobytes for authenticators with cert chains. The inner
+// zod cap allows attestationObject up to 100_000 chars; pick a
+// body-parser cap comfortably above the largest plausible real
+// payload (~16-32 KiB) so a legitimately-large authenticator
+// doesn't hit a 413 before it reaches the strict validator. 64 KiB
+// is well below the vault sync ceiling and well above any real
+// attestation size we expect to see in practice.
+const PASSKEY_FINISH_BODY_LIMIT = "64kb";
 
 function hashForComparison(value: string): Buffer {
   return createHash("sha256").update(value).digest();
@@ -100,6 +116,17 @@ const PER_USER_RATE_LIMITS = {
   // real brute-force defense; step-up reuses the same audit/lockout
   // signals so abuse still surfaces.
   totp_step_up: 10,
+  // Passkey registration flow. Two-step ceremony: /start mints a
+  // challenge + options, /finish verifies the authenticator's
+  // attestation. We cap each at 5/min — the same shape as
+  // totp_setup / totp_verify, since the underlying brute-force
+  // surface is similar (a user clicking through a registration UI
+  // 5 times a minute is plausible; beyond that we assume something
+  // is automated). The challenge itself is single-use (consumed by
+  // /finish) so even at the cap a successful /start cannot be
+  // replayed against /finish more than once.
+  passkey_register_start: 5,
+  passkey_register_finish: 5,
 } as const;
 type RateLimitedEndpoint = keyof typeof PER_USER_RATE_LIMITS;
 
@@ -3156,6 +3183,230 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         });
       } catch (err) {
         console.error("TOTP step-up error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // POST /api/passkeys/register/start — auth required. Mints a fresh
+  // WebAuthn registration challenge for the current user and returns
+  // the PublicKeyCredentialCreationOptions JSON for the client to
+  // hand to navigator.credentials.create(). The challenge is held
+  // in process memory (5 min TTL, single-use) — see server/webauthn.ts.
+  //
+  // Body: empty object. Strict-validated so a stray field is a 400.
+  //
+  // The response includes the user's existing credentialIds in
+  // excludeCredentials so the authenticator refuses to create a
+  // duplicate passkey on the same device — a real WebAuthn UX
+  // defense, not just a server-side check. We pull that list from
+  // listCredentialsForUser (which already filters out revoked rows).
+  app.post(
+    "/api/passkeys/register/start",
+    jsonBody(AUTH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+
+        const parsed = validatePasskeyRegisterStart(req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        const { userId } = auth;
+
+        if (
+          checkUserRateLimit(
+            "passkey_register_start",
+            getClientIp(req),
+            userId,
+          )
+        ) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+
+        const user = await storage.getUser(userId);
+        if (!user) {
+          // Session was valid at authenticate() time but the user row
+          // is gone now (concurrent account deletion). Same single-
+          // shape 401 the rest of the auth-required endpoints emit.
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+
+        const existing = await storage.listCredentialsForUser(userId);
+        const excludeCredentialIds = existing.map((c) => c.credentialId);
+
+        const result = await generateRegistrationOptionsFor({
+          userId,
+          username: user.username,
+          request: req,
+          excludeCredentialIds,
+        });
+        if (!result.ok) {
+          // generateRegistrationOptionsFor returns a structured error
+          // rather than throwing. The reason is logged inside
+          // server/webauthn.ts; surface a single-shape 500 to the
+          // client.
+          console.error(
+            `passkey register/start failed: code=${result.code}`,
+          );
+          return res
+            .status(500)
+            .json({ error: "Internal server error" });
+        }
+
+        return res.status(200).json(result.options);
+      } catch (err) {
+        console.error("Passkey register/start error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // POST /api/passkeys/register/finish — auth required. Verifies the
+  // attestation the client got back from navigator.credentials.create()
+  // against the challenge stored at /start, then persists the new
+  // credential row. The challenge is single-use: a successful verify
+  // (or any verify attempt — see consumeChallenge in webauthn.ts)
+  // deletes it so the same /start cannot be replayed against /finish.
+  //
+  // Body: { response: <RegistrationResponseJSON>, deviceName?: string }.
+  // The deviceName is the user-supplied label that will appear in the
+  // passkeys management screen (e.g. "iPhone 15", "YubiKey"); optional,
+  // bounded 1-128 chars.
+  //
+  // Failure modes:
+  //   - Malformed body                                → 400
+  //   - No matching challenge (expired or never set) → 400
+  //   - Verifier rejected the attestation             → 400
+  //   - Origin / RP id mismatch                       → 400
+  //   - Internal verifier error                       → 500
+  //   - Credential already registered (race)          → 409
+  //
+  // Per spec / task: the publicKey is NEVER echoed back in the
+  // response — only the credentialId and the user-visible deviceName.
+  app.post(
+    "/api/passkeys/register/finish",
+    jsonBody(PASSKEY_FINISH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+
+        const parsed = validatePasskeyRegisterFinish(req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        const { userId } = auth;
+
+        if (
+          checkUserRateLimit(
+            "passkey_register_finish",
+            getClientIp(req),
+            userId,
+          )
+        ) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+
+        const verified = await verifyRegistrationResponseFor({
+          userId,
+          // Cast: the validator strict-checks the outer envelope and
+          // requires non-empty clientDataJSON / attestationObject in
+          // the inner response, but uses .passthrough() on the inner
+          // object so authenticator-specific extensions survive.
+          // SimpleWebAuthn's RegistrationResponseJSON narrows to
+          // exact known fields, so TS can't see the extra-keys case.
+          // The verifier itself rejects anything that isn't a valid
+          // attestation, so the runtime contract is preserved.
+          response: parsed.data.response as Parameters<
+            typeof verifyRegistrationResponseFor
+          >[0]["response"],
+          request: req,
+        });
+
+        if (!verified.ok) {
+          // Map verifier outcomes to HTTP status. We deliberately
+          // collapse "no challenge" / "verification_failed" /
+          // "origin_mismatch" / "rp_mismatch" into a single 400 with
+          // a generic error so an attacker probing the endpoint can't
+          // distinguish "I sent a bogus response" from "the challenge
+          // expired" — both reduce to "this attempt didn't work, do
+          // /start again". Internal errors (library/runtime) surface
+          // as 500 so the client knows a retry is appropriate.
+          if (verified.code === "internal_error") {
+            console.error(
+              `passkey register/finish internal error: ${verified.reason ?? "unknown"}`,
+            );
+            return res
+              .status(500)
+              .json({ error: "Internal server error" });
+          }
+          return res
+            .status(400)
+            .json({ error: "Passkey registration failed" });
+        }
+
+        // Persist. The unique constraint on credential_id will reject
+        // a duplicate at the DB level — surface as 409 so the client
+        // can present a meaningful "this passkey is already
+        // registered" instead of a misleading 500. Any other DB error
+        // is a real internal failure.
+        try {
+          await storage.createWebAuthnCredential({
+            userId,
+            credentialId: verified.credential.credentialId,
+            publicKey: verified.credential.publicKey,
+            counter: verified.credential.counter,
+            deviceName: parsed.data.deviceName ?? null,
+            transports: verified.credential.transports,
+          });
+        } catch (err) {
+          const e = err as { code?: string };
+          if (e?.code === "23505") {
+            return res
+              .status(409)
+              .json({ error: "Passkey already registered" });
+          }
+          throw err;
+        }
+
+        // Audit AFTER the persist succeeds — a credential row that
+        // exists must always be paired with a passkey_registered
+        // event. recordAudit is fire-and-forget (errors swallowed
+        // inside) so it never blocks the 200.
+        recordAudit(storage, {
+          userId,
+          action: "passkey_registered",
+          ipAddress: getClientIp(req),
+          userAgent: captureUserAgent(req),
+        });
+
+        // DO NOT return the publicKey or counter — both are internal
+        // state. The credentialId is fine (the client already saw it
+        // when the authenticator returned the assertion) and the
+        // deviceName is the label the user themselves supplied.
+        return res.status(201).json({
+          success: true,
+          credentialId: verified.credential.credentialId,
+          deviceName: parsed.data.deviceName ?? null,
+        });
+      } catch (err) {
+        console.error("Passkey register/finish error");
         return res.status(500).json({ error: "Internal server error" });
       }
     },

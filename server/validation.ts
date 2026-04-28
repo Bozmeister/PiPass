@@ -11,15 +11,27 @@ import {
   sessionTokenHeaderSchema,
   totpVerifySchema,
   totpLoginSchema,
+  passkeyRegisterStartSchema,
+  passkeyRegisterFinishSchema,
   type RegisterInput,
   type LoginInput,
   type VaultSyncInput,
   type TotpVerifyInput,
   type TotpLoginInput,
+  type PasskeyRegisterStartInput,
+  type PasskeyRegisterFinishInput,
 } from "../shared/schema";
 import type { z } from "zod";
 
-export type { RegisterInput, LoginInput, VaultSyncInput, TotpVerifyInput, TotpLoginInput };
+export type {
+  RegisterInput,
+  LoginInput,
+  VaultSyncInput,
+  TotpVerifyInput,
+  TotpLoginInput,
+  PasskeyRegisterStartInput,
+  PasskeyRegisterFinishInput,
+};
 export type VaultRestoreInput = z.infer<typeof vaultRestoreSchema>;
 
 export type Result<T> =
@@ -38,6 +50,12 @@ const FIELD_LABEL: Record<string, string> = {
   // sensitive values (the user already knows what they sent).
   token: "token",
   tempToken: "tempToken",
+  // Passkey-registration fields. `response` is the outer WebAuthn
+  // assertion object; `deviceName` is the optional label the user
+  // attaches to the credential at finish time. Both are public
+  // request-shape concerns.
+  response: "response",
+  deviceName: "deviceName",
 };
 
 function issueToError(issue: ZodIssue): string {
@@ -86,6 +104,21 @@ export function validateTotpVerify(body: unknown): Result<TotpVerifyInput> {
 
 export function validateTotpLogin(body: unknown): Result<TotpLoginInput> {
   return parse(body, totpLoginSchema);
+}
+
+// Passkey-registration body validators — same parse helper as every
+// other endpoint so the "Unknown field" / "Invalid <field>" /
+// "Invalid body" error shapes stay uniform across the API.
+export function validatePasskeyRegisterStart(
+  body: unknown,
+): Result<PasskeyRegisterStartInput> {
+  return parse(body, passkeyRegisterStartSchema);
+}
+
+export function validatePasskeyRegisterFinish(
+  body: unknown,
+): Result<PasskeyRegisterFinishInput> {
+  return parse(body, passkeyRegisterFinishSchema);
 }
 
 export function validateUsernameParam(value: unknown): Result<string> {
