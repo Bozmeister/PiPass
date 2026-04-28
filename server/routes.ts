@@ -363,6 +363,22 @@ type UserSecurityState = {
   ipHistory: Array<{ ip: string; at: number }>;
   // For TTL-based GC of inactive users.
   lastTouchedAt: number;
+  // Wall-clock epoch-ms of the most recent anomaly_detected OR
+  // write_blocked_soft_lock event. Mirrors the signal that GET
+  // /api/vault/audit's hasRecentAnomalies derives from the audit log,
+  // kept in memory so deriveSecurityLevel can compute "elevated"
+  // without a DB hit on the hot path. Considered "recent" while
+  // (now - recentAnomalyAt) <= ANOMALY_RECENT_WINDOW_MS. Lost on
+  // process restart — fail-open by design.
+  recentAnomalyAt?: number;
+  // In-memory mirror of session ids whose sessions.suspicious column
+  // has been set TRUE during this process's lifetime. Used by
+  // deriveSecurityLevel to detect "high" synchronously, without a
+  // per-request DB lookup. The DB column remains the durable source
+  // of truth and is what GET /api/auth/sessions actually surfaces;
+  // this Set is purely a hot-path cache. Lost on restart — a fresh
+  // process derives "normal" until a new anomaly fires (fail-open).
+  suspiciousSessions: Set<string>;
 };
 const userSecurityState = new Map<string, UserSecurityState>();
 
@@ -388,10 +404,35 @@ if (!RATE_LIMIT_DISABLED) {
 function getOrInitSecurityState(userId: string): UserSecurityState {
   let s = userSecurityState.get(userId);
   if (!s) {
-    s = { ipHistory: [], lastTouchedAt: Date.now() };
+    s = {
+      ipHistory: [],
+      lastTouchedAt: Date.now(),
+      suspiciousSessions: new Set(),
+    };
     userSecurityState.set(userId, s);
   }
   return s;
+}
+
+// Stamp the in-memory "recent anomaly" timestamp and optionally mirror
+// the suspicious-session flag. Called from the SAME paths that log
+// anomaly_detected and write_blocked_soft_lock so the in-memory signal
+// stays in lock-step with the audit-log signal — that lets
+// deriveSecurityLevel project "elevated"/"high" without re-reading the
+// audit table on every request. flagSession=false on plain
+// write_blocked_soft_lock paths (the lock alone doesn't escalate the
+// SESSION; the session is only flagged when an actual anomaly fires).
+function recordSecuritySignalHit(
+  userId: string,
+  sessionId: string | null,
+  flagSession: boolean,
+): void {
+  const s = getOrInitSecurityState(userId);
+  s.recentAnomalyAt = Date.now();
+  s.lastTouchedAt = s.recentAnomalyAt;
+  if (flagSession && sessionId) {
+    s.suspiciousSessions.add(sessionId);
+  }
 }
 
 // Returns the lock-until timestamp if the user is currently soft-locked,
@@ -459,6 +500,137 @@ function trackIpAndCheckBurst(userId: string, ip: string): boolean {
     transitionsAfter > IP_CHANGE_THRESHOLD &&
     transitionsBefore <= IP_CHANGE_THRESHOLD
   );
+}
+
+// ---------------------------------------------------------------------------
+// Unified security level system
+// ---------------------------------------------------------------------------
+//
+// One single backend-derived signal that the frontend can render directly
+// (fractal renderer + UI messaging). Rather than asking the client to
+// inspect a half-dozen flags (suspicious, hasRecentAnomalies, soft lock,
+// IP-burst, ...), the server projects everything onto a 4-state ladder:
+//
+//   normal   — no active signals
+//   elevated — anomaly_detected or write_blocked_soft_lock in the last
+//              ANOMALY_RECENT_WINDOW_MS, but no other elevation
+//   high     — the authenticating session is flagged suspicious
+//   critical — user is currently soft-locked
+//
+// Levels are RANKED (normal=0..critical=3) so transitions can be split
+// into "any change" vs "escalation only" — see evaluateSecurityLevel.
+//
+// HOT PATH discipline: deriveSecurityLevel is FULLY SYNCHRONOUS and
+// only reads in-memory state set by the existing anomaly/soft-lock
+// hooks. NO DB I/O. This satisfies the "do NOT query DB repeatedly"
+// constraint and keeps per-request cost effectively zero.
+type SecurityLevel = "normal" | "elevated" | "high" | "critical";
+const LEVEL_RANK: Record<SecurityLevel, number> = {
+  normal: 0,
+  elevated: 1,
+  high: 2,
+  critical: 3,
+};
+const ANOMALY_RECENT_WINDOW_MS = 10 * 60_000;
+
+// Per-user "last observed level" so we can detect transitions and log
+// only on change (not on every request). Mutating this Map and emitting
+// the audit row both happen in the same synchronous tick — concurrent
+// requests within that tick will all observe the post-update value, so
+// duplicate transition rows can't be produced for one event.
+const userSecurityLevelState = new Map<
+  string,
+  { currentLevel: SecurityLevel; lastChangedAt: number }
+>();
+
+if (!RATE_LIMIT_DISABLED) {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of userSecurityLevelState) {
+      if (now - v.lastChangedAt > SECURITY_STATE_TTL_MS) {
+        userSecurityLevelState.delete(k);
+      }
+    }
+  }, 5 * 60_000);
+}
+
+// Pure synchronous derivation. ALL inputs come from the in-memory
+// userSecurityState Map populated by anomaly/soft-lock hooks. NO DB
+// access, NO awaits — safe to call on the hot path. Fail-open: any
+// error returns "normal" (the most permissive level).
+function deriveSecurityLevel(
+  userId: string,
+  sessionId: string | null,
+): SecurityLevel {
+  try {
+    // Order matters: highest-rank check FIRST so a soft-locked user
+    // who is also flagged suspicious surfaces as "critical" (worst
+    // case wins).
+    if (getActiveSoftLock(userId) !== undefined) return "critical";
+    const s = userSecurityState.get(userId);
+    if (s && sessionId && s.suspiciousSessions.has(sessionId)) return "high";
+    if (
+      s?.recentAnomalyAt !== undefined &&
+      Date.now() - s.recentAnomalyAt <= ANOMALY_RECENT_WINDOW_MS
+    ) {
+      return "elevated";
+    }
+    return "normal";
+  } catch {
+    return "normal";
+  }
+}
+
+// Derive level, log transitions if any, return level for response.
+// Transition logging is fire-and-forget through recordAudit (which
+// already swallows errors) so it can never fail the request. Two
+// audit events on a transition:
+//
+//   1. security_level_changed — fires on EVERY change (up or down) so
+//      operators have a complete history. Reason field is fixed
+//      "derived_state_change" since this is the only way levels move.
+//   2. user_notified_security_state — fires ONLY on escalation
+//      (rank increased). Skipped on downgrades to keep the audit log
+//      readable: a soft-lock that expires triggers critical→normal,
+//      which is good news the user doesn't need a banner for.
+function evaluateSecurityLevel(
+  userId: string,
+  sessionId: string | null,
+  ipAddress: string,
+  storage: IStorage,
+): SecurityLevel {
+  const newLevel = deriveSecurityLevel(userId, sessionId);
+  try {
+    const stored = userSecurityLevelState.get(userId);
+    const prev = stored?.currentLevel ?? "normal";
+    if (prev !== newLevel) {
+      userSecurityLevelState.set(userId, {
+        currentLevel: newLevel,
+        lastChangedAt: Date.now(),
+      });
+      recordAudit(storage, {
+        userId,
+        action: "security_level_changed",
+        ipAddress,
+        // Metadata stuffed in user_agent following the existing
+        // anomaly_detected / write_blocked_soft_lock convention. Keeps
+        // the audit schema unchanged.
+        userAgent: `from=${prev}; to=${newLevel}; reason=derived_state_change`,
+      });
+      if (LEVEL_RANK[newLevel] > LEVEL_RANK[prev]) {
+        recordAudit(storage, {
+          userId,
+          action: "user_notified_security_state",
+          ipAddress,
+          userAgent: `level=${newLevel}`,
+        });
+      }
+    }
+  } catch {
+    // Transition logging is purely diagnostic. A failure here must
+    // NOT block the response — newLevel was already computed above.
+  }
+  return newLevel;
 }
 
 // ---------------------------------------------------------------------------
@@ -780,6 +952,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // blocked"; blockedUntil lets the UI show a countdown.
           userAgent: `attemptedAction=sync; blockedUntil=${lockedUntil}`,
         });
+        // Mirror to in-memory anomaly signal so deriveSecurityLevel
+        // can surface "elevated" for ANOMALY_RECENT_WINDOW_MS after
+        // the lock expires — matches the hasRecentAnomalies semantics
+        // exposed by GET /api/vault/audit.
+        recordSecuritySignalHit(userId, auth.sessionId, false);
         return res
           .status(423)
           .json({ error: "Vault temporarily locked due to suspicious activity" });
@@ -846,6 +1023,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         if (auth.sessionId) {
           void storage.markSessionSuspicious(auth.sessionId);
         }
+        // In-memory mirror for the security-level system. flagSession
+        // = true so deriveSecurityLevel can surface "high" without a
+        // DB lookup for the rest of this session's life.
+        recordSecuritySignalHit(userId, auth.sessionId, true);
       }
       if (signal.ipChangeFromIp) {
         recordAudit(storage, {
@@ -921,6 +1102,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         if (auth.sessionId) {
           void storage.markSessionSuspicious(auth.sessionId);
         }
+        recordSecuritySignalHit(userId, auth.sessionId, true);
       }
       if (signal.ipChangeFromIp) {
         recordAudit(storage, {
@@ -938,14 +1120,29 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         triggerSoftLock(userId);
       }
 
+      // Compute + log security level transition just before the
+      // response. Done AFTER all the anomaly hooks above so the level
+      // reflects the state INCLUDING any escalation this request just
+      // caused (e.g. a fetch that crossed the rate-spike threshold
+      // returns securityLevel="critical" right away).
+      const securityLevel = evaluateSecurityLevel(
+        userId,
+        auth.sessionId,
+        ip,
+        storage,
+      );
+
       if (!blob) {
-        return res.status(200).json({ encryptedBlob: null, version: 0 });
+        return res
+          .status(200)
+          .json({ encryptedBlob: null, version: 0, securityLevel });
       }
 
       return res.status(200).json({
         encryptedBlob: blob.encryptedBlob,
         version: blob.version,
         updatedAt: blob.updatedAt,
+        securityLevel,
       });
     } catch (err) {
       console.error("Vault fetch error");
@@ -1024,6 +1221,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           ipAddress: getClientIp(req),
           userAgent: `attemptedAction=restore; blockedUntil=${restoreLockedUntil}`,
         });
+        recordSecuritySignalHit(userId, auth.sessionId, false);
         return res
           .status(423)
           .json({ error: "Vault temporarily locked due to suspicious activity" });
@@ -1202,7 +1400,21 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
 
       const list = await storage.listActiveSessionsForUser(auth.userId);
-      return res.status(200).json(list);
+      // Compute + log security level transition. Sessions endpoint is
+      // a natural place to surface this because the UI typically reads
+      // it on app open / "security center" view.
+      //
+      // RESPONSE SHAPE CHANGE: previously this endpoint returned the
+      // sessions array directly; spec mandates wrapping in
+      // { sessions, securityLevel }. Documented in commit message —
+      // this is the only spec-mandated breaking change in this task.
+      const securityLevel = evaluateSecurityLevel(
+        auth.userId,
+        auth.sessionId,
+        getClientIp(req),
+        storage,
+      );
+      return res.status(200).json({ sessions: list, securityLevel });
     } catch (err) {
       console.error("List-sessions error");
       return res.status(500).json({ error: "Internal server error" });
@@ -1265,7 +1477,17 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             e.action === "write_blocked_soft_lock") &&
           e.createdAt >= tenMinAgo,
       );
-      return res.status(200).json({ entries, hasRecentAnomalies });
+      // Append the unified securityLevel signal. Additive only — does
+      // not affect entries[] or hasRecentAnomalies fields.
+      const securityLevel = evaluateSecurityLevel(
+        auth.userId,
+        auth.sessionId,
+        getClientIp(req),
+        storage,
+      );
+      return res
+        .status(200)
+        .json({ entries, hasRecentAnomalies, securityLevel });
     } catch (err) {
       console.error("Vault audit error");
       return res.status(500).json({ error: "Internal server error" });

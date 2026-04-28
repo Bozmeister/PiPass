@@ -1,0 +1,156 @@
+We are adding a unified SECURITY LEVEL system that feeds the frontend (fractal renderer + UI messaging).
+
+IMPORTANT CONSTRAINTS:
+- DO NOT modify crypto/
+- DO NOT change any existing primary key column types
+- DO NOT break existing API responses (only additive changes allowed, except /api/vault/audit already changed shape)
+- All new logic must be fail-open (never block legitimate access if something fails)
+
+GOAL:
+Create a single backend-derived `securityLevel` signal and expose it to the client, while logging all transitions.
+
+--------------------------------------------------
+
+1. DEFINE SECURITY LEVEL ENUM
+
+In server/routes.ts (near existing anomaly/soft-lock logic):
+
+type SecurityLevel = "normal" | "elevated" | "high" | "critical";
+
+--------------------------------------------------
+
+2. CREATE HELPER: deriveSecurityLevel(userId, sessionId?)
+
+Inputs:
+- userId
+- sessionId (optional)
+
+Use existing in-memory + DB signals:
+
+- If user is soft-locked → "critical"
+- Else if session.suspicious === true → "high"
+- Else if hasRecentAnomalies (last 10 min in memory OR audit log) → "elevated"
+- Else → "normal"
+
+IMPORTANT:
+- Fail-open: if anything errors, return "normal"
+
+--------------------------------------------------
+
+3. TRACK SECURITY LEVEL TRANSITIONS (IN-MEMORY)
+
+Create:
+
+const userSecurityLevelState = new Map<string, {
+  currentLevel: SecurityLevel,
+  lastChangedAt: number
+}>();
+
+When deriveSecurityLevel produces a DIFFERENT level than stored:
+
+- Update the map
+- Fire-and-forget logAuditEvent:
+
+action: "security_level_changed"
+
+metadata:
+{
+  from: previousLevel,
+  to: newLevel,
+  reason: "derived_state_change"
+}
+
+--------------------------------------------------
+
+4. EXPOSE securityLevel IN API RESPONSES
+
+ADD (do not replace existing fields):
+
+A) GET /api/vault/audit
+Return shape becomes:
+
+{
+  entries: [...],
+  hasRecentAnomalies: boolean,
+  securityLevel: SecurityLevel
+}
+
+B) GET /api/vault/fetch
+Add:
+
+{
+  encryptedBlob: "...",
+  version: number,
+  securityLevel: SecurityLevel
+}
+
+C) GET /api/auth/sessions
+Add:
+
+{
+  sessions: [...],
+  securityLevel: SecurityLevel
+}
+
+--------------------------------------------------
+
+5. ADD USER-NOTIFICATION AUDIT EVENT (ON ESCALATION ONLY)
+
+When level increases:
+
+normal → elevated
+elevated → high
+high → critical
+
+Log:
+
+action: "user_notified_security_state"
+
+metadata:
+{
+  level: newLevel
+}
+
+DO NOT log on downgrade to avoid noise.
+
+--------------------------------------------------
+
+6. KEEP PERFORMANCE LIGHT
+
+- Do NOT query DB repeatedly
+- Reuse in-memory anomaly + soft-lock state
+- If audit lookup is needed, limit to recent window only (e.g. last 10 minutes)
+
+--------------------------------------------------
+
+7. VERIFICATION
+
+Test scenarios:
+
+1) Normal usage:
+→ securityLevel = "normal"
+
+2) Trigger anomaly:
+→ "elevated"
+→ audit logs: anomaly_detected + security_level_changed + user_notified_security_state
+
+3) Trigger repeated anomaly / suspicious session:
+→ "high"
+
+4) Trigger soft lock:
+→ "critical"
+→ sync/restore returns 423
+
+5) Wait for expiration:
+→ level returns to "normal"
+
+6) Confirm:
+- No crashes if memory resets
+- All responses still return 200/expected shape
+- No sensitive data leaked
+
+--------------------------------------------------
+
+DELIVER:
+- Implementation
+- Summary of how securityLevel flows through the system
