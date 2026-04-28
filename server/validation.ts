@@ -9,13 +9,17 @@ import {
   userIdHeaderSchema,
   authHashHeaderSchema,
   sessionTokenHeaderSchema,
+  totpVerifySchema,
+  totpLoginSchema,
   type RegisterInput,
   type LoginInput,
   type VaultSyncInput,
+  type TotpVerifyInput,
+  type TotpLoginInput,
 } from "../shared/schema";
 import type { z } from "zod";
 
-export type { RegisterInput, LoginInput, VaultSyncInput };
+export type { RegisterInput, LoginInput, VaultSyncInput, TotpVerifyInput, TotpLoginInput };
 export type VaultRestoreInput = z.infer<typeof vaultRestoreSchema>;
 
 export type Result<T> =
@@ -29,6 +33,11 @@ const FIELD_LABEL: Record<string, string> = {
   iterations: "iterations",
   encryptedBlob: "blob",
   version: "version",
+  // TOTP fields. Surfacing the exact name in the 400 error is fine here:
+  // both `token` and `tempToken` are public request-shape concerns, not
+  // sensitive values (the user already knows what they sent).
+  token: "token",
+  tempToken: "tempToken",
 };
 
 function issueToError(issue: ZodIssue): string {
@@ -66,6 +75,17 @@ export function validateVaultSync(body: unknown): Result<VaultSyncInput> {
 
 export function validateVaultRestore(body: unknown): Result<VaultRestoreInput> {
   return parse(body, vaultRestoreSchema);
+}
+
+// TOTP body validators — same parse helper as every other endpoint so
+// the "Unknown field" / "Invalid <field>" / "Invalid body" error
+// shapes stay uniform across the API.
+export function validateTotpVerify(body: unknown): Result<TotpVerifyInput> {
+  return parse(body, totpVerifySchema);
+}
+
+export function validateTotpLogin(body: unknown): Result<TotpLoginInput> {
+  return parse(body, totpLoginSchema);
 }
 
 export function validateUsernameParam(value: unknown): Result<string> {

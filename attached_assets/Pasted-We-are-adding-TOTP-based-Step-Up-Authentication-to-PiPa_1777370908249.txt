@@ -1,0 +1,199 @@
+We are adding TOTP-based Step-Up Authentication to PiPass.
+
+STRICT RULES:
+- DO NOT modify crypto/
+- DO NOT change any existing primary key column types
+- Schema changes must be ADDITIVE ONLY
+- System must remain fail-open (no permanent lockout)
+- NEVER log secrets (TOTP secret, auth hash, session token, vault data)
+
+----------------------------------------
+OBJECTIVE
+----------------------------------------
+
+Introduce optional TOTP (Time-based One-Time Password) as a second factor.
+
+This will:
+1. Allow users to enable 2FA
+2. Require TOTP during login (if enabled)
+3. Require TOTP for sensitive actions (step-up auth)
+4. Integrate with securityLevel + device trust
+
+----------------------------------------
+T1 — Schema (ADDITIVE ONLY)
+----------------------------------------
+
+Extend users table:
+
+ADD COLUMN totp_enabled boolean DEFAULT false
+ADD COLUMN totp_secret_encrypted text
+
+Notes:
+- Secret MUST be encrypted server-side using an existing server secret
+- DO NOT store raw TOTP secret
+
+----------------------------------------
+T2 — TOTP Utilities
+----------------------------------------
+
+Add utility (server-side):
+
+- generateTOTPSecret() → base32 string
+- verifyTOTP(secret, token) → boolean
+
+Use a standard library (e.g. otplib)
+
+----------------------------------------
+T3 — Enable TOTP Flow
+----------------------------------------
+
+Endpoint:
+
+POST /api/auth/totp/setup
+
+Auth required
+
+Flow:
+1. Generate TOTP secret
+2. Return:
+   - secret (base32)
+   - otpauth URL (for QR apps)
+
+DO NOT persist yet
+
+----------------------------------------
+
+POST /api/auth/totp/verify
+
+Auth required
+
+Body:
+{ token: string }
+
+If valid:
+- Encrypt + store secret
+- Set totp_enabled = true
+- Log: "totp_enabled"
+
+----------------------------------------
+T4 — Login Step-Up
+----------------------------------------
+
+Modify /api/auth/login:
+
+If totp_enabled === true:
+
+Return:
+{
+  requiresTOTP: true,
+  tempToken: short-lived token (NOT session token)
+}
+
+Then require:
+
+POST /api/auth/totp/login
+
+Body:
+{ tempToken, token }
+
+If valid:
+→ issue normal session token
+
+----------------------------------------
+T5 — Step-Up for Sensitive Actions
+----------------------------------------
+
+Require TOTP for:
+
+- POST /api/vault/restore
+- POST /api/vault/sync (ONLY if securityLevel ≥ high OR untrusted device)
+
+Flow:
+
+If TOTP required but not provided:
+
+Return:
+401 { error: "TOTP required" }
+
+Client then calls:
+
+POST /api/auth/totp/step-up
+
+Body:
+{ token }
+
+On success:
+→ mark session as "2fa_verified" for 5 minutes
+
+----------------------------------------
+T6 — Session Extension (ADDITIVE)
+----------------------------------------
+
+Extend sessions table:
+
+ADD COLUMN totp_verified_until bigint
+
+Meaning:
+- Timestamp until which step-up is valid
+
+----------------------------------------
+T7 — Security Integration
+----------------------------------------
+
+Modify logic:
+
+IF:
+- securityLevel ≥ high
+OR
+- deviceTrusted === false
+
+THEN:
+→ require TOTP for writes
+
+----------------------------------------
+T8 — Audit Logging
+----------------------------------------
+
+Log events:
+
+- totp_enabled
+- totp_login_success
+- totp_login_failure
+- totp_step_up_success
+- totp_step_up_failure
+
+----------------------------------------
+T9 — Safety Rules
+----------------------------------------
+
+Ensure:
+
+- User can still login without TOTP if not enabled
+- Failed TOTP does NOT lock account permanently
+- TOTP attempts are rate limited
+- Secrets never logged or returned after setup
+
+----------------------------------------
+VERIFICATION
+----------------------------------------
+
+1. Enable TOTP → QR works
+2. Login → requiresTOTP=true
+3. Submit correct code → session issued
+4. Submit wrong code → denied
+5. Attempt restore without TOTP → 401
+6. Step-up with TOTP → restore works
+7. Wait 5 min → step-up expires
+8. Audit log contains all events
+
+----------------------------------------
+DELIVERABLE
+----------------------------------------
+
+Minimal diff across:
+
+- shared/schema.ts (additive columns only)
+- server/routes.ts (flows)
+- server/storage.ts (fields + helpers)
+
+No breaking API changes except additive fields.

@@ -174,6 +174,26 @@ export interface IStorage {
   // trusted session is a no-op single-column UPDATE.
   markSessionTrusted(sessionId: string): Promise<void>;
 
+  // Persist a freshly-verified TOTP secret AND flip the user's
+  // totp_enabled flag in a single atomic UPDATE. We deliberately
+  // combine the two writes: a partial outcome (secret stored but flag
+  // not flipped, or vice versa) would leave the user in an unusable
+  // state. Returns void on success; on DB error the call rejects
+  // (caller surfaces 500) — UNLIKE the fire-and-forget audit/trust
+  // helpers, this one IS on the critical path of /totp/verify and
+  // must not silently succeed.
+  setTotpEnabled(userId: string, encryptedSecret: string): Promise<void>;
+
+  // Mirror the session column written by POST /api/auth/totp/step-up.
+  // Same fail-open contract as markSessionTrusted / markSessionSuspicious:
+  // MUST NOT throw — implementations swallow internally and only log.
+  // Called fire-and-forget AFTER the route has already issued its 200.
+  // Idempotent: calling it twice with the same `until` is a no-op.
+  // Returns true if the session row was updated, false if the DB
+  // write failed. Routes MUST treat false as a hard failure (500) —
+  // see implementation note on DatabaseStorage.markSessionTotpVerified.
+  markSessionTotpVerified(sessionId: string, until: number): Promise<boolean>;
+
   // Set sessions.suspicious = true. Same fail-open contract as
   // logAuditEvent: this method MUST NOT throw — implementations
   // swallow all errors internally. Called fire-and-forget from the
@@ -635,6 +655,51 @@ export class DatabaseStorage implements IStorage {
       )
       .limit(1);
     return rows.length > 0;
+  }
+
+  // Atomic enable: write encrypted secret AND flip the flag in a
+  // single UPDATE so the row is never observed in a half-enabled
+  // state. Throws on DB error (unlike the fail-open trust/suspicious
+  // helpers) — see IStorage.setTotpEnabled doc for why.
+  async setTotpEnabled(
+    userId: string,
+    encryptedSecret: string,
+  ): Promise<void> {
+    await db
+      .update(users)
+      .set({
+        totpEnabled: true,
+        totpSecretEncrypted: encryptedSecret,
+      })
+      .where(eq(users.id, userId));
+  }
+
+  // Step-up persistence MUST be reliable: returning success when the
+  // column was not actually written would leave the user staring at
+  // "verified" UI while the very next write 401s on the gate. We
+  // catch + log the error (no raw message: same redaction discipline
+  // as the other session writers) but return false so the route can
+  // surface 500 and the user can retry. The audit row is still the
+  // durable record of attempted step-up, but the cache column is
+  // load-bearing for the gate to function — fail-closed wins here.
+  async markSessionTotpVerified(
+    sessionId: string,
+    until: number,
+  ): Promise<boolean> {
+    try {
+      await db
+        .update(sessions)
+        .set({ totpVerifiedUntil: until })
+        .where(eq(sessions.id, sessionId));
+      return true;
+    } catch (err) {
+      const errType =
+        err instanceof Error ? err.constructor.name : typeof err;
+      console.error(
+        `markSessionTotpVerified failed for ${sessionId}: ${errType}`,
+      );
+      return false;
+    }
   }
 
   // Fail-open per IStorage contract — same shape as markSessionSuspicious.

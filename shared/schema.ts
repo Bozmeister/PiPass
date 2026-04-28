@@ -14,6 +14,25 @@ export const users = pgTable(
     createdAt: bigint("created_at", { mode: "number" })
       .notNull()
       .$defaultFn(() => Date.now()),
+    // TOTP (RFC 6238) second-factor state. Both columns are additive,
+    // nullable / default-false so old rows pre-feature continue to work
+    // unchanged: a user with totpEnabled=null|false is treated as
+    // "TOTP not enabled" and the entire 2FA path is skipped for them.
+    //
+    // totpEnabled is the source of truth for "does this user have 2FA
+    // turned on" — it's only set TRUE after POST /api/auth/totp/verify
+    // proves the user holds the secret (so we never enable 2FA on a
+    // half-finished setup that would lock the user out).
+    totpEnabled: boolean("totp_enabled").default(false),
+    // Encrypted form of the user's TOTP shared secret (base32 raw secret
+    // wrapped via AES-256-GCM with a per-deployment key — see
+    // server/totp.ts encryptTotpSecret). Stored ONLY as ciphertext: a
+    // database leak therefore cannot be replayed against the user's
+    // authenticator app. NULL until the user completes setup; reset to
+    // NULL on disable. We deliberately do NOT store the plaintext or any
+    // hash of the secret — verification re-derives the TOTP token from
+    // the decrypted secret on demand.
+    totpSecretEncrypted: text("totp_secret_encrypted"),
   },
   (table) => [
     check(
@@ -138,6 +157,16 @@ export const sessions = pgTable(
     // surface as false to the client (see DatabaseStorage.listActiveSessionsForUser
     // for the coercion).
     trusted: boolean("trusted").default(false),
+    // Step-up TOTP timestamp (epoch-ms): the session is considered
+    // "2FA-verified for sensitive writes" while Date.now() < this value.
+    // Set by POST /api/auth/totp/step-up to now + STEP_UP_TTL_MS (5 min)
+    // and consulted on /api/vault/sync (when securityLevel >= high or
+    // device untrusted) and /api/vault/restore (always). Nullable so old
+    // pre-feature rows surface as "never step-up verified" — the safe
+    // default. We deliberately do NOT clear this column on logout —
+    // the row is deleted with the session, and on a fresh login a new
+    // row is created with NULL anyway.
+    totpVerifiedUntil: bigint("totp_verified_until", { mode: "number" }),
   },
   (table) => [
     index("sessions_user_expires_idx").on(table.userId, table.expiresAt),
@@ -293,6 +322,44 @@ export const sessionTokenHeaderSchema = z
   .length(64)
   .regex(/^[0-9a-fA-F]+$/);
 
+// TOTP token shape — RFC 6238 default (6 digits, decimal). Strict regex
+// instead of length()+isNumeric so something like "0123ab" trips the
+// validator early instead of reaching otplib.authenticator.check (which
+// would also reject it, but with a less specific error).
+export const totpTokenSchema = z
+  .string()
+  .regex(/^\d{6}$/, "TOTP token must be 6 digits");
+
+// Temp token returned by /api/auth/login when TOTP is required. Same
+// shape as a session token (32 random bytes, hex-encoded) so we can
+// re-use the same client-side validation pattern. The temp token is
+// NOT a session token — it cannot authenticate any other endpoint and
+// is single-use, consumed by /api/auth/totp/login.
+export const totpTempTokenSchema = z
+  .string()
+  .length(64)
+  .regex(/^[0-9a-fA-F]+$/);
+
+// Body for POST /api/auth/totp/verify (enable flow) and
+// /api/auth/totp/step-up (sensitive-action gate). .strict() so unknown
+// fields are rejected — mirrors every other request schema in this file.
+export const totpVerifySchema = z
+  .object({
+    token: totpTokenSchema,
+  })
+  .strict();
+
+// Body for POST /api/auth/totp/login. Combines the temp token issued
+// by the password phase with the user's current authenticator code.
+export const totpLoginSchema = z
+  .object({
+    tempToken: totpTempTokenSchema,
+    token: totpTokenSchema,
+  })
+  .strict();
+
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type VaultSyncInput = z.infer<typeof vaultSyncSchema>;
+export type TotpVerifyInput = z.infer<typeof totpVerifySchema>;
+export type TotpLoginInput = z.infer<typeof totpLoginSchema>;
