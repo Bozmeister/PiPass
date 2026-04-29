@@ -1,0 +1,164 @@
+TASK: Build Security Dashboard UI (Devices, Passkeys, Threat State)
+
+CONSTRAINTS:
+
+DO NOT modify backend APIs
+DO NOT expose sensitive data
+UI must gracefully handle missing fields (fail-open)
+Must support:
+- threatLevel
+- recoveryMode
+- securityLevel
+- device trust
+- passkeys
+
+FILES (frontend):
+
+app/(tabs)/settings/security.tsx (new screen)
+components/security/
+
+---
+
+### T001 — Create Security Screen
+
+DISPLAY:
+
+- Security Level (normal / elevated / high / critical)
+- Threat Level (0–100 visual bar)
+- Recovery Mode banner (if active)
+
+UI:
+
+- color mapping:
+  normal → green
+  elevated → yellow
+  high → orange
+  critical → red
+
+---
+
+### T002 — Fetch Data
+
+CALL:
+
+GET /api/vault/audit
+GET /api/security/devices
+GET /api/passkeys
+
+STORE:
+
+- entries
+- devices
+- passkeys
+- hasRecentAnomalies
+- securityLevel
+- threatLevel
+- recoveryMode
+
+---
+
+### T003 — Devices Section
+
+LIST:
+
+- label OR "Unnamed device"
+- lastSeenAt (formatted: "5 min ago")
+- trusted / untrusted badge
+
+ACTIONS:
+
+- Trust button (if untrusted)
+- Revoke trust button (if trusted)
+
+CALL:
+
+POST /api/security/device/trust
+POST /api/security/device/revoke
+
+---
+
+### T004 — Passkeys Section
+
+LIST:
+
+- deviceName
+- lastUsedAt
+
+ACTIONS:
+
+- Revoke
+
+CALL:
+
+POST /api/passkeys/revoke
+
+---
+
+### T005 — Step-Up Handling
+
+IF API returns:
+
+401 "Step-up required"
+
+THEN:
+
+- trigger existing step-up flow (TOTP or passkey)
+- retry action after success
+
+---
+
+### T006 — Recovery Mode Banner
+
+IF recoveryMode === true:
+
+SHOW:
+
+"⚠️ Suspicious activity detected. Some actions are restricted."
+
+BUTTON:
+
+"Acknowledge"
+
+CALL:
+
+POST /api/security/acknowledge
+
+---
+
+### T007 — Visual Canary Integration
+
+MAP threatLevel:
+
+0–30 → calm green
+30–60 → yellow pulse
+60–90 → orange flicker
+90–100 → red unstable
+
+(Use subtle animation — NOT distracting)
+
+---
+
+### T008 — Optimistic UI
+
+- update trust state immediately
+- rollback if API fails
+
+---
+
+### T009 — Error Handling
+
+- never expose raw backend errors
+- show generic messages:
+  "Action failed. Please try again."
+
+---
+
+### T010 — UX Polish
+
+- group sections:
+  - Security Status
+  - Devices
+  - Passkeys
+- loading skeletons
+- empty states:
+  "No passkeys registered"

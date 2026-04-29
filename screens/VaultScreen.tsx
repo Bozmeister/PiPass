@@ -700,7 +700,22 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
               />
             </View>
 
-            <Pressable onPress={onLock} style={{ backgroundColor: "#1a1a1a", padding: 16, borderRadius: 12, alignItems: "center", marginTop: 30 }}>
+            <Pressable
+              onPress={() => {
+                setShowSettings(false);
+                router.push("/settings/security");
+              }}
+              style={{ backgroundColor: "#0f0f0f", padding: 16, borderRadius: 12, marginTop: 24, borderWidth: 1, borderColor: "#1a1a1a", flexDirection: "row", alignItems: "center", gap: 12 }}
+            >
+              <Ionicons name="shield-checkmark-outline" size={20} color="#00ff9f" />
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" as const }}>Security &amp; Devices</Text>
+                <Text style={{ color: "#888", fontSize: 12, marginTop: 2 }}>Review threat status, devices and passkeys</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color="#666" />
+            </Pressable>
+
+            <Pressable onPress={onLock} style={{ backgroundColor: "#1a1a1a", padding: 16, borderRadius: 12, alignItems: "center", marginTop: 12 }}>
               <Ionicons name="lock-closed-outline" size={20} color="#ef4444" style={{ marginBottom: 6 }} />
               <Text style={{ color: "#ef4444", fontWeight: "600" as const, fontSize: 16 }}>Lock Vault Now</Text>
             </Pressable>
