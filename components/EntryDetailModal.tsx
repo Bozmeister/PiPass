@@ -7,6 +7,8 @@ import { VaultEntry, DecryptedVaultEntry } from "../workers/vaultWorker";
 import FractalBackground from "./FractalBackground";
 import FaviconImage from "./FaviconImage";
 import { FractalParams } from "../crypto/hkdf";
+import { fireHoneytokenTrigger } from "../lib/honeytokenTrigger";
+import type { HoneytokenTriggerContext } from "./security/api";
 
 const CLIPBOARD_CLEAR_MS = 30000;
 
@@ -47,6 +49,43 @@ export default function EntryDetailModal({
     };
   }, []);
 
+  // T004 — View trigger.
+  //
+  // Fires once per entry-open when a decoy's marker first becomes
+  // available. We track the entry id we've already pinged for so
+  // re-renders (e.g. user toggling showPassword) don't spam the
+  // backend; the trigger module also dedupes by (markerHash, context)
+  // as a defense in depth.
+  //
+  // The spec REQUIRES this be silent — no UI is changed here, no
+  // user-facing alert is raised. The only side effect is a network
+  // call to /api/security/honeytokens/trigger which causes the
+  // Security Dashboard's audit query to refresh in the background.
+  const viewTriggeredEntryIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!visible) {
+      viewTriggeredEntryIdRef.current = null;
+      return;
+    }
+    if (!decryptedEntry) return;
+    if (!decryptedEntry.isHoneytoken || !decryptedEntry.honeytokenMarker) return;
+    if (viewTriggeredEntryIdRef.current === decryptedEntry.id) return;
+    viewTriggeredEntryIdRef.current = decryptedEntry.id;
+    fireHoneytokenTrigger(decryptedEntry.honeytokenMarker, "view");
+  }, [visible, decryptedEntry]);
+
+  // Maps the EntryDetailModal's internal field names to the
+  // canonical context strings the backend expects (T004 spec).
+  // "url" -> "copy_url" (not in the spec's enumeration but the
+  // backend accepts any 1-128 char string; we keep it short and
+  // pattern-consistent).
+  function copyContextFor(fieldName: string): HoneytokenTriggerContext | null {
+    if (fieldName === "password") return "copy_password";
+    if (fieldName === "username") return "copy_username";
+    if (fieldName === "url") return "copy_url";
+    return null;
+  }
+
   async function handleCopy(value: string, fieldName: string) {
     try {
       await Clipboard.setStringAsync(value);
@@ -61,6 +100,18 @@ export default function EntryDetailModal({
         } catch {}
         clipboardTimerRef.current = null;
       }, CLIPBOARD_CLEAR_MS);
+
+      // T004 — Copy trigger. Silent, fire-and-forget. Only fires
+      // for honeytoken entries; no-op for normal entries. Placed
+      // AFTER the clipboard write so a clipboard failure short-
+      // circuits the trigger too (no user-visible action = no
+      // alert worth raising).
+      if (decryptedEntry?.isHoneytoken && decryptedEntry.honeytokenMarker) {
+        const ctx = copyContextFor(fieldName);
+        if (ctx) {
+          fireHoneytokenTrigger(decryptedEntry.honeytokenMarker, ctx);
+        }
+      }
     } catch {}
   }
 

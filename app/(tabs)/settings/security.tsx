@@ -435,6 +435,40 @@ export default function SecurityScreen() {
           </View>
         )}
 
+        {/* Section: Decoys (honeytokens) — entry point to the
+            management screen (app/(tabs)/settings/honeytokens.tsx).
+            Shown as a single nav row rather than embedding the list
+            inline so the dashboard stays scannable. The fractal
+            already reacts to triggered decoys via SecurityContext,
+            so there's no extra "alerts" widget here. */}
+        <SectionHeading>Decoys</SectionHeading>
+        <Pressable
+          onPress={() => router.push("/settings/honeytokens")}
+          accessibilityRole="button"
+          accessibilityLabel="Manage decoy entries"
+          style={({ pressed }) => ({
+            backgroundColor: "#0f0f0f",
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: "#1a1a1a",
+            padding: 14,
+            flexDirection: "row",
+            alignItems: "center",
+            opacity: pressed ? 0.7 : 1,
+          })}
+        >
+          <Ionicons name="shield-half-outline" size={20} color="#9be3b6" />
+          <View style={{ marginLeft: 12, flex: 1 }}>
+            <Text style={{ color: "#fff", fontSize: 14, fontWeight: "500" as const }}>
+              Decoy Entries
+            </Text>
+            <Text style={{ color: "#888", fontSize: 12, marginTop: 2 }}>
+              Plant fake vault items that quietly raise alerts when touched.
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color="#666" />
+        </Pressable>
+
         {/* Section: Activity (T007 — last anomaly readout) */}
         <SectionHeading>Activity</SectionHeading>
         <View

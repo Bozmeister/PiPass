@@ -1,0 +1,212 @@
+TASK: Add client-side honeytoken decoy UX + trigger hooks
+
+OBJECTIVE:
+Connect the backend honeytoken/deception layer to the mobile app so users can create decoy vault entries and PiPass can trigger alerts when a decoy is interacted with.
+
+STRICT CONSTRAINTS:
+- DO NOT modify crypto/
+- DO NOT weaken vault encryption
+- DO NOT store plaintext secrets server-side
+- DO NOT change existing backend schemas
+- Decoy entries must live inside the encrypted vault blob like normal entries
+- Honeytoken marker must be random and client-generated
+- Server only receives SHA-256(marker)
+
+--------------------------------------------------
+T001 — Add Decoy Entry Model
+--------------------------------------------------
+
+Extend the client-side vault entry type only.
+
+Add optional fields:
+
+isHoneytoken?: boolean
+honeytokenMarker?: string
+honeytokenId?: string
+
+Rules:
+- honeytokenMarker is stored only inside the encrypted vault blob
+- server never receives honeytokenMarker
+- server receives only markerHash = SHA-256(honeytokenMarker)
+
+Do not change server crypto.
+
+--------------------------------------------------
+T002 — Create Decoy Entry Flow
+--------------------------------------------------
+
+Add UI action:
+
+“Create Decoy Entry”
+
+Suggested locations:
+- Security Dashboard
+- Vault item add menu
+- Honeytokens management screen
+
+When selected:
+
+1. Generate random honeytokenMarker locally
+2. Create a realistic-looking decoy vault entry locally, for example:
+   - title: “Backup Crypto Wallet”
+   - username: “recovery”
+   - password: random fake password
+   - url: “https://wallet-backup.example”
+   - notes: “Emergency recovery”
+3. Add:
+   isHoneytoken: true
+   honeytokenMarker
+4. Compute markerHash = SHA-256(honeytokenMarker)
+5. Call:
+   POST /api/security/honeytokens
+   {
+     label,
+     tokenType: "vault_entry",
+     markerHash
+   }
+6. Save updated encrypted vault blob normally
+
+IMPORTANT:
+- If backend registration fails, do NOT save the decoy entry
+- If vault save fails, disable/delete the honeytoken metadata if possible, or show user an error
+
+--------------------------------------------------
+T003 — Honeytoken Management Screen
+--------------------------------------------------
+
+Create UI screen:
+
+Security → Decoys / Honeytokens
+
+Display:
+- label
+- tokenType
+- active
+- triggerCount
+- triggeredAt
+- createdAt
+
+Actions:
+- Create Decoy Entry
+- Disable Decoy
+
+Call:
+GET /api/security/honeytokens
+POST /api/security/honeytokens/disable
+
+Do NOT display markerHash.
+
+--------------------------------------------------
+T004 — Trigger Hooks
+--------------------------------------------------
+
+When user interacts with a vault entry:
+
+If entry.isHoneytoken === true:
+
+Call:
+POST /api/security/honeytokens/trigger
+{
+  markerHash: SHA-256(entry.honeytokenMarker),
+  context: "view" | "copy_password" | "copy_username" | "autofill" | "export"
+}
+
+Trigger on:
+- opening/viewing entry details
+- copying password
+- copying username
+- autofill use
+- export / backup including that entry
+
+Rules:
+- Trigger request must be fire-and-forget
+- Do NOT block UI
+- Do NOT reveal to the user immediately that it was a decoy unless already in Security Dashboard
+- Do NOT send real entry contents
+
+--------------------------------------------------
+T005 — Visual Feedback Integration
+--------------------------------------------------
+
+After a honeytoken trigger response:
+
+If triggered === true:
+- refresh security state
+- fractal canary should shift according to backend threatLevel/securityLevel
+- do NOT show scary modal immediately on normal vault screen
+
+In Security Dashboard:
+Show:
+“Decoy entry was accessed”
+“Your vault has entered protective monitoring mode”
+
+--------------------------------------------------
+T006 — Disable Decoy Flow
+--------------------------------------------------
+
+When user disables a honeytoken:
+
+1. Call backend disable endpoint
+2. Mark corresponding local vault entry:
+   isHoneytoken = false
+   honeytokenMarker = undefined
+   honeytokenId = undefined
+
+OR optionally remove the decoy entry entirely after user confirms.
+
+Require step-up if backend returns:
+401 { "error": "Step-up required" }
+
+--------------------------------------------------
+T007 — Safety / Recovery
+--------------------------------------------------
+
+If local vault contains a honeytoken entry but backend no longer knows it:
+- triggering returns { triggered:false }
+- UI should not crash
+- optionally show “Decoy metadata missing” in Security Dashboard
+
+If backend has honeytoken metadata but local entry was deleted:
+- list screen still shows metadata
+- user can disable it manually
+
+--------------------------------------------------
+T008 — UX Copy
+--------------------------------------------------
+
+Use calm wording:
+
+Title:
+“Decoy Entries”
+
+Description:
+“Decoy entries help detect suspicious access. They look like normal vault entries, but touching one raises a security alert.”
+
+Button:
+“Create Decoy Entry”
+
+Warning:
+“Do not store real information in decoy entries.”
+
+--------------------------------------------------
+T009 — Verification
+--------------------------------------------------
+
+Test:
+
+1. Create decoy entry
+2. Confirm backend honeytoken appears in list
+3. Confirm markerHash is never displayed
+4. Open decoy entry → trigger fires
+5. Copy password → trigger fires
+6. Backend triggerCount increments
+7. Security level / threatLevel updates
+8. Disable decoy → future trigger returns false
+9. Normal vault entries unaffected
+10. No crypto/ changes
+
+--------------------------------------------------
+DELIVER:
+- UI implementation
+- trigger hooks
+- verification report

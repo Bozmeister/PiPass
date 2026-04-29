@@ -5,7 +5,7 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import * as ScreenCapture from "expo-screen-capture";
 import { 
   VaultEntry, 
@@ -38,6 +38,7 @@ import {
 } from "../workers/storageWorker";
 
 import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer } from "../crypto/secureMemory";
+import { setActiveKeyShares } from "../lib/vaultSession";
 import { hashMasterKey } from "../crypto/keyDerivation";
 import { requireFreshBiometric } from "../crypto/biometricGate";
 import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
@@ -130,6 +131,11 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
 
   useEffect(() => {
     keySharesRef.current = keyShares;
+    // Mirror into the cross-screen vault session holder so sibling
+    // routes (e.g. settings/honeytokens) can encrypt/decrypt entries
+    // without re-prompting the user. Passing null on lock clears
+    // (and wipes) the previous shares — see lib/vaultSession.ts.
+    setActiveKeyShares(keyShares);
   }, [keyShares]);
 
   useEffect(() => {
@@ -241,6 +247,39 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       lastActivityRef.current = Date.now();
     }
   }, [locked]);
+
+  // T002 — Reload entries when the Vault tab regains focus.
+  //
+  // The honeytoken management screen (settings/honeytokens) writes
+  // a new decoy directly into shared storage via saveEntry(). With
+  // tab-preserved mount state, VaultScreen wouldn't see that new
+  // entry until the user fully relaunches the app — useFocusEffect
+  // bridges the gap. Skipped while locked because loadVault() also
+  // tries to decrypt a sample entry to verify the key matches, and
+  // there's no key while locked.
+  //
+  // Guarded against the initial mount (loadVault is already called
+  // in the next useEffect) by tracking whether we've seen the
+  // first focus yet — otherwise the first focus would fire two
+  // identical loadVault calls in parallel.
+  const hasSeenFirstFocusRef = useRef(false);
+  useFocusEffect(
+    React.useCallback(() => {
+      if (!hasSeenFirstFocusRef.current) {
+        hasSeenFirstFocusRef.current = true;
+        return;
+      }
+      if (lockedRef.current) return;
+      // Reload silently — no setLoading(true) so the user doesn't
+      // see a flash of the loading state on every tab switch.
+      getAllEntries()
+        .then((stored) => setEntries(stored))
+        .catch(() => {
+          // Silent: a refetch failure is non-fatal; the user can
+          // pull-to-refresh or wait for the next focus.
+        });
+    }, []),
+  );
 
   useEffect(() => {
     loadVault();
@@ -479,6 +518,10 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       wipeBuffer(newKeyBytes);
 
       keySharesRef.current = newShares;
+      // Mirror the rotated shares into the cross-screen holder so
+      // the honeytoken management screen continues to work after
+      // a master-key change without forcing the user to lock/unlock.
+      setActiveKeyShares(newShares);
 
       const newFractal = refreshFractalFromShares(newShares);
       await saveFractalFingerprint({ fingerprint: newFractal.fingerprint, iterations: pendingProfileIterations, kdf: "argon2id", version: 1 });

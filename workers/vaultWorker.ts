@@ -24,6 +24,29 @@ export interface VaultEntry {
   salt: string; // Per-entry salt for HKDF subkey derivation
   createdAt: number;
   updatedAt: number;
+  // T001 — Encrypted auxiliary blob (decoy / honeytoken metadata).
+  //
+  // ZERO-KNOWLEDGE INDISTINGUISHABILITY: a thief who decrypts a
+  // single entry must NOT be able to tell whether it's a real
+  // credential or a decoy without actually using it. Earlier
+  // revisions of this code stored `isHoneytoken: boolean` and
+  // `honeytokenId: string` as plaintext outer fields, which made
+  // every decoy obvious to anyone reading SecureStore — defeating
+  // the entire honeytoken concept. We now bundle ALL decoy
+  // metadata (server row id + 256-bit marker) into a single
+  // encrypted blob and give it a deliberately neutral name
+  // (`encryptedAux`) so the field's mere presence carries no
+  // semantic signal.
+  //
+  // Plaintext shape inside the blob (kept short to minimise
+  // ciphertext-length variation across decoys):
+  //   { "h": 1, "i": <honeytokenId>, "m": <markerHex> }
+  //
+  // Encrypted with the same per-entry HKDF subkey as the password,
+  // so it inherits the same key separation / rotation properties.
+  // The plaintext marker NEVER touches storage; only the in-memory
+  // DecryptedVaultEntry.honeytokenMarker holds it while unlocked.
+  encryptedAux?: string;
 }
 
 export interface DecryptedVaultEntry {
@@ -35,6 +58,13 @@ export interface DecryptedVaultEntry {
   notes?: string;
   createdAt: number;
   updatedAt: number;
+  // T001 — Decrypted honeytoken fields. Present iff the source
+  // VaultEntry is a decoy. Consumers (EntryDetailModal, trigger
+  // hooks) check `isHoneytoken && honeytokenMarker` before firing
+  // the trigger.
+  isHoneytoken?: boolean;
+  honeytokenId?: string;
+  honeytokenMarker?: string;
 }
 
 // Derives master key from password and returns XOR-split shares.
@@ -71,6 +101,18 @@ export function encryptVaultEntry(
     const entryKey = deriveEntryKey(masterKeyHex, entryId, entrySalt);
     const now = Date.now();
 
+    // T001 — Bundle decoy metadata into a single encrypted blob
+    // (see `encryptedAux` field comment). We require BOTH a marker
+    // and a honeytokenId before persisting any aux data; mismatched
+    // state silently coerces to "not a decoy" rather than crashing.
+    const encryptedAux: string | undefined =
+      entry.isHoneytoken && entry.honeytokenMarker && entry.honeytokenId
+        ? encryptData(
+            JSON.stringify({ h: 1, i: entry.honeytokenId, m: entry.honeytokenMarker }),
+            entryKey,
+          )
+        : undefined;
+
     const result: VaultEntry = {
       id: entryId,
       title: entry.title,
@@ -84,6 +126,7 @@ export function encryptVaultEntry(
       salt: entrySalt,
       createdAt: now,
       updatedAt: now,
+      encryptedAux,
     };
 
     const entryKeyBytes = hexToBytes(entryKey);
@@ -120,6 +163,48 @@ export function decryptVaultEntry(
       ? decryptData(entry.encryptedUrl, entryKey)
       : entry.url;
 
+    // T001 — Decrypt the auxiliary blob if present and recover
+    // honeytoken metadata. Decoy state is derived ENTIRELY from
+    // successful decryption + JSON shape validation — there is no
+    // plaintext flag to consult. Defensive about every step:
+    //   - decryptData may throw on key mismatch (post-rotation
+    //     marker would be encrypted with the OLD per-entry key);
+    //     we swallow and degrade to "not a decoy".
+    //   - JSON.parse may throw on garbage; swallow same.
+    //   - Shape validation: must be `{ h: 1, i: <string>, m: <hex> }`.
+    //     Any deviation is treated as "not a decoy" — same calm
+    //     degradation. The trigger hook also checks that
+    //     honeytokenMarker is a non-empty string before firing.
+    let isHoneytoken: boolean | undefined;
+    let honeytokenMarker: string | undefined;
+    let honeytokenId: string | undefined;
+    if (entry.encryptedAux) {
+      try {
+        const decryptedAux = decryptData(entry.encryptedAux, entryKey);
+        if (typeof decryptedAux === "string" && decryptedAux.length > 0) {
+          const parsed = JSON.parse(decryptedAux) as {
+            h?: number;
+            i?: string;
+            m?: string;
+          };
+          if (
+            parsed &&
+            parsed.h === 1 &&
+            typeof parsed.i === "string" &&
+            parsed.i.length > 0 &&
+            typeof parsed.m === "string" &&
+            parsed.m.length > 0
+          ) {
+            isHoneytoken = true;
+            honeytokenId = parsed.i;
+            honeytokenMarker = parsed.m;
+          }
+        }
+      } catch {
+        // Silent — see comment above.
+      }
+    }
+
     const result: DecryptedVaultEntry = {
       id: entry.id,
       title,
@@ -129,6 +214,9 @@ export function decryptVaultEntry(
       notes: entry.notes ? decryptData(entry.notes, entryKey) : undefined,
       createdAt: entry.createdAt,
       updatedAt: entry.updatedAt,
+      isHoneytoken,
+      honeytokenId,
+      honeytokenMarker,
     };
 
     if (entry.salt) {
@@ -156,6 +244,12 @@ export function reEncryptEntry(
       password: decrypted.password,
       url: decrypted.url,
       notes: decrypted.notes,
+      // T001 — Preserve honeytoken status across master-key rotation.
+      // Without this, password changes would silently disarm every
+      // decoy in the user's vault.
+      isHoneytoken: decrypted.isHoneytoken,
+      honeytokenId: decrypted.honeytokenId,
+      honeytokenMarker: decrypted.honeytokenMarker,
     },
     newShares,
     entry.id

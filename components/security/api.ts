@@ -52,6 +52,46 @@ export type PasskeyItem = {
   lastUsedAt: number | null;
 };
 
+// T003 — Honeytoken/decoy management. Mirrors the server-side
+// HoneytokenListItem shape (server/storage.ts) which deliberately
+// EXCLUDES markerHash from the projection — the spec forbids ever
+// displaying it client-side. The four allowed token types come
+// from HONEYTOKEN_TOKEN_TYPES in shared/schema.ts; the client only
+// creates "vault_entry" decoys today, but typing the union keeps
+// us forward-compatible.
+export type HoneytokenTokenType = "vault_entry" | "url" | "note" | "credential";
+
+export type HoneytokenItem = {
+  id: string;
+  label: string;
+  tokenType: HoneytokenTokenType;
+  active: boolean;
+  createdAt: number;
+  triggeredAt: number | null;
+  triggerCount: number;
+};
+
+// T004 — Trigger context strings (spec §T004). Backend clips the
+// value to 1-128 chars via HONEYTOKEN_TRIGGER_BODY zod schema,
+// but typing the union keeps callers honest.
+export type HoneytokenTriggerContext =
+  | "view"
+  | "copy_password"
+  | "copy_username"
+  | "copy_url"
+  | "autofill"
+  | "export";
+
+// Server response shapes. `triggered: false` is returned when the
+// markerHash doesn't match any active honeytoken (T007 — spec
+// requires this to be silent, no crash).
+export type HoneytokenTriggerResponse = {
+  success: boolean;
+  triggered: boolean;
+  triggerCount?: number;
+  softLockedUntil?: number;
+};
+
 // Typed error so the screen can branch:
 //   - `kind: "step-up"` → show "verify your second factor" hint
 //   - `kind: "auth"`    → user actually needs to re-login
@@ -167,7 +207,63 @@ export const securityApi = {
       "POST",
       "/api/vault/recovery/acknowledge",
     ),
+
+  // T003 — Honeytoken management endpoints. The four routes were
+  // built in the prior backend task (server/routes.ts ~4523-4806);
+  // this client just consumes them.
+  //
+  // create:   POST /api/security/honeytokens
+  //           body { label, tokenType, markerHash } → 201 { honeytoken }
+  //           or 409 if markerHash collides with an existing row
+  // disable:  POST /api/security/honeytokens/disable
+  //           body { id } → 200 { success, changed }
+  //           may return 401 with reason="totp"|"passkey" if the
+  //           user has TOTP/passkey enrolled — surfaces as a typed
+  //           SecurityApiError("step-up") via the shared 401 path
+  // trigger:  POST /api/security/honeytokens/trigger
+  //           body { markerHash, context? } → 200 { success, triggered, ... }
+  //           Returns triggered:false (no audit) for unknown hashes
+  //           per T007
+  fetchHoneytokens: () =>
+    securityFetch<{ honeytokens: HoneytokenItem[] }>(
+      "GET",
+      "/api/security/honeytokens",
+    ),
+  createHoneytoken: (input: {
+    label: string;
+    tokenType: HoneytokenTokenType;
+    markerHash: string;
+  }) =>
+    securityFetch<{ honeytoken: HoneytokenItem }>(
+      "POST",
+      "/api/security/honeytokens",
+      input,
+    ),
+  disableHoneytoken: (id: string) =>
+    securityFetch<{ success: boolean; changed: boolean }>(
+      "POST",
+      "/api/security/honeytokens/disable",
+      { id },
+    ),
+  triggerHoneytoken: (input: {
+    markerHash: string;
+    context?: HoneytokenTriggerContext;
+  }) =>
+    securityFetch<HoneytokenTriggerResponse>(
+      "POST",
+      "/api/security/honeytokens/trigger",
+      input,
+    ),
 };
+
+// Surfaces the special 409 case from createHoneytoken so callers
+// can distinguish "marker collision, retry with a fresh marker"
+// from a generic failure. The server returns a JSON body
+// { error: "...", code: "marker_conflict" } with status 409 —
+// here we just expose the status code via SecurityApiError.status.
+export function isMarkerConflict(err: unknown): boolean {
+  return err instanceof SecurityApiError && err.status === 409;
+}
 
 // Simple "5 min ago" relative formatter. Pure, side-effect-free,
 // not localized — sufficient for the dashboard. Returns "just now"
