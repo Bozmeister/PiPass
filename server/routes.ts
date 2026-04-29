@@ -3517,11 +3517,18 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             // /api/passkeys/login/finish. Revoke the credential
             // (best-effort; swallow storage errors so a DB hiccup
             // can't be used to KEEP a compromised credential alive)
-            // and emit BOTH the anomaly event and the failure event
-            // so the audit log shows what happened and that the
-            // step-up itself was denied.
+            // and emit the anomaly, the revocation, and the
+            // step-up failure events so the audit log shows what
+            // happened and that the step-up itself was denied.
+            //
+            // Audit metadata is intentionally MINIMAL: no
+            // credentialId and no public key — those are sensitive
+            // attributes of the credential and have no business in
+            // an audit row. `source=step_up` is enough context for
+            // an operator to tell which flow triggered it.
+            let revoked = false;
             try {
-              await storage.revokeCredential(stored.credentialId);
+              revoked = await storage.revokeCredential(stored.credentialId);
             } catch (revokeErr) {
               console.error(
                 "Failed to revoke credential after counter replay during step-up",
@@ -3531,8 +3538,16 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
               userId,
               action: "passkey_counter_replay_detected",
               ipAddress: clientIp,
-              userAgent: `credentialId=${stored.credentialId}; source=step_up`,
+              userAgent: `source=step_up`,
             });
+            if (revoked) {
+              recordAudit(storage, {
+                userId,
+                action: "passkey_revoked",
+                ipAddress: clientIp,
+                userAgent: `reason=counter_replay; source=step_up`,
+              });
+            }
             recordAudit(storage, {
               userId,
               action: "passkey_step_up_failure",
@@ -4030,8 +4045,14 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // The credential's owner sees both the anomaly and the
           // generic failure rows in their activity log.
           if (verified.code === "counter_replay") {
+            // Same minimal-metadata rule as the step-up flow:
+            // never log credentialId or public key in the audit
+            // userAgent field. The client UA captured at the
+            // request boundary is fine — that's not a sensitive
+            // credential attribute.
+            let revoked = false;
             try {
-              await storage.revokeCredential(stored.credentialId);
+              revoked = await storage.revokeCredential(stored.credentialId);
             } catch (revokeErr) {
               // Revoke is best-effort here — even if it fails the
               // client still sees a 401 and we still emit the audit
@@ -4047,6 +4068,14 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
               ipAddress: clientIp,
               userAgent,
             });
+            if (revoked) {
+              recordAudit(storage, {
+                userId: stored.userId,
+                action: "passkey_revoked",
+                ipAddress: clientIp,
+                userAgent: `reason=counter_replay; source=login`,
+              });
+            }
             recordAudit(storage, {
               userId: stored.userId,
               action: "passkey_login_failure",
