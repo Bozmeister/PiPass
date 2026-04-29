@@ -1,5 +1,15 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { View, Text, ScrollView, Pressable, ActivityIndicator, Alert, Platform, RefreshControl } from "react-native";
+import {
+  View,
+  Text,
+  ScrollView,
+  Pressable,
+  ActivityIndicator,
+  Alert,
+  Platform,
+  RefreshControl,
+  useWindowDimensions,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Ionicons } from "@expo/vector-icons";
@@ -7,6 +17,7 @@ import { useRouter } from "expo-router";
 import {
   securityApi,
   SecurityApiError,
+  relativeTime,
   type DeviceItem,
   type PasskeyItem,
 } from "../../../components/security/api";
@@ -14,6 +25,17 @@ import SecurityStatus from "../../../components/security/SecurityStatus";
 import RecoveryBanner from "../../../components/security/RecoveryBanner";
 import DeviceRow from "../../../components/security/DeviceRow";
 import PasskeyRow from "../../../components/security/PasskeyRow";
+import AnimatedFractalView from "../../../components/AnimatedFractalView";
+import { useSecurityState } from "../../../context/SecurityContext";
+import { DEFAULT_FRACTAL_PARAMS } from "../../../crypto/hkdf";
+
+// T007 — Hero fractal seed. The dashboard's fractal is meant to
+// visualize SECURITY STATE rather than user identity (the per-user
+// keyprint lives on vault entries). A constant seed gives every
+// user the same recognizable shape; what changes between accounts
+// — and over time — is the color/glow/distortion driven by
+// SecurityContext.
+const DASHBOARD_FRACTAL_SEED = 8675309;
 
 // Security Dashboard screen (T001-T010).
 //
@@ -109,6 +131,12 @@ export default function SecurityScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const qc = useQueryClient();
+  const { width } = useWindowDimensions();
+  // Hero fractal sized to fit comfortably on phone & tablet. Capped
+  // so it never dominates a wide screen (web/tablet).
+  const heroFractalSize = Math.min(width - 64, 260);
+  // T002 — single source of truth for the fractal's reactive params.
+  const securityState = useSecurityState();
 
   // T002 — Three independent fetches. Each one's loading state is
   // surfaced separately so a slow audit endpoint doesn't blank the
@@ -308,6 +336,45 @@ export default function SecurityScreen() {
           <RecoveryBanner acknowledging={ackMut.isPending} onAcknowledge={() => ackMut.mutate()} />
         ) : null}
 
+        {/* T007 — Hero fractal. Reads SecurityState directly so its
+            color/glow/distortion always agrees with the data shown
+            in the sections below it. The fractal itself is the only
+            thing on screen that visualises the live state — the
+            text/bar/list reflect the same query but in numeric form. */}
+        <View
+          style={{
+            alignItems: "center",
+            paddingVertical: 12,
+          }}
+        >
+          <View
+            style={{
+              width: heroFractalSize,
+              height: heroFractalSize,
+              borderRadius: heroFractalSize / 2,
+              overflow: "hidden",
+              borderWidth: 2,
+              borderColor: "rgba(0,255,159,0.4)",
+              ...(Platform.OS === "web"
+                ? { boxShadow: "0 0 30px rgba(0,255,159,0.35)" as any }
+                : {
+                    shadowColor: "#00ff9f",
+                    shadowOffset: { width: 0, height: 0 },
+                    shadowOpacity: 0.4,
+                    shadowRadius: 20,
+                    elevation: 12,
+                  }),
+            }}
+          >
+            <AnimatedFractalView
+              seed={DASHBOARD_FRACTAL_SEED}
+              fractalParams={DEFAULT_FRACTAL_PARAMS}
+              size={heroFractalSize}
+              securityState={securityState}
+            />
+          </View>
+        </View>
+
         {/* Section: Security Status (T001 + T007) */}
         <SectionHeading>Security Status</SectionHeading>
         {auditQ.isLoading ? (
@@ -367,6 +434,38 @@ export default function SecurityScreen() {
             ))}
           </View>
         )}
+
+        {/* Section: Activity (T007 — last anomaly readout) */}
+        <SectionHeading>Activity</SectionHeading>
+        <View
+          style={{
+            backgroundColor: "#0f0f0f",
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: "#1a1a1a",
+            padding: 14,
+            flexDirection: "row",
+            alignItems: "center",
+          }}
+        >
+          <Ionicons
+            name={securityState.lastAnomalyAt ? "pulse" : "checkmark-circle-outline"}
+            size={18}
+            color={securityState.lastAnomalyAt ? "#f97316" : "#22c55e"}
+          />
+          <View style={{ marginLeft: 10, flex: 1 }}>
+            <Text style={{ color: "#fff", fontSize: 14 }}>
+              {securityState.lastAnomalyAt
+                ? "Last anomaly"
+                : "No anomalies"}
+            </Text>
+            <Text style={{ color: "#888", fontSize: 12, marginTop: 2 }}>
+              {securityState.lastAnomalyAt
+                ? relativeTime(securityState.lastAnomalyAt)
+                : "Your account hasn't seen unusual activity recently."}
+            </Text>
+          </View>
+        </View>
 
         {(devicesQ.isFetching || passkeysQ.isFetching || auditQ.isFetching) && !refreshing ? (
           <View style={{ padding: 12, alignItems: "center" }}>

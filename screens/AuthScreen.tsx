@@ -3,6 +3,7 @@ import { View, Text, Pressable, Platform } from "react-native";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as Device from "expo-device";
 import { Ionicons } from "@expo/vector-icons";
+import PipassLoader from "../components/PipassLoader";
 
 interface AuthScreenProps {
   onAuthenticated: () => void;
@@ -12,6 +13,10 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
   const [biometricType, setBiometricType] = useState<string>("Biometric");
+  // T006 — show the boot loader on first mount; the loader sits on
+  // top of the live AuthScreen and crossfades out, so biometric prompt
+  // wiring continues underneath without delay.
+  const [loaderDone, setLoaderDone] = useState(false);
 
   useEffect(() => {
     checkBiometricSupport().catch(() => {
@@ -100,15 +105,15 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     authenticate();
   }
 
-  if (checking) {
-    return (
-      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
-        <Text style={{ color: "#fff", fontSize: 16 }}>Checking biometric support...</Text>
-      </View>
-    );
-  }
-
-  return (
+  // The loader sits on TOP of whatever auth UI is appropriate. While
+  // it crossfades out the underlying screen is already mounted —
+  // biometric checks have started and any error is already visible
+  // the moment the loader clears.
+  const baseScreen = checking ? (
+    <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
+      <Text style={{ color: "#fff", fontSize: 16 }}>Checking biometric support...</Text>
+    </View>
+  ) : (
     <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000", padding: 24 }}>
       <Ionicons name="lock-closed" size={64} color="#fff" />
       <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold", marginTop: 24 }}>PiPass</Text>
@@ -130,6 +135,13 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           {error ? "Try Again" : `Authenticate with ${biometricType}`}
         </Text>
       </Pressable>
+    </View>
+  );
+
+  return (
+    <View style={{ flex: 1, backgroundColor: "#000" }}>
+      {baseScreen}
+      {!loaderDone && <PipassLoader onComplete={() => setLoaderDone(true)} />}
     </View>
   );
 }

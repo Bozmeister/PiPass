@@ -53,7 +53,8 @@ import AnimatedFractalView from "../components/AnimatedFractalView";
 import KeyprintViewer from "../components/KeyprintViewer";
 import FaviconImage from "../components/FaviconImage";
 import NuclearResetModal from "../components/NuclearResetModal";
-import FractalFullscreenViewer from "../components/FractalFullscreenViewer";
+import FractalBackground from "../components/FractalBackground";
+import { useSecurityState } from "../context/SecurityContext";
 
 const AUTO_LOCK_MS = 120000;
 
@@ -83,6 +84,9 @@ function deriveVisualSeedFromHkdf(shares: KeyShares): { seedNumber: number; fing
 export default function VaultScreen({ keyShares, iterations, locked = false, onLock, onIterationsChange, onReset }: VaultScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  // T002 — fractal reads from this so it shifts color/glow whenever
+  // the audit endpoint reports a posture change.
+  const securityState = useSecurityState();
   const [entries, setEntries] = useState<VaultEntry[]>([]);
   const keySharesRef = useRef<KeyShares | null>(keyShares);
   const isBiometricActive = useRef(false);
@@ -102,7 +106,6 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   const [profilePassword, setProfilePassword] = useState("");
   const [profilePasswordFocused, setProfilePasswordFocused] = useState(false);
   const [showNuclearReset, setShowNuclearReset] = useState(false);
-  const [showFullscreenFractal, setShowFullscreenFractal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [deleteTargetTitle, setDeleteTargetTitle] = useState("");
@@ -138,7 +141,6 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       setShowSecureNotes(false);
       setShowKeyprintViewer(false);
       setShowNuclearReset(false);
-      setShowFullscreenFractal(false);
       setShowDeleteModal(false);
       setDeleteTargetId(null);
       setDeleteTargetTitle("");
@@ -533,7 +535,15 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   const renderItem = ({ item }: { item: VaultEntry }) => (
     <Pressable onPress={() => handleSelectEntry(item)} style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#222", flexDirection: "row", alignItems: "center" }}>
       {showKeyprints ? (
-        <Pressable onPress={(e) => { e.stopPropagation?.(); resetActivity(); setShowFullscreenFractal(true); }}>
+        <Pressable
+          onPress={(e) => {
+            e.stopPropagation?.();
+            resetActivity();
+            // T007 — tap a keyprint to open the security dashboard
+            // (was: open a passive fullscreen view of the same fractal).
+            router.push("/settings/security");
+          }}
+        >
           <FractalKeyprint seed={visualSeed} size={44} animate={false} fractalParams={fractalParams} />
         </Pressable>
       ) : (
@@ -549,7 +559,12 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   if (loading) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
-        <AnimatedFractalView seed={visualSeed} size={200} fractalParams={fractalParams} />
+        <AnimatedFractalView
+          seed={visualSeed}
+          size={200}
+          fractalParams={fractalParams}
+          securityState={securityState}
+        />
         <ActivityIndicator size="large" color="#4CAF50" style={{ marginTop: 30 }} />
         <Text style={{ color: "#fff", fontSize: 20, marginTop: 20 }}>Loading Vault...</Text>
       </View>
@@ -601,19 +616,38 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         </View>
       )}
 
-      <FlatList
-        data={entries}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        ListEmptyComponent={
-          <View style={{ flex: 1, justifyContent: "center", alignItems: "center", marginTop: 100 }}>
-            <Pressable onPress={() => { resetActivity(); setShowFullscreenFractal(true); }}>
-              <AnimatedFractalView seed={visualSeed} size={150} fractalParams={fractalParams} />
-            </Pressable>
-            <Text style={{ color: "#888", fontSize: 18, marginTop: 30 }}>Empty vault — add something!</Text>
-          </View>
-        }
-      />
+      {/* T008 — Subtle fractal underlay. We render ONE static SVG
+          background behind the entire list rather than per-row to
+          stay 60fps-safe; the visual effect is identical at the
+          0.08 default opacity. */}
+      <View style={{ flex: 1 }}>
+        <FractalBackground seed={visualSeed} fractalParams={fractalParams} />
+        <FlatList
+          data={entries}
+          keyExtractor={(item) => item.id}
+          renderItem={renderItem}
+          style={{ backgroundColor: "transparent" }}
+          ListEmptyComponent={
+            <View style={{ flex: 1, justifyContent: "center", alignItems: "center", marginTop: 100 }}>
+              <Pressable
+                onPress={() => {
+                  resetActivity();
+                  // T007 — same as the per-row keyprint tap.
+                  router.push("/settings/security");
+                }}
+              >
+                <AnimatedFractalView
+                  seed={visualSeed}
+                  size={150}
+                  fractalParams={fractalParams}
+                  securityState={securityState}
+                />
+              </Pressable>
+              <Text style={{ color: "#888", fontSize: 18, marginTop: 30 }}>Empty vault — add something!</Text>
+            </View>
+          }
+        />
+      </View>
 
       <AddEntryModal visible={showAddModal} onClose={() => setShowAddModal(false)} onSave={handleAddEntry} onActivity={resetActivity} />
 
@@ -787,13 +821,6 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         onConfirmReset={executeNuclearReset}
         verifyPassword={verifyPasswordForReset}
         requireBiometric={requireFreshBiometric}
-      />
-
-      <FractalFullscreenViewer
-        visible={showFullscreenFractal}
-        onClose={() => setShowFullscreenFractal(false)}
-        seed={visualSeed}
-        fractalParams={fractalParams}
       />
 
       {showUndoSnackbar && (

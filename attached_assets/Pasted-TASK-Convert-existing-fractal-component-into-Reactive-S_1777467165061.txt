@@ -1,0 +1,211 @@
+TASK: Convert existing fractal component into Reactive Security Dashboard
+
+FILES (likely locations):
+- app/components/FractalCanvas.tsx (or similar)
+- app/screens/VaultScreen.tsx
+- app/screens/LoginScreen.tsx
+- app/context/securityContext.ts (or create one)
+
+CONSTRAINTS (MANDATORY):
+
+DO NOT change fractal rendering math
+DO NOT convert fractal to static image
+DO NOT break existing animation loop
+ONLY extend with reactive parameters
+ALL updates must be non-blocking (60fps safe)
+FAIL-OPEN: if no data → fractal behaves as today
+
+--------------------------------------------------
+
+T001 — Introduce Security State (global)
+
+Create a lightweight global state:
+
+type SecurityState = {
+  securityLevel: "normal" | "elevated" | "high" | "critical"
+  threatLevel: number (0–100)
+  recoveryMode: boolean
+  hasRecentAnomalies: boolean
+  isNewDevice: boolean
+}
+
+Source:
+- Pull from existing API responses (vault/fetch, audit, sessions)
+- Default fallback:
+  normal / 0 / false / false / false
+
+--------------------------------------------------
+
+T002 — Pass state into Fractal component
+
+Modify FractalCanvas props:
+
+<FractalCanvas securityState={securityState} />
+
+Ensure:
+- Backwards compatible (optional prop)
+- No crashes if undefined
+
+--------------------------------------------------
+
+T003 — Map security → visual parameters
+
+Inside fractal render loop, derive:
+
+const intensity = threatLevel / 100
+
+const colorShift = {
+  normal: 120 (green)
+  elevated: 60 (yellow)
+  high: 30 (orange)
+  critical: 0 (red)
+}
+
+const glowStrength = 0.5 + intensity * 1.5
+
+const distortion = recoveryMode ? 0.3 : intensity * 0.2
+
+const flicker =
+  hasRecentAnomalies ? Math.random() * 0.1 : 0
+
+const ripple =
+  isNewDevice ? Math.sin(time * 2) * 0.05 : 0
+
+--------------------------------------------------
+
+T004 — Apply to existing shader/render logic
+
+WITHOUT rewriting fractal:
+
+- adjust color palette / HSL hue
+- slightly perturb iteration threshold
+- add glow multiplier
+- inject small noise for flicker
+
+Example:
+
+finalColor.hue += colorShift[securityLevel]
+finalColor.brightness *= glowStrength
+
+escapeRadius += distortion
+iterationOffset += ripple
+
+pixelColor += flicker
+
+--------------------------------------------------
+
+T005 — Smooth transitions (CRITICAL)
+
+DO NOT snap values.
+
+Use lerp:
+
+currentValue = lerp(currentValue, targetValue, 0.05)
+
+Apply to:
+- hue
+- glow
+- distortion
+
+This keeps animation organic
+
+--------------------------------------------------
+
+T006 — Loading screen animation
+
+In LoginScreen:
+
+1. Show fractal FULLSCREEN
+2. Overlay text "PiPass"
+
+Animate:
+
+- opacity: 0 → 1 (1s)
+- hold (1s)
+- dissolve (particle fade or opacity → 0)
+
+Then:
+- fade fractal → login UI
+
+DO NOT block rendering loop
+
+--------------------------------------------------
+
+T007 — Replace “tap fractal = static view”
+
+Instead:
+
+Create new screen:
+
+SecurityDashboardScreen
+
+Layout:
+
+- large central fractal
+- below it:
+
+  Security Level: TEXT
+  Threat Level: % bar
+  Device Status: trusted / new
+  Activity: last anomaly timestamp
+
+Navigation:
+
+VaultScreen:
+onPress(fractal) → navigate(SecurityDashboardScreen)
+
+--------------------------------------------------
+
+T008 — Mini fractal in vault list
+
+For each vault item:
+
+- keep favicon
+- add subtle fractal overlay (opacity 0.1–0.2)
+
+OPTIONAL:
+- increase glow if entry recently accessed
+
+--------------------------------------------------
+
+T009 — Performance safeguards
+
+- DO NOT re-render fractal per state change
+- Only update uniforms / parameters
+- Keep animation loop single-threaded
+
+Throttle updates:
+max 10/sec
+
+--------------------------------------------------
+
+T010 — Fail-safe behavior
+
+If securityState undefined:
+
+- use defaults
+- fractal behaves exactly as before
+
+NO crashes
+NO blank screens
+
+--------------------------------------------------
+
+VERIFICATION:
+
+1. App loads → fractal animates smoothly
+2. Security state changes → visual shift (not abrupt)
+3. No FPS drops
+4. No flicker when idle
+5. Works offline (fallback state)
+6. Vault screen unaffected except enhancement
+7. Login animation clean
+
+--------------------------------------------------
+
+SUCCESS CRITERIA:
+
+- Fractal visually reflects system state
+- No changes to crypto/security logic
+- No UX regressions
+- Animation remains smooth and subtle

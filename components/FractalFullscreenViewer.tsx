@@ -2,6 +2,7 @@ import React from "react";
 import { View, Modal, useWindowDimensions } from "react-native";
 import { FractalParams } from "../crypto/hkdf";
 import AnimatedFractalView from "./AnimatedFractalView";
+import { useSecurityState } from "../context/SecurityContext";
 
 interface FractalFullscreenViewerProps {
   visible: boolean;
@@ -16,6 +17,9 @@ export default function FractalFullscreenViewer({
   seed,
   fractalParams,
 }: FractalFullscreenViewerProps) {
+  // Reactive — when this modal opens the fractal already reflects
+  // the current threat posture (T002).
+  const securityState = useSecurityState();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const ringSize = Math.min(screenWidth, screenHeight) * 0.88;
 
@@ -51,6 +55,7 @@ export default function FractalFullscreenViewer({
             seed={seed}
             fractalParams={fractalParams}
             size={ringSize}
+            securityState={securityState}
           />
           <View
             style={{
