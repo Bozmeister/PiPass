@@ -630,6 +630,508 @@ function decayLoginFailures(userId: string): void {
   }
 }
 
+// =====================================================================
+// Adaptive IP Threat Intelligence (T001-T010)
+// =====================================================================
+//
+// Per-IP behavioural tracking that turns "many failures from one
+// source" into a concrete soft-block + adaptive friction. All state
+// is process-local in-memory (a restart wipes it — fail-open, per
+// T010). No schema or crypto changes; every signal feeds the
+// EXISTING anomaly + security-level pipeline (recordSecuritySignalHit
+// + triggerSoftLock + an `ip_threat_detected` audit row).
+//
+// Detected threat types:
+//   1. brute_force        — single user, ≥10 failures in 5 min from
+//                           one IP.
+//   2. credential_stuffing — ≥5 DISTINCT user/username probes from
+//                           one IP in 10 min (real userIds and
+//                           hashed not-found-username probes both
+//                           contribute to cardinality).
+//
+// On detection:
+//   - 5-minute soft IP block (`blockedUntil`) → 429 on subsequent
+//     login attempts at any of the 4 login entry points
+//     (/api/auth/login, /api/auth/totp/login, /api/passkeys/login/start,
+//     /api/passkeys/login/finish). The 429 uses the same single-shape
+//     "Too many attempts" wording the IP-rate-limiter already uses,
+//     per T005 (no leak of "you specifically are blocked").
+//   - `ip_threat_detected` audit row for each REAL targeted user
+//     (anyone reading their own activity log learns "an IP probing
+//     multiple accounts/many passwords just hit me"). Rows are
+//     attached to the user's `userId` because AuditEventInput.userId
+//     is NOT NULL — there is no global / unattributed audit shape.
+//   - `recordSecuritySignalHit` for each real targeted user with
+//     hardLock=(type === credential_stuffing). Brute_force keeps
+//     hardLock=false to avoid DoS-amplification on a single account
+//     (an attacker who knows just one username could otherwise
+//     soft-lock the legitimate user's writes); credential_stuffing
+//     against ≥5 distinct accounts is too high-confidence to skip
+//     the lock.
+//   - For credential_stuffing: explicit triggerSoftLock(userId) on
+//     each targeted user. Feeds the existing write-block enforcement
+//     so a successful guess in the middle of an attack still hits
+//     the soft-lock gate when it tries to write.
+//
+// Memory safety:
+//   - Targeted-user Sets are capped at IP_THREAT_TARGETS_CAP entries
+//     per IP. Once an attacker has probed that many distinct users
+//     we already know it's an attack and don't need finer cardinality.
+//   - Entries inactive >IP_THREAT_INACTIVITY_TTL_MS are GC'd in the
+//     existing 5-min sweep below.
+//   - Failure count decays by IP_THREAT_DECAY_PER_SUCCESS on every
+//     successful login from that IP (T008); when it reaches zero
+//     and no block is active, the entry is dropped immediately so
+//     a long-running process doesn't hoard memory for IPs that
+//     turned out to be benign (e.g. shared NAT where someone
+//     fat-fingered once then logged in cleanly).
+//
+// Username privacy:
+//   - We never store raw usernames in memory. The not-found branch
+//     stores SHA-256(username) prefixed with "u:" as the target
+//     key — this preserves the "5 distinct probes" cardinality
+//     measure without holding usernames in process memory. Real
+//     users (verified via getUserByUsername) contribute their
+//     opaque userId. Audit rows are only emitted for real userIds
+//     (a row keyed by hash would have nothing to attach it to).
+const IP_THREAT_INACTIVITY_TTL_MS = 30 * 60_000;
+const IP_THREAT_BRUTE_THRESHOLD = 10;
+const IP_THREAT_BRUTE_WINDOW_MS = 5 * 60_000;
+const IP_THREAT_STUFFING_THRESHOLD = 5;
+const IP_THREAT_STUFFING_WINDOW_MS = 10 * 60_000;
+const IP_THREAT_BLOCK_MS = 5 * 60_000;
+const IP_THREAT_TARGETS_CAP = 1000;
+const IP_THREAT_DECAY_PER_SUCCESS = 2;
+// Bound on the rolling per-IP failure-timestamp queue. Well above
+// the brute threshold (10) and decay step (2) so detection is not
+// lost even if an attacker hammers faster than the prune cadence;
+// existing only to keep the per-IP queue size constant under
+// sustained sub-threshold abuse that never trips the block.
+const IP_THREAT_FAILURE_QUEUE_CAP = 200;
+
+// Adaptive delay parameters: base preserves the existing 50-120ms
+// uniform anti-timing baseline (so legitimate users on a clean IP
+// are not slowed down) and adds 50ms per accumulated failure on
+// top, capped at 2s total. A first-time visitor with failures=0
+// gets the same 50-120ms they always did; an IP with 30+ failures
+// faces ~2s per attempt, multiplying the wall-clock cost of a
+// brute force by ~10-20x without breaking legitimate retry UX.
+const IP_THREAT_DELAY_BASE_MIN_MS = 50;
+const IP_THREAT_DELAY_BASE_RANGE_MS = 71; // → uniform(50, 120)
+const IP_THREAT_DELAY_PER_FAILURE_MS = 50;
+const IP_THREAT_DELAY_CAP_MS = 2000;
+
+type IpThreatEntry = {
+  // Rolling queue of failure timestamps. Push on every recorded
+  // failure; prune timestamps older than the LONGER of the two
+  // detection windows (10 min stuffing) on every read so the queue
+  // is naturally self-trimming. Capped at IP_THREAT_FAILURE_QUEUE_CAP
+  // to bound memory under sustained sub-threshold abuse — when the
+  // cap is hit we drop the oldest (sliding-window semantics).
+  //
+  // Brute count = number of timestamps inside the 5-min brute window.
+  // Stuffing count = distinct targets in targetTimestamps inside the
+  // 10-min stuffing window (independent measure).
+  failureTimestamps: number[];
+  // Per-target last-seen timestamp. Key is either a real userId
+  // (UUID string) or a hashUsernameForIpThreat() result ("u:"-prefixed).
+  // isReal=true means the key is a real userId and contributes to
+  // audit emission; isReal=false means a hashed-username probe (still
+  // counts toward stuffing cardinality, but no audit row to emit).
+  // Capped at IP_THREAT_TARGETS_CAP distinct entries.
+  targetTimestamps: Map<string, { lastSeen: number; isReal: boolean }>;
+  lastSeenAt: number;
+  blockedUntil?: number;
+  // Per-active-block dedup: the audit + security-signal hit for each
+  // threat type fires AT MOST ONCE per active block. CRUCIALLY both
+  // flags clear inside isIpBlocked() the moment the block is observed
+  // to have lapsed — so an attacker who continues hammering after
+  // their 5-min cool-off can be re-blocked and re-alerted on the very
+  // next threshold breach. Rolling-window detection makes this safe:
+  // there is no per-entry-lifetime cap on detections, only "once per
+  // active block window".
+  bruteAlerted: boolean;
+  stuffingAlerted: boolean;
+};
+
+const ipThreatState = new Map<string, IpThreatEntry>();
+
+function hashUsernameForIpThreat(username: string): string {
+  // SHA-256, truncated to 32 hex chars (128 bits) — collision-resistant
+  // enough for cardinality measurement, short enough to cap memory
+  // even at IP_THREAT_TARGETS_CAP entries per IP. The "u:" prefix
+  // distinguishes hashed-username probes from real userIds (UUID
+  // strings) when reading the targetTimestamps map.
+  return (
+    "u:" +
+    createHash("sha256").update(username).digest("hex").slice(0, 32)
+  );
+}
+
+// Drop entries (failure timestamps + per-target last-seen) older
+// than the LONGER of the two detection windows. Keeps both rolling
+// counts (brute and stuffing) accurate without O(n) scans on the
+// hot path: timestamps are pushed monotonically, so the prune is a
+// single-pointer slice from the front.
+function pruneIpThreatEntry(entry: IpThreatEntry, now: number): void {
+  const longerWindow = Math.max(
+    IP_THREAT_BRUTE_WINDOW_MS,
+    IP_THREAT_STUFFING_WINDOW_MS,
+  );
+  const cutoff = now - longerWindow;
+  const ts = entry.failureTimestamps;
+  let drop = 0;
+  while (drop < ts.length && ts[drop] < cutoff) drop++;
+  if (drop > 0) ts.splice(0, drop);
+  for (const [key, val] of entry.targetTimestamps) {
+    if (val.lastSeen < cutoff) entry.targetTimestamps.delete(key);
+  }
+}
+
+// Number of failures inside the rolling 5-min brute window.
+// Timestamps are monotonically increasing (push-only at request
+// time), so we scan from the tail and break at the first miss.
+function ipThreatBruteCount(entry: IpThreatEntry, now: number): number {
+  const cutoff = now - IP_THREAT_BRUTE_WINDOW_MS;
+  const ts = entry.failureTimestamps;
+  let n = 0;
+  for (let i = ts.length - 1; i >= 0; i--) {
+    if (ts[i] >= cutoff) n++;
+    else break;
+  }
+  return n;
+}
+
+// Distinct-target count inside the rolling 10-min stuffing window.
+function ipThreatStuffingCount(
+  entry: IpThreatEntry,
+  now: number,
+): number {
+  const cutoff = now - IP_THREAT_STUFFING_WINDOW_MS;
+  let n = 0;
+  for (const v of entry.targetTimestamps.values()) {
+    if (v.lastSeen >= cutoff) n++;
+  }
+  return n;
+}
+
+// Real userIds touched within the LONGER detection window — used
+// when emitting per-user audit rows on a fresh block. Hashed-username
+// probes are excluded (no userId to attach a row to).
+function ipThreatRecentRealUserIds(
+  entry: IpThreatEntry,
+  now: number,
+): string[] {
+  const cutoff =
+    now - Math.max(IP_THREAT_BRUTE_WINDOW_MS, IP_THREAT_STUFFING_WINDOW_MS);
+  const out: string[] = [];
+  for (const [key, val] of entry.targetTimestamps) {
+    if (val.isReal && val.lastSeen >= cutoff) out.push(key);
+  }
+  return out;
+}
+
+function isIpBlocked(ip: string): boolean {
+  if (!ip) return false;
+  try {
+    const entry = ipThreatState.get(ip);
+    if (!entry?.blockedUntil) return false;
+    if (entry.blockedUntil > Date.now()) return true;
+    // Lazy expire. Drop the blockedUntil field AND clear the
+    // per-block dedup flags so a still-attacking IP can be
+    // re-blocked + re-alerted on the next threshold breach. Keep
+    // the rolling failure history (it self-prunes by window) so
+    // adaptive delay still applies until the 30-min GC sweep
+    // removes the entry — and so a freshly-unblocked attacker who
+    // resumes hammering re-trips the brute window almost
+    // immediately.
+    delete entry.blockedUntil;
+    entry.bruteAlerted = false;
+    entry.stuffingAlerted = false;
+    return false;
+  } catch {
+    // Fail-open per T010: anything unexpected here means we
+    // treat the IP as un-blocked rather than 500'ing the request.
+    return false;
+  }
+}
+
+function ipThreatDelayMs(ip: string): number {
+  const base =
+    IP_THREAT_DELAY_BASE_MIN_MS +
+    Math.floor(Math.random() * IP_THREAT_DELAY_BASE_RANGE_MS);
+  if (!ip) return base;
+  try {
+    const entry = ipThreatState.get(ip);
+    if (!entry) return base;
+    // Use the rolling count (timestamps still inside the longer
+    // window) rather than a raw counter — decay-on-success and
+    // window-prune both shrink this naturally, so a clean IP that
+    // had a burst 30 min ago doesn't keep paying the delay tax.
+    const extra =
+      entry.failureTimestamps.length * IP_THREAT_DELAY_PER_FAILURE_MS;
+    return Math.min(base + extra, IP_THREAT_DELAY_CAP_MS);
+  } catch {
+    return base;
+  }
+}
+
+// Adaptive replacement for uniformLoginDelay() at login failure
+// paths. Preserves the 50-120ms anti-timing-leak baseline (so a
+// fresh IP with no history is delayed identically to today) while
+// making sustained brute force from a known-bad IP wall-clock
+// expensive. The success path continues to call uniformLoginDelay()
+// directly so legitimate logins from a shared-NAT IP are not
+// penalised by an attacker that recently used the same IP.
+async function adaptiveLoginDelay(ip: string): Promise<void> {
+  const ms = ipThreatDelayMs(ip);
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+// Append a failure timestamp WITHOUT triggering threshold
+// evaluation — used from ipBlockResponse so attempts that arrive
+// while the IP is already blocked still accrue toward the rolling
+// brute-force count. CRITICAL for re-block-on-continued-attack
+// semantics: when the block lapses 5 min after the original
+// trigger, those original failures have aged out of the window —
+// but the during-block failures remain, so a single post-unblock
+// failure re-trips detection. Conversely, an attacker who pauses
+// for the full block duration accrues no timestamps and gets a
+// clean window back (intended: the block achieved its goal).
+function recordIpBlockedAttempt(ip: string): void {
+  if (!ip) return;
+  try {
+    const now = Date.now();
+    const entry = ipThreatState.get(ip);
+    if (!entry) return;
+    pruneIpThreatEntry(entry, now);
+    if (entry.failureTimestamps.length >= IP_THREAT_FAILURE_QUEUE_CAP) {
+      entry.failureTimestamps.shift();
+    }
+    entry.failureTimestamps.push(now);
+    entry.lastSeenAt = now;
+    // Deliberately do NOT touch targetTimestamps (we have no target
+    // at the block-check point — it's before body parsing) and do
+    // NOT call evaluateIpThreat (the IP is already blocked; there
+    // is nothing to escalate beyond the existing block).
+  } catch {
+    // Fail-open per T010.
+  }
+}
+
+// Single-shape 429 response for all four login entry points when
+// the IP is currently soft-blocked. Wraps the adaptive delay so an
+// attacker can't distinguish the block-response from a regular
+// auth-failure response by latency. The wording matches the IP
+// rate-limiter exactly so a caller can't tell which gate fired.
+//
+// Also accrues a failure timestamp via recordIpBlockedAttempt so
+// continued hammering during the block keeps the rolling brute
+// queue populated — guaranteeing immediate re-block on the next
+// failure after the block lapses (rather than requiring a fresh
+// 10-failure threshold reload).
+async function ipBlockResponse(
+  res: Response,
+  ip: string,
+): Promise<Response> {
+  recordIpBlockedAttempt(ip);
+  await adaptiveLoginDelay(ip);
+  return res
+    .status(429)
+    .json({ error: "Too many attempts. Please try again later." });
+}
+
+function recordIpFailure(
+  storage: IStorage,
+  ip: string,
+  // Either a real userId (uuid) or a hashUsernameForIpThreat()
+  // result. Both contribute to the credential-stuffing cardinality
+  // threshold; only the real userId variant produces audit rows.
+  targetKey: string,
+  realUserId: string | null,
+): void {
+  if (!ip) return;
+  // Outer try/catch is the LAST line of fail-open defense — any
+  // mutation, evaluator, or audit failure must NOT propagate up
+  // into the auth response. The route-level handlers above also
+  // call this fire-and-forget (no return value to depend on).
+  try {
+    const now = Date.now();
+    let entry = ipThreatState.get(ip);
+    if (!entry) {
+      entry = {
+        failureTimestamps: [],
+        targetTimestamps: new Map(),
+        lastSeenAt: now,
+        bruteAlerted: false,
+        stuffingAlerted: false,
+      };
+      ipThreatState.set(ip, entry);
+    }
+    pruneIpThreatEntry(entry, now);
+    if (entry.failureTimestamps.length >= IP_THREAT_FAILURE_QUEUE_CAP) {
+      // Cap reached — drop oldest, keep newest. Sliding-window
+      // semantics under sustained burst; threshold detection is
+      // unaffected because the cap is far above the brute threshold.
+      entry.failureTimestamps.shift();
+    }
+    entry.failureTimestamps.push(now);
+    // Upsert: a repeat probe of the same target refreshes its
+    // lastSeen so the rolling stuffing window correctly excludes
+    // it once activity stops. Cap distinct entries to bound memory.
+    if (
+      entry.targetTimestamps.has(targetKey) ||
+      entry.targetTimestamps.size < IP_THREAT_TARGETS_CAP
+    ) {
+      entry.targetTimestamps.set(targetKey, {
+        lastSeen: now,
+        isReal: realUserId !== null,
+      });
+    }
+    entry.lastSeenAt = now;
+    evaluateIpThreat(storage, ip, entry);
+  } catch {
+    // Fail-open per T010.
+  }
+}
+
+function evaluateIpThreat(
+  storage: IStorage,
+  ip: string,
+  entry: IpThreatEntry,
+): void {
+  try {
+    const now = Date.now();
+    // Brute force: ≥THRESHOLD failures inside the rolling 5-min
+    // window. Independent of stuffing — both can fire on the same
+    // entry (each at most once per active block, flags reset on
+    // unblock so re-blocking is permitted on continued attack).
+    const bruteCount = ipThreatBruteCount(entry, now);
+    if (
+      !entry.bruteAlerted &&
+      bruteCount >= IP_THREAT_BRUTE_THRESHOLD
+    ) {
+      entry.bruteAlerted = true;
+      entry.blockedUntil = now + IP_THREAT_BLOCK_MS;
+      fireIpThreatDetected(
+        storage,
+        ip,
+        "brute_force",
+        bruteCount,
+        ipThreatRecentRealUserIds(entry, now),
+      );
+    }
+    // Credential stuffing: ≥THRESHOLD DISTINCT targets inside the
+    // rolling 10-min window. Mix of real userIds + hashed-username
+    // probes both count toward cardinality; audit rows only fire
+    // for real userIds.
+    const stuffingCount = ipThreatStuffingCount(entry, now);
+    if (
+      !entry.stuffingAlerted &&
+      stuffingCount >= IP_THREAT_STUFFING_THRESHOLD
+    ) {
+      entry.stuffingAlerted = true;
+      entry.blockedUntil = now + IP_THREAT_BLOCK_MS;
+      fireIpThreatDetected(
+        storage,
+        ip,
+        "credential_stuffing",
+        bruteCount, // count = brute window count for consistency
+        ipThreatRecentRealUserIds(entry, now),
+      );
+    }
+  } catch {
+    // Fail-open per T010.
+  }
+}
+
+function fireIpThreatDetected(
+  storage: IStorage,
+  ip: string,
+  type: "brute_force" | "credential_stuffing",
+  count: number,
+  realUserIds: string[],
+): void {
+  // Per T009: log type, ip, count. NEVER raw usernames or the
+  // targeted-user set. Each affected REAL user gets ONE row
+  // attached to their account so it surfaces in their security
+  // activity log. (Hashed-username probes against non-existent
+  // accounts contribute to detection but produce no audit rows —
+  // there's no userId to attach them to and a row keyed by hash
+  // would be operationally useless.)
+  for (const userId of realUserIds) {
+    try {
+      recordAudit(storage, {
+        userId,
+        action: "ip_threat_detected",
+        ipAddress: ip,
+        userAgent: `type=${type}; count=${count}`,
+      });
+    } catch {
+      // Fail-open: audit-write failure must not block the next
+      // user in the list nor propagate up to the auth response.
+    }
+    try {
+      // Feed the existing security model. recordSecuritySignalHit
+      // paints elevated/high so deriveSecurityLevel sees the IP
+      // threat synchronously on the user's next request.
+      //
+      // hardLock policy:
+      //   - credential_stuffing → true. ≥5 distinct accounts probed
+      //     from one IP is ~never benign. The triggerSoftLock below
+      //     blocks writes for 5 min while the user reviews the
+      //     activity log entry.
+      //   - brute_force → false. A single-account brute force from
+      //     one IP COULD be the legitimate owner fat-fingering — we
+      //     paint the security signal (elevated) but don't lock
+      //     writes, because an attacker who knows a victim username
+      //     could otherwise turn this into a remote DoS on the
+      //     legitimate user's vault.
+      const hardLock = type === "credential_stuffing";
+      recordSecuritySignalHit(userId, null, hardLock);
+      if (hardLock) {
+        triggerSoftLock(userId);
+      }
+    } catch {
+      // Fail-open per T010: in-memory security model errors MUST
+      // NOT propagate up into the auth response.
+    }
+  }
+}
+
+function recordIpSuccess(ip: string): void {
+  if (!ip) return;
+  try {
+    const entry = ipThreatState.get(ip);
+    if (!entry) return;
+    // Decay by popping the MOST RECENT failures from the rolling
+    // queue. Pop-from-tail (vs shift-from-head) means the oldest
+    // failures stay in the window — so a clean success after a
+    // recent fat-finger streak relieves the user, but an attacker
+    // who somehow guesses correctly in the middle of a 9-failure
+    // burst still leaves 7 in the window for the next 2 failures
+    // to re-trip detection. Decay step is bounded so a single
+    // success cannot fully erase a sustained attack pattern.
+    for (
+      let i = 0;
+      i < IP_THREAT_DECAY_PER_SUCCESS && entry.failureTimestamps.length > 0;
+      i++
+    ) {
+      entry.failureTimestamps.pop();
+    }
+    entry.lastSeenAt = Date.now();
+    if (entry.failureTimestamps.length === 0 && !entry.blockedUntil) {
+      // Fully decayed and no active block — drop the entry now
+      // rather than waiting for the 30-min TTL. Frees memory for
+      // IPs that turned out to be benign and lets the next attack
+      // burst from this IP re-alert from a clean slate.
+      ipThreatState.delete(ip);
+    }
+  } catch {
+    // Fail-open per T010.
+  }
+}
+
 // T003 hardening: per-(sessionId, ip, ua) dedup so the binding-drift
 // audit + security-signal hit fires AT MOST once per unique tuple
 // per dedup TTL. Without this, every authenticated request from a
@@ -670,6 +1172,17 @@ if (!RATE_LIMIT_DISABLED) {
     for (const [k, ts] of sessionBindingDriftDedup) {
       if (now - ts > SESSION_BINDING_DEDUP_TTL_MS) {
         sessionBindingDriftDedup.delete(k);
+      }
+    }
+    // Adaptive IP threat sweep: drop entries that haven't seen a
+    // login attempt in IP_THREAT_INACTIVITY_TTL_MS (30 min). The
+    // entry's failures + targetedUsers history can't contribute to
+    // any active 5-min brute-force or 10-min stuffing window after
+    // that long, so it's safe to evict — a returning attacker
+    // starts fresh and re-trips the thresholds normally.
+    for (const [k, v] of ipThreatState) {
+      if (now - v.lastSeenAt > IP_THREAT_INACTIVITY_TTL_MS) {
+        ipThreatState.delete(k);
       }
     }
   }, 5 * 60_000);
@@ -2236,6 +2749,16 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       if (isRateLimited(`login:${clientIp}`)) {
         return res.status(429).json({ error: "Too many attempts. Please try again later." });
       }
+      // Adaptive IP threat block: if recent failures from this IP
+      // crossed the brute-force or credential-stuffing threshold,
+      // refuse further attempts for IP_THREAT_BLOCK_MS regardless
+      // of which login endpoint they target. Single-shape 429 with
+      // the same wording the rate-limiter above uses, so an
+      // attacker can't tell which gate fired. Adaptive delay before
+      // the response keeps the timing oracle closed.
+      if (isIpBlocked(clientIp)) {
+        return await ipBlockResponse(res, clientIp);
+      }
 
       const parsed = validateLogin(req.body);
       if (!parsed.ok) {
@@ -2250,6 +2773,8 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // hash vs real compare) that could otherwise be measured by a
       // username-enumeration probe. The 429 + 400 paths above are
       // intentionally NOT delayed — they don't leak user existence.
+      // Failure paths additionally apply adaptiveLoginDelay(clientIp)
+      // before responding, which adds per-failure-count friction.
       await uniformLoginDelay();
 
       const { username, authHash } = parsed.data;
@@ -2257,6 +2782,19 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       const user = await storage.getUserByUsername(username);
       if (!user) {
         hashForComparison(authHash);
+        // Adaptive IP threat: count this not-found probe toward the
+        // credential-stuffing cardinality (distinct usernames probed
+        // from one IP). We hash the username before storing — raw
+        // usernames never enter process memory. No userId to attach
+        // an audit row to (and a not-found audit would itself be a
+        // username-enumeration oracle), so realUserId=null.
+        recordIpFailure(
+          storage,
+          clientIp,
+          hashUsernameForIpThreat(username),
+          null,
+        );
+        await adaptiveLoginDelay(clientIp);
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
@@ -2298,6 +2836,14 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             { hardLock: false },
           );
         }
+        // Adaptive IP threat: count this real-user wrong-password
+        // failure toward both the brute-force threshold (≥10
+        // failures from this IP) and the credential-stuffing
+        // cardinality (this user contributes 1 distinct target).
+        // Real userId so the ip_threat_detected audit row, if it
+        // fires here, is attached to this user.
+        recordIpFailure(storage, clientIp, user.id, user.id);
+        await adaptiveLoginDelay(clientIp);
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
@@ -2397,6 +2943,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // that came before it (an attacker who stumbles on the right
       // password after 4 wrong guesses still leaves a partial trail).
       decayLoginFailures(user.id);
+      // Adaptive IP threat decay (T008): a clean success from this
+      // IP knocks IP_THREAT_DECAY_PER_SUCCESS off its accumulated
+      // failure count. If the count reaches zero and there's no
+      // active block, the entry is dropped entirely so a one-off
+      // fat-finger streak followed by a real login doesn't leave
+      // adaptive friction lingering on a benign IP.
+      recordIpSuccess(ip);
       // New-device path: log the event AND raise the in-memory threat
       // signal so the very first request after login (the client's
       // initial /api/vault/fetch) already sees securityLevel=elevated.
@@ -4247,6 +4800,12 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             .status(429)
             .json({ error: "Too many attempts. Please try again later." });
         }
+        // Adaptive IP threat block — same shape as /api/auth/login.
+        // The TOTP phase is the second half of the password+TOTP flow,
+        // so we share the IP block bucket with the password phase.
+        if (isIpBlocked(clientIp)) {
+          return await ipBlockResponse(res, clientIp);
+        }
 
         const parsed = validateTotpLogin(req.body);
         if (!parsed.ok) {
@@ -4257,7 +4816,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // branch. Equalises timing across "unknown temp token",
         // "user gone / TOTP disabled mid-flow", "wrong code", and
         // "success" — none of which should be distinguishable
-        // through latency. 429 + 400 above are not delayed.
+        // through latency. 429 + 400 above are not delayed. Failure
+        // paths additionally apply adaptiveLoginDelay(clientIp)
+        // before responding for per-failure-count friction.
         await uniformLoginDelay();
 
         const tempTokenHash = createHash("sha256")
@@ -4364,6 +4925,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
               { hardLock: false },
             );
           }
+          // Adaptive IP threat: TOTP wrong-code = same severity as a
+          // password failure for IP-block purposes. Real userId so an
+          // ip_threat_detected row, if it fires, attaches here.
+          recordIpFailure(storage, clientIp, user.id, user.id);
+          await adaptiveLoginDelay(clientIp);
           return res
             .status(401)
             .json({ error: "Invalid credentials" });
@@ -4413,6 +4979,8 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // a clean TOTP success — same reasoning as the password
         // login success path. Mirrors decayPasskeyFailures.
         decayLoginFailures(user.id);
+        // Adaptive IP threat decay (T008) — see /api/auth/login.
+        recordIpSuccess(clientIp);
         if (!isKnownDevice) {
           recordAudit(storage, {
             userId: user.id,
@@ -5221,6 +5789,12 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             .status(429)
             .json({ error: "Too many attempts. Please try again later." });
         }
+        // Adaptive IP threat block — same shape as /api/auth/login.
+        // Shared block bucket across all 4 login entry points so an
+        // attacker can't bypass via endpoint switching.
+        if (isIpBlocked(clientIp)) {
+          return await ipBlockResponse(res, clientIp);
+        }
 
         const parsed = validatePasskeyLoginStart(req.body);
         if (!parsed.ok) {
@@ -5231,7 +5805,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // lookup. Equalises timing for "unknown user", "user with
         // no passkeys", and "valid user with credentials" so a
         // probe can't tell them apart by latency. 429 + 400 above
-        // are not delayed — they don't leak user existence.
+        // are not delayed — they don't leak user existence. Failure
+        // paths additionally apply adaptiveLoginDelay(clientIp)
+        // before responding for per-failure-count friction.
         await uniformLoginDelay();
 
         const { username } = parsed.data;
@@ -5242,6 +5818,17 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // and an audit row keyed off "the username an attacker
           // guessed" would itself become a username-enumeration
           // oracle (visible to anyone with admin DB access).
+          // Adaptive IP threat: hashed-username probe still counts
+          // toward the credential-stuffing cardinality threshold —
+          // an attacker spraying random usernames at the passkey
+          // start endpoint is the textbook stuffing pattern.
+          recordIpFailure(
+            storage,
+            clientIp,
+            hashUsernameForIpThreat(username),
+            null,
+          );
+          await adaptiveLoginDelay(clientIp);
           return res.status(401).json({ error: "Invalid credentials" });
         }
 
@@ -5289,6 +5876,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
               { hardLock: false },
             );
           }
+          // Adaptive IP threat: real userId so an ip_threat_detected
+          // row attaches here. Note: a user with no passkeys is a
+          // valid login_failed signal — distinct from "user not
+          // found" — and contributes one distinct target to this
+          // IP's stuffing cardinality.
+          recordIpFailure(storage, clientIp, user.id, user.id);
+          await adaptiveLoginDelay(clientIp);
           return res.status(401).json({ error: "Invalid credentials" });
         }
 
@@ -5359,6 +5953,12 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             .status(429)
             .json({ error: "Too many attempts. Please try again later." });
         }
+        // Adaptive IP threat block — same shape as /api/auth/login.
+        // Shared block bucket across all 4 login entry points so an
+        // attacker can't bypass via endpoint switching.
+        if (isIpBlocked(clientIp)) {
+          return await ipBlockResponse(res, clientIp);
+        }
 
         const parsed = validatePasskeyLoginFinish(req.body);
         if (!parsed.ok) {
@@ -5369,7 +5969,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // lookup. Equalises timing for "unknown credential id",
         // "user mismatch", "verifier failure", "counter replay",
         // "TOTP gate", and "success". 429 + 400 above are not
-        // delayed.
+        // delayed. Failure paths additionally apply
+        // adaptiveLoginDelay(clientIp) before responding for
+        // per-failure-count friction.
         await uniformLoginDelay();
 
         // The browser hands us back the credential id it used. Look
@@ -5479,6 +6081,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
               `passkey replay detected; source=login`,
               { hardLock: true },
             );
+            // Adaptive IP threat: explicit counter_replay = same
+            // severity as a verifier failure for IP-block purposes.
+            recordIpFailure(storage, clientIp, stored.userId, stored.userId);
+            await adaptiveLoginDelay(clientIp);
             return res
               .status(401)
               .json({ error: "Invalid credentials" });
@@ -5521,6 +6127,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
               { hardLock: false },
             );
           }
+          // Adaptive IP threat: verifier failure attaches to the
+          // credential's owner. Real userId so an ip_threat_detected
+          // row can fire here.
+          recordIpFailure(storage, clientIp, stored.userId, stored.userId);
+          await adaptiveLoginDelay(clientIp);
           return res.status(401).json({ error: "Invalid credentials" });
         }
 
@@ -5600,7 +6211,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             `passkey replay race detected; source=login`,
             { hardLock: true },
           );
-          await uniformLoginDelay();
+          // Adaptive IP threat: race-replay is a counter_replay
+          // variant, same severity for IP-block purposes. Swap the
+          // pre-existing uniformLoginDelay (added by T007) for
+          // adaptiveLoginDelay so the per-failure friction also
+          // attaches to this branch.
+          recordIpFailure(storage, clientIp, stored.userId, stored.userId);
+          await adaptiveLoginDelay(clientIp);
           return res.status(401).json({ error: "Invalid credentials" });
         }
 
@@ -5704,6 +6321,12 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // counter so an attacker can't launder a long streak with
         // a single tap.
         decayPasskeyFailures(stored.userId);
+        // Adaptive IP threat decay (T008) — see /api/auth/login.
+        // Only the full-session success path decays; the
+        // TOTP-required half-success above defers decay to the
+        // /api/auth/totp/login completion, mirroring the
+        // password→TOTP path.
+        recordIpSuccess(clientIp);
         if (!isKnownDevice) {
           // Mirror the new-device handling from /api/auth/login:
           // log the event, raise the in-memory threat signal, and

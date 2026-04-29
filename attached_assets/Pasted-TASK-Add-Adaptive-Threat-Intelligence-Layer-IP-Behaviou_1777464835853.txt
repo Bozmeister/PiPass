@@ -1,0 +1,176 @@
+TASK: Add Adaptive Threat Intelligence Layer (IP + Behaviour Correlation)
+
+FILES:
+- server/routes.ts
+- server/security.ts (new helper file OPTIONAL)
+
+CONSTRAINTS (MANDATORY):
+
+DO NOT modify schema
+DO NOT modify crypto
+DO NOT break existing flows
+ONLY extend existing anomaly + security model
+ALL logic must be in-memory (fail-open)
+
+--------------------------------------------------
+
+T001 — Global IP threat tracking
+
+Create in-memory store:
+
+Map<string, {
+  failures: number
+  firstSeenAt: number
+  lastSeenAt: number
+  targetedUsers: Set<string>
+  blockedUntil?: number
+}>
+
+Key: IP address
+
+TTL cleanup:
+- remove entries inactive > 30 minutes
+
+--------------------------------------------------
+
+T002 — Record IP behaviour on login failure
+
+On every login_failed:
+
+- increment failures
+- add username/userId to targetedUsers
+- update lastSeenAt
+
+--------------------------------------------------
+
+T003 — Detect attack patterns
+
+Define thresholds:
+
+1. Brute force:
+   failures >= 10 within 5 min
+
+2. Credential stuffing:
+   targetedUsers.size >= 5 within 10 min
+
+3. Distributed probing:
+   failures across multiple usernames rapidly
+
+--------------------------------------------------
+
+T004 — Escalate threat response
+
+When thresholds hit:
+
+- call existing recordAnomaly()
+- elevate securityLevel
+- increase threatLevel
+
+Additionally:
+
+IF high confidence attack:
+
+- set blockedUntil = now + 5 minutes
+
+--------------------------------------------------
+
+T005 — Enforce IP-level blocking (soft)
+
+On login attempts:
+
+IF blockedUntil > now:
+
+Return:
+HTTP 429
+{ "error": "Too many attempts" }
+
+Rules:
+- DO NOT reveal block reason
+- DO NOT log sensitive data
+
+--------------------------------------------------
+
+T006 — Adaptive delay (friction engine)
+
+Modify uniformLoginDelay:
+
+Instead of constant delay:
+
+delay = base + (failures * multiplier)
+
+Example:
+- base: 300ms
+- multiplier: 50ms
+- cap at 2000ms
+
+Apply per IP
+
+--------------------------------------------------
+
+T007 — Feed into existing security model
+
+On high-risk IP:
+
+- trigger soft lock (existing)
+- mark session suspicious (if exists)
+- influence deriveSecurityLevel()
+
+DO NOT create new state system
+
+--------------------------------------------------
+
+T008 — Auto decay
+
+Every successful login:
+
+- reduce IP failure count gradually
+
+Example:
+failures = max(0, failures - 2)
+
+--------------------------------------------------
+
+T009 — Audit visibility (safe)
+
+On detection:
+
+log:
+
+action: "ip_threat_detected"
+
+metadata:
+- type: brute_force | credential_stuffing
+- ip (allowed)
+- count
+
+DO NOT log usernames list
+
+--------------------------------------------------
+
+T010 — Safety guarantees
+
+Ensure:
+
+- No permanent blocking
+- Fail-open on crash/restart
+- No impact to legitimate users under normal use
+
+--------------------------------------------------
+
+VERIFICATION:
+
+1. Single-user brute force → escalates
+2. Multi-user attack → detected
+3. IP gets temporarily blocked
+4. Delay increases with failures
+5. Legit user can still login after cooldown
+6. No schema changes
+7. No crypto changes
+
+--------------------------------------------------
+
+SUCCESS:
+
+- System adapts to attacker behavior
+- Attacker cost increases exponentially
+- Legit users unaffected
