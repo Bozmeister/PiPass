@@ -8,6 +8,7 @@ import {
   vaultAuditLog,
   webauthnCredentials,
   trustedDevices,
+  honeytokens,
   type User,
   type VaultBlob,
   type Session,
@@ -165,6 +166,65 @@ export type DeviceUpsertResult = {
   created: boolean;
   row: DeviceListItem;
 };
+
+// Public projection of a honeytoken row. The `markerHash` column is
+// DELIBERATELY EXCLUDED — once stored, the irreversible hash is never
+// surfaced over the API. The management UI doesn't need it (the user
+// already chose the marker locally; the hash is purely an internal
+// equality key) and excluding it at the type-and-SELECT layer is
+// belt-and-braces defense in depth: even if a future change accidentally
+// returns these rows over the API, the type narrows the shape and the
+// SELECT narrows the bytes that ever leave the DB. Same discipline as
+// the public_key/counter exclusions on CredentialListItem above.
+export type HoneytokenListItem = {
+  id: string;
+  label: string;
+  tokenType: string;
+  active: boolean;
+  createdAt: number;
+  triggeredAt: number | null;
+  triggerCount: number;
+};
+
+// Result of triggerHoneytoken on a successful match. Returns the
+// post-update counter so the route layer can decide whether to escalate
+// to soft-lock (count >= 2). Also surfaces the row's label + tokenType
+// so the audit row can carry human-readable context — NEVER includes
+// the markerHash itself (route layer must not log it). Returns null
+// when no active row matches the (userId, markerHash) pair, which the
+// route layer treats as a no-op 200 to avoid leaking information about
+// which markers exist.
+export type HoneytokenTriggerResult = {
+  honeytokenId: string;
+  label: string;
+  tokenType: string;
+  triggerCount: number;
+};
+
+// Result of disableHoneytoken on success. Surfaces the same metadata
+// (label + tokenType) so the route layer can write an honeytoken_disabled
+// audit row WITHOUT a follow-up SELECT, and so the response can confirm
+// to the UI which trap was retired. Returns null when no row matched
+// (wrong id / wrong user / already inactive) — route layer treats null
+// as a non-leaky 200-with-changed:false.
+export type HoneytokenDisableResult = {
+  label: string;
+  tokenType: string;
+};
+
+// Sentinel error thrown by createHoneytoken when the (user_id,
+// marker_hash) UNIQUE constraint fires. The route layer catches this
+// and returns 409 — separate from generic 500s so the client can
+// distinguish "duplicate" from "DB down". We extend Error rather than
+// returning a tagged union so existing async-error machinery (try /
+// catch, .catch handlers) can dispatch on instanceof — same pattern
+// you'd reach for when wrapping a third-party SDK error.
+export class HoneytokenMarkerConflictError extends Error {
+  constructor() {
+    super("honeytoken with this marker already exists for this user");
+    this.name = "HoneytokenMarkerConflictError";
+  }
+}
 
 // Input for createWebAuthnCredential. Required fields mirror what the
 // @simplewebauthn-style verifyRegistrationResponse output gives us:
@@ -425,6 +485,60 @@ export interface IStorage {
     deviceFingerprint: string,
     label: string,
   ): Promise<boolean>;
+
+  // ----- Honeytokens (deception layer) -----
+  //
+  // Persist a freshly-registered honeytoken. Caller (the create route)
+  // must have validated label/tokenType/markerHash bounds via the
+  // request schema before calling — storage just persists. Returns the
+  // public projection (NEVER includes markerHash) so the route layer
+  // can echo back the row id + createdAt without a follow-up SELECT.
+  // Throws on DB error. THROWS HoneytokenMarkerConflictError when the
+  // composite UNIQUE (user_id, marker_hash) violates — the route layer
+  // catches this and returns 409.
+  createHoneytoken(input: {
+    userId: string;
+    label: string;
+    tokenType: string;
+    markerHash: string;
+  }): Promise<HoneytokenListItem>;
+
+  // List a user's honeytokens for the management UI. Returns the public
+  // projection — markerHash is intentionally NOT included (see
+  // HoneytokenListItem doc). Includes both active=true AND active=false
+  // rows so the UI can show a "previously disabled" history; the UI
+  // distinguishes via the active flag in the projection. Ordered by
+  // createdAt DESC so the newest honeytoken floats to the top, matching
+  // the convention of listCredentialsForUser. Scoped strictly by userId.
+  listHoneytokens(userId: string): Promise<HoneytokenListItem[]>;
+
+  // Atomic trigger: increments trigger_count and stamps triggered_at
+  // for the (userId, markerHash, active=true) row in a single UPDATE.
+  // Concurrent triggers on the same row are race-safe — both UPDATEs
+  // serialize through the row lock and each one sees the post-update
+  // counter. Returns null when no active row matches (wrong user,
+  // unknown hash, or already disabled) — the route layer treats null
+  // as a non-leaky 200 to avoid signaling which markers exist. Throws
+  // on DB error: this method IS on the critical path of the security
+  // escalation, and silently failing would mean an attacker probing
+  // honeytokens leaves no audit trail.
+  triggerHoneytoken(
+    userId: string,
+    markerHash: string,
+  ): Promise<HoneytokenTriggerResult | null>;
+
+  // Soft-disable: sets active=false. Scoped by (userId, id) so a
+  // caller cannot disable another user's honeytoken by guessing the
+  // PK uuid. Idempotent: WHERE active = true so re-disabling an
+  // already-disabled row returns null. Returns the disabled row's
+  // (label, tokenType) so the route layer can audit the disable
+  // without a second SELECT. Throws on DB error — like
+  // revokeCredential, this is a user-facing security action that
+  // MUST surface failure.
+  disableHoneytoken(
+    userId: string,
+    honeytokenId: string,
+  ): Promise<HoneytokenDisableResult | null>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1312,5 +1426,161 @@ export class DatabaseStorage implements IStorage {
       )
       .returning({ id: trustedDevices.id });
     return flipped.length > 0;
+  }
+
+  // ----- Honeytokens (deception layer) -----
+  //
+  // INSERT … RETURNING (public projection — markerHash is NEVER returned).
+  // The composite UNIQUE index honeytokens_user_marker_uidx is the conflict
+  // surface; on violation the driver throws with code "23505" which we
+  // detect and re-throw as HoneytokenMarkerConflictError so the route layer
+  // can map it to a 409. Other DB errors propagate as-is per the IStorage
+  // contract — the route layer wraps in try/catch and returns 500.
+  async createHoneytoken(input: {
+    userId: string;
+    label: string;
+    tokenType: string;
+    markerHash: string;
+  }): Promise<HoneytokenListItem> {
+    try {
+      const [row] = await db
+        .insert(honeytokens)
+        .values({
+          userId: input.userId,
+          label: input.label,
+          tokenType: input.tokenType,
+          markerHash: input.markerHash,
+        })
+        .returning({
+          id: honeytokens.id,
+          label: honeytokens.label,
+          tokenType: honeytokens.tokenType,
+          active: honeytokens.active,
+          createdAt: honeytokens.createdAt,
+          triggeredAt: honeytokens.triggeredAt,
+          triggerCount: honeytokens.triggerCount,
+        });
+      if (!row) {
+        // Defensive — INSERT … RETURNING on a non-conflict path always
+        // yields exactly one row. A future driver change that surfaced
+        // an empty array shouldn't pass off as a silent success.
+        throw new Error("createHoneytoken: empty RETURNING");
+      }
+      return row;
+    } catch (err) {
+      // node-postgres / @neondatabase/serverless surface unique-violation
+      // as `code === "23505"` on the error object. We do a structural
+      // check rather than instanceof so the detection works regardless of
+      // which driver layer wrapped the original DatabaseError. Any other
+      // shape is re-thrown unchanged so the route layer's catch sees the
+      // original.
+      if (
+        err !== null &&
+        typeof err === "object" &&
+        "code" in err &&
+        (err as { code?: unknown }).code === "23505"
+      ) {
+        throw new HoneytokenMarkerConflictError();
+      }
+      throw err;
+    }
+  }
+
+  // Management screen reader. PUBLIC PROJECTION ONLY — marker_hash is
+  // EXCLUDED from the SELECT so a future change that accidentally returns
+  // these rows over the API still cannot leak the irreversible hash.
+  // Same defense-in-depth pattern as listCredentialsForUser. Index hit:
+  // honeytokens_user_idx on (user_id). Sorting by created_at is an
+  // in-memory sort over a per-user result set, bounded in practice (a
+  // user has at most a handful of decoys, not thousands).
+  async listHoneytokens(userId: string): Promise<HoneytokenListItem[]> {
+    const rows = await db
+      .select({
+        id: honeytokens.id,
+        label: honeytokens.label,
+        tokenType: honeytokens.tokenType,
+        active: honeytokens.active,
+        createdAt: honeytokens.createdAt,
+        triggeredAt: honeytokens.triggeredAt,
+        triggerCount: honeytokens.triggerCount,
+      })
+      .from(honeytokens)
+      .where(eq(honeytokens.userId, userId))
+      .orderBy(desc(honeytokens.createdAt));
+    return rows;
+  }
+
+  // Atomic increment-and-stamp. The single UPDATE … SET trigger_count =
+  // trigger_count + 1 + RETURNING avoids a read-modify-write race on
+  // concurrent triggers — Postgres serializes the row update, both
+  // callers see distinct post-update values. WHERE clause requires
+  // active = true so a disabled honeytoken is treated as not-found
+  // (preventing escalation from a stale client cache). Scoped strictly
+  // by userId so an attacker who somehow guessed a marker hash for
+  // another user gets null. Throws on DB error — the caller relies on
+  // this method to fail loudly so a probing attacker cannot evade
+  // detection by triggering a transient DB outage.
+  async triggerHoneytoken(
+    userId: string,
+    markerHash: string,
+  ): Promise<HoneytokenTriggerResult | null> {
+    const now = Date.now();
+    const updated = await db
+      .update(honeytokens)
+      .set({
+        triggerCount: sql`${honeytokens.triggerCount} + 1`,
+        triggeredAt: now,
+      })
+      .where(
+        and(
+          eq(honeytokens.userId, userId),
+          eq(honeytokens.markerHash, markerHash),
+          eq(honeytokens.active, true),
+        ),
+      )
+      .returning({
+        id: honeytokens.id,
+        label: honeytokens.label,
+        tokenType: honeytokens.tokenType,
+        triggerCount: honeytokens.triggerCount,
+      });
+    const row = updated[0];
+    if (!row) return null;
+    return {
+      honeytokenId: row.id,
+      label: row.label,
+      tokenType: row.tokenType,
+      triggerCount: row.triggerCount,
+    };
+  }
+
+  // Soft-disable via UPDATE … WHERE active = true. Returning the
+  // (label, tokenType) of any row that was actually flipped lets the
+  // caller distinguish "honeytoken just disabled" (audit-worthy) from
+  // "already disabled or wrong owner" (no audit) without a separate
+  // SELECT. Scoped by (userId, id) so guessing another user's PK uuid
+  // can't disable their honeytoken. Throws on DB error per IStorage
+  // contract.
+  async disableHoneytoken(
+    userId: string,
+    honeytokenId: string,
+  ): Promise<HoneytokenDisableResult | null> {
+    const flipped = await db
+      .update(honeytokens)
+      .set({ active: false })
+      .where(
+        and(
+          eq(honeytokens.id, honeytokenId),
+          eq(honeytokens.userId, userId),
+          eq(honeytokens.active, true),
+        ),
+      )
+      .returning({
+        label: honeytokens.label,
+        tokenType: honeytokens.tokenType,
+      });
+    const row = flipped[0];
+    if (!row) return null;
+    return { label: row.label, tokenType: row.tokenType };
   }
 }

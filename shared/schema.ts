@@ -372,6 +372,87 @@ export const trustedDevices = pgTable(
   ],
 );
 
+// ---------------------------------------------------------------------------
+// Honeytokens / deception layer (T001-T010)
+// ---------------------------------------------------------------------------
+//
+// User-defined "decoy" entries the client embeds in its decrypted vault. The
+// server never sees the cleartext entry — it only stores an irreversible
+// SHA-256 of a stable marker the client can recompute when it observes a
+// suspicious access (read of a decoy entry, copy of a decoy password, paste
+// of a decoy URL into the autofill flow, etc.).
+//
+// On a recompute match, the client POSTs the marker hash to /trigger; the
+// server bumps the row counter, paints elevated security level, marks the
+// session suspicious, and (on repeat) soft-locks writes. The marker hash is
+// NEVER returned over the API after creation and NEVER appears in audit
+// rows or stdout — see the public projection (HoneytokenListItem) below
+// and the route layer's audit redaction.
+//
+// PK + user FK match the project-wide convention (uuid().defaultRandom()
+// referencing users.id with ON DELETE CASCADE). Timestamps are bigint
+// epoch-ms (mode: "number") to match every other table in this file.
+export const honeytokens = pgTable(
+  "honeytokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // User-supplied display name surfaced in the management UI ("Fake AWS
+    // root key", "Decoy bank login", ...). 1-64 chars, control-char free —
+    // bounds are enforced at the route layer (createHoneytokenSchema).
+    label: text("label").notNull(),
+    // Categorization for the UI + audit metadata. Free-text in the column
+    // so a future kind doesn't require a DB migration; the request schema
+    // narrows the accepted values to a known enum.
+    tokenType: text("token_type").notNull(),
+    // SHA-256 of a stable client-derived marker (e.g. canonicalized URL,
+    // password ciphertext digest, ...), hex-encoded lowercase, 64 chars.
+    // Irreversible by construction — storing it does NOT leak the
+    // underlying decoy content. Stored as text (not varchar(64)) so the
+    // hash function can be upgraded without a schema change.
+    markerHash: text("marker_hash").notNull(),
+    // FALSE means the user has retired this honeytoken — triggerHoneytoken
+    // returns null for inactive rows so a stale client cache that still
+    // hashes the old marker cannot escalate the security level after the
+    // user has explicitly disabled the trap.
+    active: boolean("active").notNull().default(true),
+    createdAt: bigint("created_at", { mode: "number" })
+      .notNull()
+      .$defaultFn(() => Date.now()),
+    // NULL until the first trigger; updated to Date.now() on every trigger
+    // (even repeats) so the management UI can surface "last triggered" in
+    // human-readable form. NOT used for any windowing decision — repeat
+    // detection uses triggerCount, which is the authoritative counter.
+    triggeredAt: bigint("triggered_at", { mode: "number" }),
+    triggerCount: integer("trigger_count").notNull().default(0),
+  },
+  (table) => [
+    // Composite UNIQUE index on (user_id, marker_hash):
+    //   - Enforces "one row per (user, marker hash)" so the client cannot
+    //     accidentally register the same decoy twice (the second create
+    //     surfaces 23505, which the route maps to 409).
+    //   - Covers the hot lookup path triggerHoneytoken() takes (WHERE
+    //     user_id = $1 AND marker_hash = $2 AND active = true) via the
+    //     two-column prefix; the active filter is then a residual.
+    uniqueIndex("honeytokens_user_marker_uidx").on(
+      table.userId,
+      table.markerHash,
+    ),
+    // Per-spec single-column indexes. The user_id index is technically
+    // redundant with the composite uniqueIndex above (left-prefix), but
+    // kept explicitly to match the spec verbatim and to remain readable
+    // to future maintainers — same rationale as the trusted_devices
+    // table above. The marker_hash index is for any future cross-tenant
+    // lookup tooling; the active index supports "list active for user"
+    // scans without a sequential filter pass.
+    index("honeytokens_user_idx").on(table.userId),
+    index("honeytokens_marker_idx").on(table.markerHash),
+    index("honeytokens_active_idx").on(table.active),
+  ],
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type VaultBlob = typeof vaultBlobs.$inferSelect;
@@ -383,6 +464,8 @@ export type WebauthnCredential = typeof webauthnCredentials.$inferSelect;
 export type NewWebauthnCredential = typeof webauthnCredentials.$inferInsert;
 export type TrustedDevice = typeof trustedDevices.$inferSelect;
 export type NewTrustedDevice = typeof trustedDevices.$inferInsert;
+export type Honeytoken = typeof honeytokens.$inferSelect;
+export type NewHoneytoken = typeof honeytokens.$inferInsert;
 
 export const insertUserSchema = createInsertSchema(users, {
   username: (col) => col.min(3).max(64),
@@ -610,3 +693,80 @@ export type LoginInput = z.infer<typeof loginSchema>;
 export type VaultSyncInput = z.infer<typeof vaultSyncSchema>;
 export type TotpVerifyInput = z.infer<typeof totpVerifySchema>;
 export type TotpLoginInput = z.infer<typeof totpLoginSchema>;
+
+// ---------------------------------------------------------------------------
+// Honeytoken request schemas
+// ---------------------------------------------------------------------------
+//
+// All four use .strict() so unknown fields are REJECTED (400) — same
+// discipline as registerSchema/loginSchema/sync. Bounds and regexes are
+// the authoritative contract for the route layer; the storage layer trusts
+// these have already been enforced.
+
+// Allowed kinds. Free-text in the column (forward-compat) but the request
+// schema narrows to a known enum so an invalid kind is a 400 instead of a
+// silent persisted-but-unrenderable row.
+export const HONEYTOKEN_TOKEN_TYPES = [
+  "vault_entry",
+  "url",
+  "note",
+  "credential",
+] as const;
+export type HoneytokenTokenType = (typeof HONEYTOKEN_TOKEN_TYPES)[number];
+
+// Shared label validator — same shape as the device label rule in
+// routes.ts (1-64 chars, no control chars). Accepts unicode letters /
+// emoji; the UI is responsible for its own escaping on render.
+const honeytokenLabelSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[^\x00-\x1F\x7F]+$/, "label contains control characters");
+
+// 64-char lowercase hex SHA-256. The client computes this; the server
+// never reverses it.
+const honeytokenMarkerHashSchema = z
+  .string()
+  .regex(/^[0-9a-f]{64}$/, "markerHash must be 64 lowercase hex chars");
+
+export const createHoneytokenSchema = z
+  .object({
+    label: honeytokenLabelSchema,
+    tokenType: z.enum(HONEYTOKEN_TOKEN_TYPES),
+    markerHash: honeytokenMarkerHashSchema,
+  })
+  .strict();
+
+// Disable scopes by the row's internal id (not by markerHash) so a
+// stale client cache that still knows an old marker cannot be used to
+// disable a freshly-rotated honeytoken via fingerprint guessing. Plain
+// uuid() — drizzle's uuid PK validates as the standard 8-4-4-4-12
+// hex form.
+export const disableHoneytokenSchema = z
+  .object({
+    id: z.string().uuid(),
+  })
+  .strict();
+
+// Trigger uses markerHash (the client doesn't know the internal id;
+// it only knows the irreversible hash it computed locally). Optional
+// context is a short free-text describing the access pattern that
+// triggered the alert — e.g. "copy_password", "autofill_url",
+// "decrypt_open". Bounded so an attacker controlling a compromised
+// client cannot stuff the audit log with megabyte payloads. Control
+// chars rejected to keep the audit row readable in operator tooling.
+export const triggerHoneytokenSchema = z
+  .object({
+    markerHash: honeytokenMarkerHashSchema,
+    context: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[^\x00-\x1F\x7F]+$/, "context contains control characters")
+      .optional(),
+  })
+  .strict();
+
+export type CreateHoneytokenInput = z.infer<typeof createHoneytokenSchema>;
+export type DisableHoneytokenInput = z.infer<typeof disableHoneytokenSchema>;
+export type TriggerHoneytokenInput = z.infer<typeof triggerHoneytokenSchema>;

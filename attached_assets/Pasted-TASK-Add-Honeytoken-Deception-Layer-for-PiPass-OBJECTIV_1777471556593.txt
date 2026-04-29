@@ -1,0 +1,253 @@
+TASK: Add Honeytoken / Deception Layer for PiPass
+
+OBJECTIVE:
+Introduce safe, zero-knowledge-compatible deception signals that help detect suspicious vault access without weakening encryption or exposing real secrets.
+
+STRICT CONSTRAINTS:
+- DO NOT modify crypto/
+- DO NOT weaken encryption or authentication
+- DO NOT store real plaintext secrets server-side
+- DO NOT change existing primary key types
+- Schema changes must be additive only
+- Deception must never corrupt real vault data
+- All logic must fail-open unless explicitly blocking a confirmed trap event
+
+--------------------------------------------------
+T001 — Add Honeytoken Metadata Table
+--------------------------------------------------
+
+Add new table:
+
+honeytokens
+
+Columns:
+- id uuid primary key defaultRandom()
+- user_id uuid not null references users(id) on delete cascade
+- label text not null
+- token_type text not null
+- marker_hash text not null
+- active boolean default true
+- created_at bigint not null
+- triggered_at bigint nullable
+- trigger_count integer default 0
+
+Indexes:
+- user_id
+- marker_hash
+- active
+
+Purpose:
+Store metadata only. NEVER store plaintext decoy passwords or real secrets.
+
+marker_hash should be SHA-256 of a client-generated random marker/id.
+
+--------------------------------------------------
+T002 — Storage Methods
+--------------------------------------------------
+
+Add storage methods:
+
+- createHoneytoken(userId, label, tokenType, markerHash)
+- listHoneytokens(userId)
+- getHoneytokenByMarkerHash(userId, markerHash)
+- triggerHoneytoken(userId, markerHash)
+- disableHoneytoken(userId, honeytokenId)
+
+Rules:
+- All queries must be scoped by userId
+- Never return marker_hash to normal list responses unless strictly needed by client creation flow
+- triggerHoneytoken increments trigger_count and sets triggered_at
+
+--------------------------------------------------
+T003 — API: Create Honeytoken
+--------------------------------------------------
+
+Add endpoint:
+
+POST /api/security/honeytokens
+
+Auth required.
+
+Body:
+{
+  "label": string,
+  "tokenType": "vault_entry" | "url" | "note",
+  "markerHash": string
+}
+
+Validation:
+- strict zod schema
+- label 1–64 chars
+- tokenType enum
+- markerHash must be lowercase hex SHA-256, 64 chars
+
+Behavior:
+- create honeytoken metadata row
+- audit event: honeytoken_created
+- return:
+{
+  "id": "...",
+  "label": "...",
+  "tokenType": "...",
+  "active": true,
+  "createdAt": ...
+}
+
+--------------------------------------------------
+T004 — API: List Honeytokens
+--------------------------------------------------
+
+Add endpoint:
+
+GET /api/security/honeytokens
+
+Auth required.
+
+Return:
+{
+  "honeytokens": [
+    {
+      "id": "...",
+      "label": "...",
+      "tokenType": "...",
+      "active": true,
+      "createdAt": ...,
+      "triggeredAt": null,
+      "triggerCount": 0
+    }
+  ]
+}
+
+Do NOT return markerHash.
+
+--------------------------------------------------
+T005 — API: Disable Honeytoken
+--------------------------------------------------
+
+Add endpoint:
+
+POST /api/security/honeytokens/disable
+
+Auth required.
+Step-up required if user has TOTP or passkey.
+
+Body:
+{
+  "id": "uuid"
+}
+
+Behavior:
+- disable only if belongs to user
+- audit event: honeytoken_disabled
+- return { success: true }
+
+--------------------------------------------------
+T006 — API: Trigger Honeytoken
+--------------------------------------------------
+
+Add endpoint:
+
+POST /api/security/honeytokens/trigger
+
+Auth required.
+
+Body:
+{
+  "markerHash": string,
+  "context": string optional
+}
+
+Validation:
+- markerHash lowercase SHA-256 hex
+- context max 128 chars
+
+Behavior:
+- if active honeytoken exists for user:
+  - call triggerHoneytoken()
+  - audit event: honeytoken_triggered
+  - record anomaly using existing anomaly/security system
+  - mark current session suspicious if session exists
+  - elevate securityLevel / threatLevel
+  - trigger soft lock or recovery mode according to existing policy
+  - return { triggered: true }
+
+- if no honeytoken found:
+  - return { triggered: false }
+
+Security:
+- Response should not leak whether marker belongs to another user
+- Do not log markerHash
+- Do not log real vault contents
+
+--------------------------------------------------
+T007 — Client Compatibility Contract
+--------------------------------------------------
+
+Do NOT create fake plaintext secrets server-side.
+
+The client/mobile app should later create a decoy vault entry locally, encrypted inside the normal vault blob, containing a random marker.
+
+Example client flow later:
+1. Client generates random honeytokenMarker
+2. Client stores decoy entry inside encrypted vault
+3. Client sends SHA-256(marker) to server via /api/security/honeytokens
+4. If decoy is opened/copied/exported, client reports markerHash via /trigger
+
+This preserves zero-knowledge.
+
+--------------------------------------------------
+T008 — Audit Events
+--------------------------------------------------
+
+Add audit events:
+
+- honeytoken_created
+- honeytoken_disabled
+- honeytoken_triggered
+
+Rules:
+- Never log markerHash
+- Never log plaintext decoy data
+- Metadata allowed:
+  - label
+  - tokenType
+  - context
+  - source endpoint
+
+--------------------------------------------------
+T009 — Security Model Integration
+--------------------------------------------------
+
+When honeytoken_triggered:
+
+- record anomaly
+- set hasRecentAnomalies = true
+- mark session suspicious
+- raise securityLevel at least to "high"
+- if repeated trigger_count >= 2 within short window:
+  - enter recovery mode or soft lock writes
+
+Do not create a separate security model. Reuse existing helpers.
+
+--------------------------------------------------
+T010 — Verification
+--------------------------------------------------
+
+Verify:
+
+1. Create honeytoken → appears in list
+2. List does not expose markerHash
+3. Trigger valid honeytoken → triggerCount increments
+4. Trigger logs honeytoken_triggered
+5. Trigger raises securityLevel / threatLevel
+6. Trigger marks session suspicious
+7. Trigger unknown marker → { triggered:false }
+8. Disable honeytoken → future trigger returns false
+9. Cross-user trigger does not work
+10. No crypto/ changes
+11. No plaintext secrets stored server-side
+
+DELIVER:
+- Minimal implementation
+- Migration summary
+- Verification results

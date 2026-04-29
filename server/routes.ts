@@ -5,9 +5,15 @@ import { z } from "zod";
 import {
   SESSION_LIFETIME_MS,
   AUDIT_LOG_LIMIT,
+  HoneytokenMarkerConflictError,
   type AuditEventInput,
   type IStorage,
 } from "./storage";
+import {
+  createHoneytokenSchema,
+  disableHoneytokenSchema,
+  triggerHoneytokenSchema,
+} from "../shared/schema";
 import {
   validateRegister,
   validateLogin,
@@ -161,6 +167,32 @@ const PER_USER_RATE_LIMITS = {
   // single-use challenge consumed inside server/webauthn.ts.
   passkey_step_up_start: 10,
   passkey_step_up_finish: 10,
+  // Honeytokens / deception layer (T001-T010).
+  //
+  // Reads (list) mirror security_devices / passkeys_list at 10/min — same
+  // shape (per-user listing of metadata rows).
+  //
+  // Create is a benign user-initiated mutation (no security state flips,
+  // just a row insert). 10/min is generous enough that a user setting up
+  // multiple decoys in one sitting doesn't 429, tight enough that a
+  // script flooding the table at unbounded rates trips.
+  //
+  // Disable is step-up-gated (mirrors security_device_trust / passkey_revoke)
+  // because retiring a honeytoken WEAKENS the user's deception posture —
+  // an attacker holding a stolen session shouldn't be able to silently
+  // shut down the user's traps. 5/min matches the trust-toggle pattern.
+  //
+  // Trigger is the hottest path here — a panicking client can fire it
+  // multiple times in a burst when several decoy entries are accessed in
+  // quick succession (e.g. decryption-loop attack). 30/min gives ample
+  // headroom for legitimate burst-trigger scenarios while still bounding
+  // a compromised client that loops on POST /trigger to spam audit rows.
+  // The audit row itself is NOT in DEDUPABLE_AUDIT_ACTIONS — every
+  // trigger writes — so the rate limit is the primary cap on row growth.
+  honeytoken_list: 10,
+  honeytoken_create: 10,
+  honeytoken_disable: 5,
+  honeytoken_trigger: 30,
 } as const;
 type RateLimitedEndpoint = keyof typeof PER_USER_RATE_LIMITS;
 
@@ -4484,6 +4516,312 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       return res.status(500).json({ error: "Internal server error" });
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // Honeytokens / deception layer (T001-T010)
+  // ---------------------------------------------------------------------------
+  //
+  // Endpoints (all under /api/security/honeytokens):
+  //   - GET    /                  — list this user's honeytokens (no markerHash)
+  //   - POST   /                  — create a new honeytoken
+  //   - POST   /disable           — soft-disable by id (step-up gated)
+  //   - POST   /trigger           — record an access; escalate security state
+  //
+  // Disable requires step-up so a stolen session cannot silently retire
+  // the user's traps. Create + trigger + list are auth-only — creating a
+  // honeytoken doesn't change anything sensitive (the row just sits there
+  // until something probes it), and trigger is the panic-button path
+  // where an additional gate would defeat the purpose.
+  //
+  // Trigger integrates with the EXISTING security model:
+  //   recordAudit(honeytoken_triggered)
+  //     + recordSecuritySignalHit (paints elevated, marks suspicious)
+  //     + markSessionSuspicious (DB-side flag)
+  //     + on triggerCount >= 2: triggerSoftLock (5-min write lock)
+  //
+  // This deliberately uses the same hooks as escalatePasskeyAnomaly above
+  // — no parallel state machine, no new severity ladder. The unified
+  // security level system in /api/auth/security-state surfaces the
+  // posture change to the client without any new wire-format work.
+
+  // GET /api/security/honeytokens — list. Read-only, no step-up.
+  // Returns the public projection (NEVER includes markerHash). Bounded
+  // by the per-user list cap inherent to the table — a user has at
+  // most a handful of decoys, and the per-user rate limit caps abuse.
+  app.get("/api/security/honeytokens", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      if (
+        checkUserRateLimit("honeytoken_list", getClientIp(req), auth.userId)
+      ) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+      const honeytokens = await storage.listHoneytokens(auth.userId);
+      return res.status(200).json({ honeytokens });
+    } catch (err) {
+      console.error("List-honeytokens error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // POST /api/security/honeytokens — create. Auth-only (no step-up:
+  // adding a decoy doesn't weaken anything). Body validated by the
+  // shared createHoneytokenSchema (label/tokenType enum/markerHash hex).
+  // Returns the public projection of the new row so the UI can render
+  // immediately without a follow-up GET. UNIQUE(user, marker) violations
+  // surface as 409 — the client should rotate its marker and retry.
+  app.post(
+    "/api/security/honeytokens",
+    jsonBody(AUTH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        if (
+          checkUserRateLimit(
+            "honeytoken_create",
+            getClientIp(req),
+            auth.userId,
+          )
+        ) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+        const parsed = createHoneytokenSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({ error: "Invalid request body" });
+        }
+        // Trim AFTER schema validation so trailing whitespace can't smuggle
+        // an empty label past the .min(1) check (mirror of the device_label
+        // route's defense above).
+        const cleanLabel = parsed.data.label.trim();
+        if (cleanLabel.length === 0 || cleanLabel.length > 64) {
+          return res.status(400).json({ error: "Invalid label" });
+        }
+        let row;
+        try {
+          row = await storage.createHoneytoken({
+            userId: auth.userId,
+            label: cleanLabel,
+            tokenType: parsed.data.tokenType,
+            markerHash: parsed.data.markerHash,
+          });
+        } catch (err) {
+          if (err instanceof HoneytokenMarkerConflictError) {
+            // Unique-violation. Distinguishable from generic 500 so the
+            // client can take a different recovery path (regenerate
+            // marker, prompt user, ...) rather than blindly retrying.
+            return res
+              .status(409)
+              .json({ error: "Honeytoken with this marker already exists" });
+          }
+          throw err;
+        }
+        // Audit. NEVER include the markerHash in the audit row — only
+        // label + tokenType. The 16-char id prefix mirrors the audit
+        // shape used by device_trusted / device_relabeled above.
+        recordAudit(storage, {
+          userId: auth.userId,
+          action: "honeytoken_created",
+          ipAddress: getClientIp(req),
+          userAgent: `id=${row.id.slice(0, 16)}; type=${row.tokenType}; label=${cleanLabel.slice(0, 32)}`,
+        });
+        return res.status(201).json({ honeytoken: row });
+      } catch (err) {
+        console.error("Create-honeytoken error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // POST /api/security/honeytokens/disable — step-up gated. Soft-disable
+  // by row id (NOT by markerHash — see disableHoneytokenSchema doc for
+  // why). Idempotent: a disable on an already-disabled or non-existent
+  // row returns 200 with changed:false (no leak about which ids exist).
+  app.post(
+    "/api/security/honeytokens/disable",
+    jsonBody(AUTH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        if (
+          checkUserRateLimit(
+            "honeytoken_disable",
+            getClientIp(req),
+            auth.userId,
+          )
+        ) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+        const parsed = disableHoneytokenSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({ error: "Invalid request body" });
+        }
+        // Step-up REQUIRED — disabling weakens the user's deception
+        // posture, so an attacker holding only a stolen session token
+        // must NOT be able to wipe the traps. Mirrors the device-trust
+        // and passkey-revoke gates.
+        const gate = await enforceStepUpRequired(auth);
+        if (gate) return res.status(gate.status).json(gate.body);
+
+        const result = await storage.disableHoneytoken(
+          auth.userId,
+          parsed.data.id,
+        );
+        if (!result) {
+          // Either the id doesn't belong to this user, the id doesn't
+          // exist, or it was already disabled. 404 in any of those
+          // would leak existence; 200 with changed:false is the same
+          // pattern device-trust uses for the analogous case.
+          return res.status(200).json({ success: true, changed: false });
+        }
+        recordAudit(storage, {
+          userId: auth.userId,
+          action: "honeytoken_disabled",
+          ipAddress: getClientIp(req),
+          userAgent: `id=${parsed.data.id.slice(0, 16)}; type=${result.tokenType}; label=${result.label.slice(0, 32)}`,
+        });
+        return res.status(200).json({ success: true, changed: true });
+      } catch (err) {
+        console.error("Disable-honeytoken error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // POST /api/security/honeytokens/trigger — the deception-layer
+  // panic-button. Auth-only (no step-up — a panicking client must be
+  // able to fire this before any further interaction). Validates the
+  // marker hash format, then delegates to the storage atomic trigger.
+  //
+  // Behavior on a confirmed match:
+  //   1. Fire honeytoken_triggered audit (NEVER includes markerHash).
+  //   2. recordSecuritySignalHit — paints elevated, marks session
+  //      suspicious (in-memory).
+  //   3. markSessionSuspicious — persists the suspicious flag to the
+  //      sessions row (fire-and-forget per IStorage contract).
+  //   4. If triggerCount >= 2 on the returned row: triggerSoftLock
+  //      so further vault writes return 423 for SOFT_LOCK_DURATION_MS.
+  //      Single-trigger is "elevated"; repeat trigger is "actively
+  //      under attack" — the soft lock buys the user time to react
+  //      while still allowing READS (per spec: never break the user
+  //      out of their own vault).
+  //
+  // No-match (unknown marker, wrong user, or already disabled): 200
+  // with triggered:false. Same posture as the analogous device routes
+  // above — the wire surface area gives an attacker no signal about
+  // which markers exist.
+  app.post(
+    "/api/security/honeytokens/trigger",
+    jsonBody(AUTH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        if (
+          checkUserRateLimit(
+            "honeytoken_trigger",
+            getClientIp(req),
+            auth.userId,
+          )
+        ) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+        const parsed = triggerHoneytokenSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({ error: "Invalid request body" });
+        }
+
+        const result = await storage.triggerHoneytoken(
+          auth.userId,
+          parsed.data.markerHash,
+        );
+        if (!result) {
+          // No active row matched. Returning a successful 200 (rather
+          // than 404) ensures an attacker probing markers cannot map
+          // out which hashes correspond to real honeytokens. Note we
+          // intentionally DO NOT record any audit row here — a probe
+          // miss is not a security event, and surfacing one would
+          // create a bottomless audit-log spam vector.
+          return res
+            .status(200)
+            .json({ success: true, triggered: false });
+        }
+
+        // Match. Build the audit metadata WITHOUT the markerHash —
+        // only label + tokenType + (optional) context + the post-update
+        // counter. The 32-char label slice mirrors the discipline used
+        // by honeytoken_created above; the optional context is bounded
+        // to 128 chars by the request schema.
+        const contextSuffix = parsed.data.context
+          ? `; context=${parsed.data.context}`
+          : "";
+        recordAudit(storage, {
+          userId: auth.userId,
+          action: "honeytoken_triggered",
+          ipAddress: getClientIp(req),
+          userAgent: `id=${result.honeytokenId.slice(0, 16)}; type=${result.tokenType}; label=${result.label.slice(0, 32)}; count=${result.triggerCount}${contextSuffix}`,
+        });
+
+        // Fan-out into the existing security model. recordSecuritySignalHit
+        // paints elevated + flags the session in the in-memory
+        // suspicious-session set. markSessionSuspicious is the DB-side
+        // mirror — fire-and-forget per IStorage contract. Both are safe
+        // when sessionId is null (legacy auth-hash path); the helpers
+        // already guard internally.
+        recordSecuritySignalHit(auth.userId, auth.sessionId, true);
+        if (auth.sessionId !== null) {
+          void storage.markSessionSuspicious(auth.sessionId);
+        }
+
+        // Repeat trigger → soft-lock writes. Using the per-row counter
+        // (rather than a separate window structure) keeps the policy
+        // dead-simple and self-documenting: the same honeytoken being
+        // probed twice is an unambiguous attack signal. triggerSoftLock
+        // is idempotent — multiple repeats in quick succession do NOT
+        // extend an already-active lock past its natural expiry.
+        let softLockedUntil: number | undefined;
+        if (result.triggerCount >= 2) {
+          softLockedUntil = triggerSoftLock(auth.userId);
+        }
+
+        return res.status(200).json({
+          success: true,
+          triggered: true,
+          triggerCount: result.triggerCount,
+          softLockedUntil: softLockedUntil ?? null,
+        });
+      } catch (err) {
+        console.error("Trigger-honeytoken error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
 
   // T008 — GET /api/passkeys
   // Per-spec safe projection: id + deviceName + createdAt + lastUsedAt.
