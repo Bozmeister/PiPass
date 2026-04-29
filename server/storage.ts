@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, lt, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
   users,
@@ -301,10 +301,24 @@ export interface IStorage {
   // Refuses to update revoked rows (defense in depth — the route
   // already filters via getCredentialById, but a revoked row should
   // never get its counter advanced).
+  //
+  // T002 hardening: the UPDATE is conditional on the stored counter
+  // being STRICTLY LESS THAN the new counter. Two concurrent
+  // assertions for the same credential racing with the same
+  // verified.newCounter (e.g. user double-taps a passkey prompt and
+  // both assertions land at the server in parallel) will both pass
+  // the SimpleWebAuthn verifier (which compared each independently
+  // against the SAME stored counter), but only ONE can satisfy the
+  // `counter < newCounter` predicate at commit time — the second
+  // observes its own write equal-to-not-less-than and updates zero
+  // rows. Returns FALSE in that case so the caller can treat it as
+  // a counter-replay (revoke + audit + escalate) rather than
+  // silently let the second assertion through. TRUE on the normal
+  // path where the row was advanced.
   updateCredentialCounter(
     credentialId: string,
     counter: number,
-  ): Promise<void>;
+  ): Promise<boolean>;
 
   // Standalone "I was just used" stamp for codepaths that don't bump
   // the counter (e.g. user-initiated re-verification flows that don't
@@ -1001,16 +1015,28 @@ export class DatabaseStorage implements IStorage {
   async updateCredentialCounter(
     credentialId: string,
     counter: number,
-  ): Promise<void> {
-    await db
+  ): Promise<boolean> {
+    // T002 hardening: add `counter < newCounter` to the WHERE so two
+    // concurrent assertions racing with the SAME verified.newCounter
+    // can't both succeed. The first commit advances the row; the
+    // second's predicate evaluates false at the DB and updates zero
+    // rows. .returning() lets us distinguish "row advanced" (true)
+    // from "lost the race / row already at-or-past newCounter / row
+    // missing / row revoked" (false). Throwing on DB error is still
+    // load-bearing — see IStorage doc — only the conditional-noop
+    // case maps to FALSE.
+    const updated = await db
       .update(webauthnCredentials)
       .set({ counter, lastUsedAt: Date.now() })
       .where(
         and(
           eq(webauthnCredentials.credentialId, credentialId),
           eq(webauthnCredentials.revoked, false),
+          lt(webauthnCredentials.counter, counter),
         ),
-      );
+      )
+      .returning({ id: webauthnCredentials.id });
+    return updated.length > 0;
   }
 
   // Fail-open metadata writer. Mirrors markSessionTrusted's redaction

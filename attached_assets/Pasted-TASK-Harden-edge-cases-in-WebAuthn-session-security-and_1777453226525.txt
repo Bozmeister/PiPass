@@ -1,0 +1,288 @@
+TASK: Harden edge cases in WebAuthn, session security, and anomaly system
+
+CONSTRAINTS (MANDATORY):
+
+DO NOT modify any cryptographic logic
+DO NOT weaken existing authentication flows
+DO NOT change existing primary key types
+ONLY additive or minimal safe logic changes
+Maintain fail-open where system errors must not lock users out permanently
+ALL changes must live in:
+- server/routes.ts
+- server/webauthn.ts
+- server/storage.ts (ONLY if absolutely necessary, additive only)
+
+OBJECTIVE:
+
+Eliminate edge-case vulnerabilities:
+- Challenge overwrite/race issues
+- Counter replay race conditions
+- Session hijack via device mismatch
+- Incomplete post-restart hydration
+- Recovery mode premature exit
+- Failure streak evasion
+- Audit log flooding
+
+---
+
+### T001 — Fix WebAuthn Challenge Collision (CRITICAL)
+
+FILE: server/webauthn.ts
+
+REPLACE challenge storage:
+
+FROM:
+Map<userId, { challenge, expiresAt }>
+
+TO:
+Map<string, { challenge, expiresAt }>
+
+KEY FORMAT:
+`${userId}:${ceremony}:${challengeId}`
+
+IMPLEMENT:
+
+- Generate a random challengeId (crypto.randomUUID())
+- Return challengeId alongside options
+- Store using composite key
+- On verify:
+  - require challengeId
+  - lookup exact key
+  - delete after use (single-use)
+
+ACCEPTANCE:
+
+- Multiple tabs / flows do NOT overwrite each other
+- Challenge reuse is impossible
+
+---
+
+### T002 — Counter Replay Race Protection (CRITICAL)
+
+FILE: server/storage.ts
+
+MODIFY:
+
+updateCredentialCounter(credentialId, newCounter)
+
+CHANGE DB UPDATE:
+
+FROM:
+update counter directly
+
+TO:
+conditional update:
+
+WHERE credential_id = ? AND counter < newCounter
+
+RETURN:
+
+- boolean success
+
+CALL SITE (routes.ts):
+
+IF update fails:
+→ treat as replay attack
+→ revoke credential
+→ log passkey_counter_replay_detected
+→ return 401
+
+ACCEPTANCE:
+
+- Two concurrent assertions cannot both succeed
+- Replay cannot slip through race
+
+---
+
+### T003 — Session Device Binding (HIGH)
+
+FILE: server/routes.ts
+
+ON SESSION CREATION:
+
+Store:
+- ip (existing)
+- userAgent (existing)
+
+ADD CHECK in authenticate():
+
+IF session exists:
+  IF current IP != session IP OR userAgent != session userAgent:
+
+    → mark session suspicious
+    → record anomaly (ip_change_detected or device_mismatch)
+    → require step-up for writes (do NOT kill session)
+
+ACCEPTANCE:
+
+- Stolen session cannot silently operate from new device
+- Legit users are not locked out
+
+---
+
+### T004 — Hydrate Security Signals After Restart (HIGH)
+
+FILE: server/routes.ts
+
+EXTEND existing hydration logic:
+
+ALSO REBUILD:
+
+- recent passkey failure streaks (last 10 minutes)
+- recent replay events
+- recent device/IP anomalies
+
+SOURCE:
+
+vault_audit_log (last 10 min window)
+
+DO NOT:
+
+- run heavy queries
+- block request
+
+FAIL-OPEN:
+
+if hydration fails → continue without blocking user
+
+ACCEPTANCE:
+
+- Restart does NOT reset attacker advantage
+- Security level remains consistent
+
+---
+
+### T005 — Recovery Mode Exit Hardening (HIGH)
+
+FILE: server/routes.ts
+
+MODIFY:
+
+POST /api/security/acknowledge
+
+CHANGE BEHAVIOR:
+
+FROM:
+acknowledge clears recovery mode
+
+TO:
+
+IF user is in recovery mode:
+  REQUIRE fresh step-up (TOTP OR passkey)
+
+IF NOT stepped up:
+  return 401 "Step-up required"
+
+IF stepped up:
+  clear recovery mode
+
+ACCEPTANCE:
+
+- Attacker cannot clear recovery mode alone
+- Legit user can recover safely
+
+---
+
+### T006 — Failure Streak Decay (MEDIUM)
+
+FILE: server/routes.ts
+
+MODIFY failure tracking:
+
+CURRENT:
+failures reset to 0 on success
+
+CHANGE TO:
+
+failures = max(0, failures - 1)
+
+ACCEPTANCE:
+
+- Alternating fail/success cannot evade detection
+- Legit users recover naturally
+
+---
+
+### T007 — Username Timing Protection (MEDIUM)
+
+FILE: server/routes.ts
+
+IN login endpoints:
+
+ADD uniform delay:
+
+- random 50–120ms delay before ALL responses
+
+APPLY TO:
+- user not found
+- wrong credentials
+- passkey failures
+
+ACCEPTANCE:
+
+- Response timing does NOT reveal user existence
+
+---
+
+### T008 — Step-Up Expiry Safety (MEDIUM)
+
+FILE: server/routes.ts
+
+IN sync + restore:
+
+RE-CHECK step-up freshness RIGHT BEFORE write execution
+
+NOT just at auth time
+
+ACCEPTANCE:
+
+- Expired step-up cannot slip through long request
+
+---
+
+### T009 — Audit Log Flood Protection (LOW but important)
+
+FILE: server/routes.ts
+
+ADD in-memory dedupe window:
+
+KEY:
+(userId + action + minute bucket)
+
+IF same event repeats within window:
+→ skip duplicate audit write
+
+DO NOT suppress:
+- security_level_changed
+- recovery_mode_entered
+
+ACCEPTANCE:
+
+- Attackers cannot spam audit table
+- Important signals still logged
+
+---
+
+### T010 — Minor Canary Integrity Rule (LOW)
+
+FILE: server/routes.ts
+
+ENSURE:
+
+threatLevel is ALWAYS derived server-side
+
+DO NOT accept client input
+
+ACCEPTANCE:
+
+- Visual canary cannot be spoofed
+
+---
+
+### FINAL VERIFICATION
+
+- Type-check passes
+- Backend boots cleanly
+- No schema changes (except optional additive ones if used)
+- Existing flows unchanged for normal users
+- All protections activate ONLY under suspicious conditions

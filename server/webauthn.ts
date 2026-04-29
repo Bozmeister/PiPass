@@ -87,8 +87,37 @@ type ChallengeEntry = {
 
 const challenges = new Map<string, ChallengeEntry>();
 
-function challengeKey(kind: ChallengeKind, userId: string): string {
-  return `${kind}:${userId}`;
+// T001 hardening: per-(kind, userId) cap on outstanding challenges.
+// Without this, a logged-in user (or anything that can call /start)
+// could issue an unbounded number of /start calls and balloon the
+// in-memory map between TTL sweeps. The per-IP rate limit on
+// /passkeys/login/start (login: bucket) and /passkeys/register/start
+// already keeps this small in practice; the cap is defence-in-depth.
+// On overflow we evict the OLDEST outstanding challenge for the
+// same (kind, userId) — that one was about to expire anyway, and
+// dropping it just forces THAT particular ceremony to be re-started
+// (no broader auth impact).
+const MAX_CHALLENGES_PER_USER_KIND = 20;
+
+// T001 hardening: keys now include the challenge value as a
+// disambiguator so two parallel /start calls for the same (kind,
+// userId) — which used to OVERWRITE each other — coexist as two
+// distinct map entries. /finish then targets exactly its own entry
+// by the challenge value the client echoed back in clientDataJSON.
+// Without the challenge in the key, two concurrent ceremonies for
+// the same user would collide: only the last /start to win the
+// race would have its challenge preserved, and a /finish from the
+// earlier one would either fail (no entry) or — worse — succeed
+// against the wrong challenge if the library failed open. With it
+// in the key, each /finish consumes ONLY the entry that matches
+// the challenge embedded in its own clientDataJSON, so the two
+// ceremonies are isolated end-to-end.
+function challengeKey(
+  kind: ChallengeKind,
+  userId: string,
+  challenge: string,
+): string {
+  return `${kind}:${userId}:${challenge}`;
 }
 
 function setChallenge(
@@ -96,7 +125,26 @@ function setChallenge(
   userId: string,
   challenge: string,
 ): void {
-  challenges.set(challengeKey(kind, userId), {
+  // Cap enforcement: count + locate-oldest in a single pass over
+  // the map. O(n) on map size, which is bounded by
+  // MAX_CHALLENGES_PER_USER_KIND × active-users × 2 kinds and
+  // garbage-collected by the periodic sweep below. Acceptable.
+  const prefix = `${kind}:${userId}:`;
+  let countForUserKind = 0;
+  let oldestKey: string | null = null;
+  let oldestExpiresAt = Number.POSITIVE_INFINITY;
+  for (const [k, entry] of challenges) {
+    if (!k.startsWith(prefix)) continue;
+    countForUserKind++;
+    if (entry.expiresAt < oldestExpiresAt) {
+      oldestExpiresAt = entry.expiresAt;
+      oldestKey = k;
+    }
+  }
+  if (countForUserKind >= MAX_CHALLENGES_PER_USER_KIND && oldestKey) {
+    challenges.delete(oldestKey);
+  }
+  challenges.set(challengeKey(kind, userId, challenge), {
     challenge,
     expiresAt: Date.now() + CHALLENGE_TTL_MS,
   });
@@ -107,16 +155,60 @@ function setChallenge(
 // if it exists and has not expired; expired entries are deleted as
 // a side effect so a future GET for the same key cleanly returns
 // "no challenge" rather than "expired".
+//
+// T001 hardening: this now requires the EXACT challenge value the
+// client sent (extracted from its clientDataJSON by the caller),
+// so two parallel ceremonies for the same (kind, userId) each
+// consume only their own entry.
 function consumeChallenge(
   kind: ChallengeKind,
   userId: string,
+  challenge: string,
 ): { ok: true; challenge: string } | { ok: false; expired: boolean } {
-  const key = challengeKey(kind, userId);
+  const key = challengeKey(kind, userId, challenge);
   const entry = challenges.get(key);
   if (!entry) return { ok: false, expired: false };
   challenges.delete(key);
   if (entry.expiresAt < Date.now()) return { ok: false, expired: true };
   return { ok: true, challenge: entry.challenge };
+}
+
+// T001 hardening: pull the challenge value the client is claiming
+// straight out of clientDataJSON BEFORE we hand the response to
+// the SimpleWebAuthn library. We use this as a lookup key into
+// the per-(kind, userId, challenge) map so concurrent ceremonies
+// don't trample each other.
+//
+// NOTE: this extracted value is NOT trusted for security — it's
+// only used to FIND the right server-stored challenge entry. The
+// actual security check (assertion's clientDataJSON.challenge ===
+// stored challenge) is still performed by swVerify*Response via
+// expectedChallenge. So a malicious client that lies about its
+// challenge here either:
+//   - Picks a value that matches no stored entry → no_challenge 401
+//   - Picks a value that matches some stored entry → swVerify still
+//     re-checks origin/rpId/signature against the stored entry's
+//     challenge (we pass `claimed.challenge` as expectedChallenge,
+//     and the library compares it against what's in clientDataJSON
+//     — these are by definition equal here because we just looked
+//     up by that exact value, so the check reduces to: origin +
+//     rpId + signature match). The signature won't match unless
+//     the attacker has the credential's private key. So the worst
+//     case is "attacker steals the lookup-key role of one of their
+//     OWN concurrent ceremonies", which is harmless.
+function extractChallengeFromClientData(
+  clientDataJSON: string,
+): string | null {
+  try {
+    const json = Buffer.from(clientDataJSON, "base64url").toString("utf-8");
+    const parsed = JSON.parse(json);
+    if (parsed && typeof parsed.challenge === "string" && parsed.challenge.length > 0) {
+      return parsed.challenge;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // Periodic sweep. Lightweight: one pass over the Map evicting any
@@ -321,7 +413,22 @@ export async function verifyRegistrationResponseFor(input: {
   response: RegistrationResponseJSON;
   request: Request;
 }): Promise<VerifyRegistrationResponseResult> {
-  const claimed = consumeChallenge("registration", input.userId);
+  // T001 hardening: pull the challenge value the client claims from
+  // its clientDataJSON, then look up the per-(kind, userId,
+  // challenge) entry. If two parallel /register/start calls were
+  // in flight for this user, this isolates THIS /finish to its
+  // own /start, instead of stealing the other ceremony's entry.
+  const claimedChallengeValue = extractChallengeFromClientData(
+    input.response.response.clientDataJSON,
+  );
+  if (!claimedChallengeValue) {
+    return { ok: false, code: "no_challenge" };
+  }
+  const claimed = consumeChallenge(
+    "registration",
+    input.userId,
+    claimedChallengeValue,
+  );
   if (!claimed.ok) {
     return {
       ok: false,
@@ -435,7 +542,23 @@ export async function verifyAuthenticationResponseFor(input: {
   // anything to the library — a bypass here would let an attacker
   // skip the challenge step entirely.
   // -----------------------------------------------------------------
-  const claimed = consumeChallenge("authentication", input.userId);
+  // T001 hardening: pull the challenge value the client claims from
+  // its clientDataJSON so we can look up the EXACT entry that was
+  // created for this ceremony, not whichever entry happened to be
+  // most recent for (kind, userId). See extractChallengeFromClientData
+  // for why this lookup-key extraction is safe even though it comes
+  // from client-controlled bytes.
+  const claimedChallengeValue = extractChallengeFromClientData(
+    input.response.response.clientDataJSON,
+  );
+  if (!claimedChallengeValue) {
+    return { ok: false, code: "no_challenge" };
+  }
+  const claimed = consumeChallenge(
+    "authentication",
+    input.userId,
+    claimedChallengeValue,
+  );
   if (!claimed.ok) {
     return {
       ok: false,

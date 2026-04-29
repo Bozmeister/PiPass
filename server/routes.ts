@@ -425,7 +425,7 @@ if (!RATE_LIMIT_DISABLED) {
 // registered credentials) per user inside a sliding window. When the
 // burst threshold is crossed the caller escalates via
 // escalatePasskeyAnomaly below. A single successful passkey assertion
-// resets the counter (resetPasskeyFailures) so a legitimate user who
+// decays the counter (decayPasskeyFailures) so a legitimate user who
 // fumbled a few attempts before getting it right doesn't carry a
 // suspicion tail.
 //
@@ -481,13 +481,49 @@ function recordPasskeyFailure(userId: string): { burstMeta?: string } {
   return { burstMeta };
 }
 
-// Called from successful passkey login + step-up paths. A clean
-// authentication invalidates the failure streak so a transient flurry
-// of typos / wrong-finger taps doesn't keep the account in elevated
-// state once the user has actually proven possession.
-function resetPasskeyFailures(userId: string): void {
-  passkeyFailureState.delete(userId);
+// T006 hardening: DECAY (not full-reset) the failure streak on a
+// successful passkey authentication. The previous behaviour
+// (delete-the-entry) let an attacker run an alternating fail/succeed
+// pattern indefinitely without ever crossing the burst threshold —
+// each clean assertion would erase all of the failures that came
+// before it. Decaying by one preserves the ATTACKER's running cost:
+// to KEEP the streak below threshold they would have to interleave
+// roughly one success for every failure, and that requires actually
+// possessing a credential — a bot blasting failures still trips the
+// burst the same way it did before.
+//
+// Successful auth still IMPROVES the user's posture (the count goes
+// down by one each time and the entry is dropped at zero), but it
+// does not silently launder a long streak in a single tap. The
+// burstLogged flag survives within the SAME 5-min window — we don't
+// want to re-emit the burst audit on a count that re-crosses
+// threshold within the same window — but a fresh window naturally
+// resets it via the windowStart check in recordPasskeyFailure.
+function decayPasskeyFailures(userId: string): void {
+  const entry = passkeyFailureState.get(userId);
+  if (!entry) return;
+  entry.count = Math.max(0, entry.count - 1);
+  entry.lastTouchedAt = Date.now();
+  if (entry.count === 0) {
+    passkeyFailureState.delete(userId);
+  }
 }
+
+// T003 hardening: per-(sessionId, ip, ua) dedup so the binding-drift
+// audit + security-signal hit fires AT MOST once per unique tuple
+// per dedup TTL. Without this, every authenticated request from a
+// drifted-binding session would re-emit ip_change_detected /
+// device_mismatch and re-mark the session suspicious — pure noise
+// and a soft DoS on the audit table.
+//
+// Key shape: `${sessionId}|${currentIp}|${currentUa}`. The TTL is
+// long (1h) because a stolen session that keeps using the same
+// (ip, ua) tuple is a SINGLE event from a security-signal
+// perspective; we don't need to re-flag every minute. A session
+// that legitimately roams (mobile carrier IP rotation, captive
+// portal swap) emits one event per new tuple — also fine.
+const SESSION_BINDING_DEDUP_TTL_MS = 60 * 60_000;
+const sessionBindingDriftDedup = new Map<string, number>();
 
 if (!RATE_LIMIT_DISABLED) {
   setInterval(() => {
@@ -497,7 +533,113 @@ if (!RATE_LIMIT_DISABLED) {
         passkeyFailureState.delete(k);
       }
     }
+    // T003 hardening: piggyback on the same 5-min sweep to GC the
+    // session-binding-drift dedup map. Entries older than the dedup
+    // TTL are safe to evict — the next drifted request from the
+    // same tuple will simply re-fire one event, which is the
+    // intended cadence anyway.
+    for (const [k, ts] of sessionBindingDriftDedup) {
+      if (now - ts > SESSION_BINDING_DEDUP_TTL_MS) {
+        sessionBindingDriftDedup.delete(k);
+      }
+    }
   }, 5 * 60_000);
+}
+
+// T003 hardening: detect when an active session's current request
+// arrives from a different (ip, ua) than the session row was
+// originally minted with. Mark the session suspicious + paint the
+// security-signal + emit a dedup-aware audit row. Does NOT kill
+// the session — per spec, the existing step-up + write-block gates
+// already restrict what a drifted-binding session can DO; this
+// hook only ensures the user's session-list UI surfaces "this
+// device looks suspicious" and that subsequent context-evaluation
+// (deriveSecurityLevel) sees the elevated state.
+//
+// Conservative comparisons:
+//   - ip:    skip when stored or current is empty/unknown — the
+//            request might have arrived through a different proxy
+//            chain on first contact post-deploy and we'd rather
+//            under-flag than spam.
+//   - ua:    skip when stored or current is empty — legacy rows
+//            pre-feature have a NULL user_agent and we treat that
+//            as "no signal". Substring exact compare is fine for
+//            our purposes (a real UA change is a different string
+//            top-to-bottom, not a tweak).
+function checkSessionBindingDrift(
+  storage: IStorage,
+  session: {
+    id: string;
+    userId: string;
+    ipAddress: string | null;
+    userAgent: string | null;
+  },
+  currentIp: string | null,
+  currentUa: string | null,
+): void {
+  // Coerce nulls up-front so the rest of the function can compare
+  // strings without a type pivot. captureUserAgent returns `string |
+  // null` (legitimately, when the request omits the header) and
+  // getClientIp can also return an empty string under proxy edge
+  // cases — both must be treated as "no signal" rather than crashing
+  // .length lookups, which would have been swallowed by the outer
+  // try/catch and silently SUPPRESSED the drift signal entirely. The
+  // empty-string sentinel below then naturally short-circuits the
+  // drift compare (a stored value cannot drift from "absent").
+  const storedIp = session.ipAddress ?? "";
+  const storedUa = session.userAgent ?? "";
+  const curIp = currentIp ?? "";
+  const curUa = currentUa ?? "";
+  const ipDrift =
+    storedIp.length > 0 && curIp.length > 0 && storedIp !== curIp;
+  const uaDrift =
+    storedUa.length > 0 && curUa.length > 0 && storedUa !== curUa;
+  if (!ipDrift && !uaDrift) return;
+
+  // Dedup BEFORE any side effect so a drifted session that keeps
+  // hitting endpoints doesn't re-mark / re-audit / re-flag. The
+  // 5-min audit-level dedup in recordAudit is per-(user, action,
+  // minute) and would still let one row per minute through, which
+  // is too noisy for this signal — the session-tuple dedup here
+  // is the right granularity.
+  const key = `${session.id}|${currentIp}|${currentUa}`;
+  const now = Date.now();
+  const seenAt = sessionBindingDriftDedup.get(key);
+  if (seenAt !== undefined && now - seenAt < SESSION_BINDING_DEDUP_TTL_MS) {
+    return;
+  }
+  sessionBindingDriftDedup.set(key, now);
+
+  // Mark + signal. markSessionSuspicious is fail-open inside
+  // storage; recordSecuritySignalHit is sync in-memory. Emit the
+  // ip_change_detected row only on actual IP drift (so a UA-only
+  // change doesn't claim an IP changed); device_mismatch only on
+  // UA drift. Both can fire if both drifted. flagSession=false
+  // because markSessionSuspicious already records the per-session
+  // flag durably — the in-memory suspicious-set is a write-side
+  // optimisation we don't need to also touch from the read path.
+  void storage.markSessionSuspicious(session.id);
+  recordSecuritySignalHit(session.userId, session.id, false);
+  if (ipDrift) {
+    recordAudit(storage, {
+      userId: session.userId,
+      action: "ip_change_detected",
+      ipAddress: currentIp,
+      userAgent: `previous=${storedIp}; sessionId=${session.id.slice(0, 8)}; source=session_binding`,
+    });
+  }
+  if (uaDrift) {
+    recordAudit(storage, {
+      userId: session.userId,
+      action: "device_mismatch",
+      ipAddress: currentIp,
+      // Truncate both UAs to 80 bytes each so a malicious caller
+      // with a giant UA can't bloat the audit row past sensible
+      // bounds. captureUserAgent already caps at 512; this is a
+      // tighter limit specifically for the metadata field.
+      userAgent: `previous=${storedUa.slice(0, 80)}; current=${currentUa.slice(0, 80)}; sessionId=${session.id.slice(0, 8)}`,
+    });
+  }
 }
 
 // Single chokepoint that EXTENDS the existing security model with a
@@ -1304,6 +1446,15 @@ async function hydrateSecurityStateFromAudit(
     let recentAnomalyAt: number | undefined;
     let softLockedUntil: number | undefined;
     let hadAnomaly = false;
+    // T004 hardening: also re-derive the passkey-failure streak so
+    // the burst escalation survives a process restart. Without
+    // this, an attacker could drop a few failures right before a
+    // restart and have the in-memory counter wiped, getting an
+    // extra full window's worth of attempts before the burst
+    // threshold trips.
+    let passkeyFailuresInWindow = 0;
+    let oldestPasskeyFailureInWindowAt: number | undefined;
+    const passkeyFailureCutoff = Date.now() - PASSKEY_FAILURE_WINDOW_MS;
     for (const r of rows) {
       // Newest-first traversal — we can stop the moment we leave the
       // 10-min window (rows are strictly ordered by createdAt desc).
@@ -1333,6 +1484,40 @@ async function hydrateSecurityStateFromAudit(
         // newest is the one that's still relevant.
         softLockedUntil = Math.max(softLockedUntil ?? 0, candidate);
       }
+      // T004 hardening: passkey-side failure rows in the streak
+      // window. Counts ONLY actual failure events (not _success
+      // or _required_for_write); newest-first so the OLDEST in-
+      // window failure timestamp is the LAST one we see in this
+      // branch — used as the reconstructed windowStart.
+      if (
+        (r.action === "passkey_login_failure" ||
+          r.action === "passkey_step_up_failure") &&
+        r.createdAt >= passkeyFailureCutoff
+      ) {
+        passkeyFailuresInWindow++;
+        oldestPasskeyFailureInWindowAt = r.createdAt;
+      }
+    }
+    // T004 hardening: seed the in-memory passkey failure streak
+    // ONLY if the live path hasn't already populated it during the
+    // restart-grace window. Live state is always more authoritative
+    // (per project rule) — the audit-derived value is a
+    // best-effort restoration of state that would otherwise be
+    // entirely lost. burstLogged is reconstructed strictly from
+    // count-vs-threshold so a streak that already crossed the
+    // burst line stays "burst-acknowledged" and doesn't re-fire
+    // an anomaly_detected the moment a sixth failure arrives.
+    if (
+      passkeyFailuresInWindow > 0 &&
+      oldestPasskeyFailureInWindowAt !== undefined &&
+      !passkeyFailureState.has(userId)
+    ) {
+      passkeyFailureState.set(userId, {
+        windowStart: oldestPasskeyFailureInWindowAt,
+        count: passkeyFailuresInWindow,
+        burstLogged: passkeyFailuresInWindow > PASSKEY_FAILURE_THRESHOLD,
+        lastTouchedAt: Date.now(),
+      });
     }
     return { recentAnomalyAt, softLockedUntil, hadAnomaly };
   } catch {
@@ -1509,12 +1694,95 @@ async function hydrateIfNeeded(
 // token, or any other secret into `input`. The audit log is read
 // back wholesale by GET /api/vault/audit, so anything that lands
 // here becomes user-visible.
+// T009 hardening: opt-in dedupe for HIGH-VOLUME PROBE actions only.
+// An attacker can otherwise spam the audit_log table by repeatedly
+// firing the same failure path (e.g. /api/passkeys/login/start with a
+// known username from a botnet) — within a single minute that becomes
+// thousands of identical rows that drown out other security signals.
+//
+// Per-(user, action, minute) bucket: the FIRST event in a minute is
+// always written; subsequent events with the same key inside the
+// SAME minute are dropped at the recordAudit boundary. The minute
+// boundary is wall-clock floor(Date.now()/60_000) so the bucket
+// rolls over naturally with no extra timer.
+//
+// Opt-IN by allowlist (not opt-out) so any new audit action added in
+// future MUST be explicitly added to this set to be dedupable. This
+// is deliberate: silently suppressing security events is more
+// dangerous than a few duplicates in the table. Critical actions
+// (security_level_changed, recovery_*, session_created, vault_sync,
+// vault_restore, passkey_registered, passkey_revoked,
+// passkey_counter_replay_detected, anomaly_detected, etc.) are NOT
+// in this set and continue to write every time.
+const DEDUPABLE_AUDIT_ACTIONS: ReadonlySet<string> = new Set([
+  "passkey_login_failure",
+  "passkey_step_up_failure",
+  "totp_required",
+  "totp_required_for_write",
+  "passkey_required_for_write",
+  "write_blocked_soft_lock",
+  "ip_change_detected",
+  "device_mismatch",
+  "untrusted_device_blocked",
+  "new_device_detected",
+]);
+
+const auditDedupeBuckets = new Map<string, number>();
+const AUDIT_DEDUPE_GC_INTERVAL_MS = 5 * 60_000;
+const AUDIT_DEDUPE_MAX_AGE_MINUTES = 5;
+
+if (!RATE_LIMIT_DISABLED) {
+  setInterval(() => {
+    const cutoff = Math.floor(Date.now() / 60_000) - AUDIT_DEDUPE_MAX_AGE_MINUTES;
+    for (const [k, minute] of auditDedupeBuckets) {
+      if (minute < cutoff) auditDedupeBuckets.delete(k);
+    }
+  }, AUDIT_DEDUPE_GC_INTERVAL_MS);
+}
+
+function shouldRecordAuditEvent(input: AuditEventInput): boolean {
+  if (!DEDUPABLE_AUDIT_ACTIONS.has(input.action)) return true;
+  // userId may be optional for some event shapes; treat absence as
+  // "always record" to avoid coalescing distinct anonymous events.
+  const userKey = input.userId ?? "_";
+  const minute = Math.floor(Date.now() / 60_000);
+  const key = `${userKey}:${input.action}:${minute}`;
+  if (auditDedupeBuckets.has(key)) return false;
+  auditDedupeBuckets.set(key, minute);
+  return true;
+}
+
 function recordAudit(storage: IStorage, input: AuditEventInput): void {
+  if (!shouldRecordAuditEvent(input)) {
+    // Suppressed by dedupe; intentional no-op. The first event in
+    // this (user, action, minute) bucket already wrote, so an
+    // operator reading the audit log still sees the signal.
+    return;
+  }
   storage.logAuditEvent(input).catch(() => {
     // Errors are already logged inside storage.logAuditEvent. The
     // additional .catch() here is just to absorb any rejection so it
     // can't surface as an unhandled promise rejection.
   });
+}
+
+// T007 hardening: uniform random delay before LOGIN responses (both
+// success and failure, both password and passkey paths). Defends
+// against timing oracles that could otherwise distinguish:
+//   - "user exists vs not" (DB lookup latency, dummy-salt latency)
+//   - "credential valid vs not" (verifier latency, counter-update
+//      DB latency)
+// The existing dummy-PBKDF2 (hashForComparison on the not-found
+// branch) equalizes the heavy-crypto cost; this delay further
+// drowns out the lighter timing differences left over.
+//
+// 50-120ms is a small enough range to be invisible to a real user
+// but large enough to swamp typical inter-branch nanosecond
+// differences. Math.random is fine here — this is anti-timing
+// noise, not a security secret.
+async function uniformLoginDelay(): Promise<void> {
+  const ms = 50 + Math.floor(Math.random() * 71);
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 // Result of authenticating a request via either session token (preferred)
@@ -1575,6 +1843,23 @@ async function authenticate(
       await storage.touchSession(session.id, Date.now());
     } catch (err) {
       console.error("touchSession failed");
+    }
+    // T003 hardening: compare the current request's (ip, ua) to the
+    // values the session row was minted with. On drift, mark the
+    // session suspicious + paint the security signal + emit a
+    // dedup-aware audit row. Wrapped in try/catch so a failure here
+    // (e.g. transient DB issue inside markSessionSuspicious)
+    // CANNOT block the user's request — fail-open per the project's
+    // standing rule for system errors on the auth hot path.
+    try {
+      checkSessionBindingDrift(
+        storage,
+        session,
+        getClientIp(req),
+        captureUserAgent(req),
+      );
+    } catch (err) {
+      console.error("checkSessionBindingDrift failed");
     }
     // Lazy hydration of security state from audit log. Only fires
     // ONCE per user per process — subsequent auths short-circuit on
@@ -1708,6 +1993,16 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       if (!parsed.ok) {
         return res.status(400).json({ error: parsed.error });
       }
+
+      // T007 hardening: uniform random delay BEFORE the auth-result
+      // work. Every subsequent return path (not-found 401, wrong-hash
+      // 401, TOTP-required 200, success 200) inherits the same
+      // 50-120ms baseline noise, which swamps the sub-millisecond
+      // branch-time differences (DB lookup vs cached miss, dummy
+      // hash vs real compare) that could otherwise be measured by a
+      // username-enumeration probe. The 429 + 400 paths above are
+      // intentionally NOT delayed — they don't leak user existence.
+      await uniformLoginDelay();
 
       const { username, authHash } = parsed.data;
 
@@ -2049,6 +2344,35 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res
           .status(403)
           .json({ error: "Untrusted device - approval required" });
+      }
+
+      // T008 hardening: re-check step-up freshness immediately
+      // before the storage write to close the TOCTOU window between
+      // the gate evaluation above and the actual write. Captured
+      // syncStepUpWasRequired off the gate decision — so this
+      // re-check fires ONLY for users who actually had to step up
+      // (TOTP-enabled OR passkey-enabled in an elevated context).
+      // Users with no second factor enabled keep the existing
+      // behaviour (no step-up was required at the gate, no re-check
+      // here). totpVerifiedUntil is the snapshot loaded by
+      // authenticate(); Date.now() advances during the awaits
+      // between authenticate and here — so a long-running auth +
+      // anomaly evaluation could cross the expiry boundary even
+      // though the gate above passed. Failing CLOSED on expiry
+      // (401, same shape as the gate above) is the correct posture.
+      const syncStepUpWasRequired =
+        syncStepUp.required || syncStepUpPasskey.required;
+      if (
+        syncStepUpWasRequired &&
+        !(auth.totpVerifiedUntil !== null && auth.totpVerifiedUntil > Date.now())
+      ) {
+        recordAudit(storage, {
+          userId,
+          action: "totp_required_for_write",
+          ipAddress: getClientIp(req),
+          userAgent: `attemptedAction=sync; reason=step_up_expired_pre_write`,
+        });
+        return res.status(401).json({ error: "Step-up expired" });
       }
 
       // syncVault is fully transactional: it locks the existing row,
@@ -2420,6 +2744,27 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res
           .status(403)
           .json({ error: "Untrusted device - approval required" });
+      }
+
+      // T008 hardening: re-check step-up freshness immediately
+      // before the storage write — same TOCTOU rationale as the
+      // sync handler. For restore the gate uses requireAlways:true,
+      // so step-up is required for ANY second-factor-enabled user
+      // regardless of context; the re-check therefore fires for
+      // every TOTP-or-passkey user. Fails closed on expiry.
+      const restoreStepUpWasRequired =
+        restoreStepUp.required || restoreStepUpPasskey.required;
+      if (
+        restoreStepUpWasRequired &&
+        !(auth.totpVerifiedUntil !== null && auth.totpVerifiedUntil > Date.now())
+      ) {
+        recordAudit(storage, {
+          userId,
+          action: "totp_required_for_write",
+          ipAddress: getClientIp(req),
+          userAgent: `attemptedAction=restore; reason=step_up_expired_pre_write`,
+        });
+        return res.status(401).json({ error: "Step-up expired" });
       }
 
       // restoreVault is itself transactional and idempotent: it picks the
@@ -2885,6 +3230,39 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(429).json({ error: "Too many requests" });
       }
 
+      // T005 hardening: an attacker holding a stolen session token
+      // would otherwise be able to silently dismiss recovery mode
+      // (clearing the in-memory critical-state flag and re-enabling
+      // a normal-context UI) without proving they hold the user's
+      // SECOND factor. For accounts with TOTP enabled OR an active
+      // passkey, require the same step-up posture the sync/restore
+      // path requires (auth.totpVerifiedUntil > now — both factors
+      // write that column, so either satisfies). Accounts with no
+      // second factor at all retain the existing single-factor
+      // behaviour — there is nothing to step up to. Failure here
+      // emits the same totp_required_for_write audit shape as the
+      // write-path gates so an operator reading the log sees a
+      // unified "step-up was needed" event regardless of the
+      // attempted action.
+      const recUser = await storage.getUser(userId);
+      const recPasskeys = await storage.listCredentialsForUser(userId);
+      const recHasSecondFactor =
+        recUser?.totpEnabled === true || recPasskeys.length > 0;
+      if (recHasSecondFactor) {
+        const recStepUpFresh =
+          auth.totpVerifiedUntil !== null &&
+          auth.totpVerifiedUntil > Date.now();
+        if (!recStepUpFresh) {
+          recordAudit(storage, {
+            userId,
+            action: "totp_required_for_write",
+            ipAddress: getClientIp(req),
+            userAgent: `attemptedAction=recovery_ack; totpEnabled=${recUser?.totpEnabled === true}; passkeys=${recPasskeys.length}`,
+          });
+          return res.status(401).json({ error: "Step-up required" });
+        }
+      }
+
       const r = recoveryState.get(userId);
       if (r?.active) {
         // Flip the flag synchronously so a parallel write-blocker
@@ -3204,6 +3582,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         if (!parsed.ok) {
           return res.status(400).json({ error: parsed.error });
         }
+
+        // T007 hardening: uniform random delay before any auth-result
+        // branch. Equalises timing across "unknown temp token",
+        // "user gone / TOTP disabled mid-flow", "wrong code", and
+        // "success" — none of which should be distinguishable
+        // through latency. 429 + 400 above are not delayed.
+        await uniformLoginDelay();
 
         const tempTokenHash = createHash("sha256")
           .update(parsed.data.tempToken)
@@ -3758,8 +4143,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // future step-up on this same credential. Counter
         // persistence is therefore on the critical path; a write
         // failure is a real 500, not the generic 401.
+        let counterAdvancedStepUp = false;
         try {
-          await storage.updateCredentialCounter(
+          counterAdvancedStepUp = await storage.updateCredentialCounter(
             stored.credentialId,
             verified.newCounter,
           );
@@ -3770,6 +4156,57 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           return res
             .status(500)
             .json({ error: "Internal server error" });
+        }
+        if (!counterAdvancedStepUp) {
+          // T002 hardening: the conditional UPDATE matched zero rows
+          // — a concurrent assertion for the same credential won
+          // the race and already wrote the new counter. From the
+          // server's perspective THIS step-up assertion is a replay
+          // (the counter we'd write is no longer ahead of stored),
+          // even though the SimpleWebAuthn verifier individually
+          // accepted both. Treat it the same as the explicit
+          // counter_replay branch above: revoke the credential,
+          // emit replay + revoked + step_up_failure audits, and
+          // escalate with a hard soft-lock. Best-effort revoke —
+          // a DB hiccup must not let us KEEP a compromised
+          // credential alive.
+          let raceRevoked = false;
+          try {
+            raceRevoked = await storage.revokeCredential(stored.credentialId);
+          } catch (revokeErr) {
+            console.error(
+              "Failed to revoke credential after T002 race during step-up",
+            );
+          }
+          recordAudit(storage, {
+            userId,
+            action: "passkey_counter_replay_detected",
+            ipAddress: clientIp,
+            userAgent: `source=step_up; reason=race`,
+          });
+          if (raceRevoked) {
+            recordAudit(storage, {
+              userId,
+              action: "passkey_revoked",
+              ipAddress: clientIp,
+              userAgent: `reason=counter_replay; source=step_up; race=true`,
+            });
+          }
+          recordAudit(storage, {
+            userId,
+            action: "passkey_step_up_failure",
+            ipAddress: clientIp,
+            userAgent,
+          });
+          escalatePasskeyAnomaly(
+            storage,
+            userId,
+            sessionId,
+            clientIp,
+            `passkey replay race detected; source=step_up`,
+            { hardLock: true },
+          );
+          return res.status(401).json({ error: "Step-up failed" });
         }
 
         const verifiedUntil = Date.now() + STEP_UP_TTL_MS;
@@ -3804,11 +4241,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           ipAddress: clientIp,
           userAgent,
         });
-        // Successful step-up = clean possession proof. Drop any
-        // accumulated failure-burst state so a previously-fumbled
-        // streak doesn't keep the account in an elevated posture
-        // after the user actually authenticated.
-        resetPasskeyFailures(userId);
+        // Successful step-up = clean possession proof. T006 hardening:
+        // DECAY (not full-reset) the failure-burst counter so an
+        // attacker can't launder a long streak with a single
+        // successful tap. See decayPasskeyFailures for rationale.
+        decayPasskeyFailures(userId);
 
         return res.status(200).json({
           success: true,
@@ -4087,6 +4524,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           return res.status(400).json({ error: parsed.error });
         }
 
+        // T007 hardening: uniform random delay before the user
+        // lookup. Equalises timing for "unknown user", "user with
+        // no passkeys", and "valid user with credentials" so a
+        // probe can't tell them apart by latency. 429 + 400 above
+        // are not delayed — they don't leak user existence.
+        await uniformLoginDelay();
+
         const { username } = parsed.data;
 
         const user = await storage.getUserByUsername(username);
@@ -4206,6 +4650,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         if (!parsed.ok) {
           return res.status(400).json({ error: parsed.error });
         }
+
+        // T007 hardening: uniform random delay before the credential
+        // lookup. Equalises timing for "unknown credential id",
+        // "user mismatch", "verifier failure", "counter replay",
+        // "TOTP gate", and "success". 429 + 400 above are not
+        // delayed.
+        await uniformLoginDelay();
 
         // The browser hands us back the credential id it used. Look
         // it up — getCredentialById already filters out revoked
@@ -4351,8 +4802,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // (real server failure) rather than the generic 401: the
         // credential is valid, the storage layer just couldn't
         // write.
+        let counterAdvancedLogin = false;
         try {
-          await storage.updateCredentialCounter(
+          counterAdvancedLogin = await storage.updateCredentialCounter(
             stored.credentialId,
             verified.newCounter,
           );
@@ -4363,6 +4815,55 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           return res
             .status(500)
             .json({ error: "Internal server error" });
+        }
+        if (!counterAdvancedLogin) {
+          // T002 hardening: conditional UPDATE matched zero rows —
+          // a concurrent login-assertion for the same credential
+          // won the race. Treat THIS attempt as replay, even though
+          // the verifier accepted it independently (same rationale
+          // as the step-up handler). Revoke + audit + escalate.
+          // sessionId is null on the unauth login path; hardLock=true
+          // matches the explicit counter_replay branch above —
+          // counter_replay is essentially never benign and the
+          // credential is already revoked here.
+          let raceRevoked = false;
+          try {
+            raceRevoked = await storage.revokeCredential(stored.credentialId);
+          } catch (revokeErr) {
+            console.error(
+              "Failed to revoke credential after T002 race during login",
+            );
+          }
+          recordAudit(storage, {
+            userId: stored.userId,
+            action: "passkey_counter_replay_detected",
+            ipAddress: clientIp,
+            userAgent: `source=login; reason=race`,
+          });
+          if (raceRevoked) {
+            recordAudit(storage, {
+              userId: stored.userId,
+              action: "passkey_revoked",
+              ipAddress: clientIp,
+              userAgent: `reason=counter_replay; source=login; race=true`,
+            });
+          }
+          recordAudit(storage, {
+            userId: stored.userId,
+            action: "passkey_login_failure",
+            ipAddress: clientIp,
+            userAgent,
+          });
+          escalatePasskeyAnomaly(
+            storage,
+            stored.userId,
+            null,
+            clientIp,
+            `passkey replay race detected; source=login`,
+            { hardLock: true },
+          );
+          await uniformLoginDelay();
+          return res.status(401).json({ error: "Invalid credentials" });
         }
 
         // TOTP gate. The verifier currently runs with
@@ -4404,11 +4905,12 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             ipAddress: clientIp,
             userAgent,
           });
-          // Passkey assertion verified — clear the failure-burst
-          // counter even though TOTP is still pending. The passkey
-          // half is proven; a fresh attacker can't keep the burst
-          // alive purely by exhausting passkey attempts.
-          resetPasskeyFailures(stored.userId);
+          // Passkey assertion verified — decay the failure-burst
+          // counter (T006: not a full reset) even though TOTP is
+          // still pending. The passkey half is proven; the streak
+          // budget is reduced by one so an alternating fail/succeed
+          // pattern still trips the burst eventually.
+          decayPasskeyFailures(stored.userId);
           // The ABSENCE of sessionToken is the signal that more
           // factors are needed. requiresTOTP + tempToken matches
           // /api/auth/login's 2FA-required response shape exactly.
@@ -4460,8 +4962,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           userAgent,
         });
         // Successful full-session passkey login = clean possession
-        // proof. Drop any accumulated failure-burst state.
-        resetPasskeyFailures(stored.userId);
+        // proof. T006: decay (not full-reset) the failure-burst
+        // counter so an attacker can't launder a long streak with
+        // a single tap.
+        decayPasskeyFailures(stored.userId);
         if (!isKnownDevice) {
           // Mirror the new-device handling from /api/auth/login:
           // log the event, raise the in-memory threat signal, and
