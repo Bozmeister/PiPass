@@ -68,16 +68,12 @@ before(async () => {
   // driven from tests. Without this, every connection looks like
   // 127.0.0.1 and the IP-binding test (T004) becomes a no-op.
   app.set("trust proxy", true);
-  // The route module mounts per-route jsonBody() on most endpoints,
-  // but a handful (notably /api/security/device/{trust,revoke}) read
-  // req.body without their own parser and rely on global JSON parsing
-  // upstream. server/index.ts only mounts express.urlencoded() at the
-  // app level — so those routes work in production only because the
-  // dev/prod entrypoint serves traffic through a different parser
-  // chain or a reverse proxy. We mirror the JSON parser the routes
-  // implicitly assume so tests exercise the same code path the
-  // intended client will hit. Limit matches AUTH_BODY_LIMIT (4kb).
-  app.use(express.json({ limit: "4kb" }));
+  // No global json parser here: the route module now mounts a
+  // per-route jsonBody(AUTH_BODY_LIMIT) on every endpoint that
+  // reads req.body (the previous "implicit upstream parser"
+  // assumption was a bug — see prior task fix). Tests therefore
+  // exercise the SAME parser chain production runs, with the
+  // SAME stricter per-route limits in force.
   server = await registerRoutes(app, storage);
   await new Promise<void>((resolve) =>
     server.listen(0, "127.0.0.1", () => resolve()),
@@ -934,5 +930,70 @@ test("T010 — passkey login rate-limit cannot be bypassed by switching to passw
     pwLogin.status,
     429,
     "password login from the same exhausted IP must also 429 (shared bucket)",
+  );
+});
+
+// T011 — audit visibility: a failed password login (known user, wrong
+// authHash) must leave a `login_failed` row in the audit log keyed
+// under the real userId. The user-not-found branch deliberately
+// writes nothing (no userId to attach + would become a username-
+// enumeration oracle), but once the username is real the row IS
+// emitted so the legitimate user sees the probe in their activity
+// log. Dedup is per (user, ip, minute), so multiple attempts from
+// the same IP in the same minute collapse to a single row — that's
+// the spec's required behaviour, not a regression.
+test("T011 — failed password login emits a login_failed audit row keyed under the real userId", async () => {
+  const u = await registerUser();
+  const probeIp = "10.0.11.7"; // unique IP so the dedup bucket is owned by this test
+
+  // Wrong authHash → 401, but should leave an audit row.
+  const wrongAttempt = await loginUser(u.username, hex64("z"), { ip: probeIp });
+  assert.equal(wrongAttempt.status, 401, "wrong authHash must 401");
+
+  // Audit fire-and-forget needs the event-loop tick to flush.
+  await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+  const audit = await storage.getAuditLog(u.userId, 50);
+  const loginFailedRow = audit.find((r) => r.action === "login_failed");
+  assert.ok(
+    loginFailedRow,
+    "expected a login_failed audit row after wrong-password attempt",
+  );
+  assert.equal(loginFailedRow!.ipAddress, probeIp);
+  // userAgent metadata must carry the safe reason enum and MUST NOT
+  // contain the password / authHash material.
+  assert.ok(
+    /reason=invalid_credentials/.test(loginFailedRow!.userAgent ?? ""),
+    "userAgent metadata must include reason=invalid_credentials",
+  );
+  assert.ok(
+    !/[a-f0-9]{64}/i.test(loginFailedRow!.userAgent ?? ""),
+    "userAgent metadata must NOT echo the 64-hex authHash",
+  );
+
+  // A second wrong attempt from the SAME IP within the same minute
+  // is suppressed by the (user, ip, minute) dedup — confirming the
+  // dedup contract works as designed (one row, not two).
+  await loginUser(u.username, hex64("y"), { ip: probeIp });
+  await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  const audit2 = await storage.getAuditLog(u.userId, 50);
+  const loginFailedRows = audit2.filter((r) => r.action === "login_failed");
+  assert.equal(
+    loginFailedRows.length,
+    1,
+    "second failure from same IP within the minute must dedup to one row",
+  );
+
+  // A failure from a DIFFERENT IP within the same minute MUST leave a
+  // distinct row — distributed brute-force from many IPs cannot
+  // collapse all attempts into a single row (preserves the signal
+  // a per-user-only dedup would erase).
+  await loginUser(u.username, hex64("y"), { ip: "10.0.11.8" });
+  await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  const audit3 = await storage.getAuditLog(u.userId, 50);
+  const loginFailedRows2 = audit3.filter((r) => r.action === "login_failed");
+  assert.ok(
+    loginFailedRows2.length >= 2,
+    `expected ≥2 login_failed rows once a second IP attempted (got ${loginFailedRows2.length}) — IP-aware dedup must NOT collapse across IPs`,
   );
 });

@@ -560,6 +560,76 @@ function decayPasskeyFailures(userId: string): void {
   }
 }
 
+// Login-failure burst tracker (in-memory)
+// ---------------------------------------------------------------------------
+//
+// Mirrors the passkey-failure tracker above but counts CONSECUTIVE
+// non-passkey login failures (password mismatch, TOTP code wrong)
+// per user inside the same 5-min sliding window. Kept as a separate
+// state map so the passkey decay semantics (a successful passkey tap
+// decays the streak) don't accidentally launder password-side bursts
+// and vice-versa.
+//
+// On burst the caller escalates via the EXISTING escalatePasskeyAnomaly
+// helper (the function is generic — it writes anomaly_detected +
+// recordSecuritySignalHit + optional triggerSoftLock; only the name
+// has "Passkey" in it). Uses hardLock=false on the unauth login path
+// for the same DoS-protection reason as the passkey burst: an
+// attacker who knows a victim username + can rotate IPs could
+// otherwise soft-lock the legitimate user's writes.
+//
+// Threshold + window match the passkey side deliberately (>5 in 5min)
+// — a real user who fat-fingers their password or TOTP code converges
+// in 1–3 attempts, so the 6th failure is the right escalation point.
+const LOGIN_FAILURE_THRESHOLD = 5;
+const LOGIN_FAILURE_WINDOW_MS = 5 * 60_000;
+const LOGIN_FAILURE_STATE_TTL_MS = 60 * 60_000;
+
+type LoginFailureState = {
+  windowStart: number;
+  count: number;
+  burstLogged: boolean;
+  lastTouchedAt: number;
+};
+const loginFailureState = new Map<string, LoginFailureState>();
+
+function recordLoginFailure(userId: string): { burstMeta?: string } {
+  const now = Date.now();
+  let entry = loginFailureState.get(userId);
+  if (!entry || now - entry.windowStart > LOGIN_FAILURE_WINDOW_MS) {
+    entry = {
+      windowStart: now,
+      count: 0,
+      burstLogged: false,
+      lastTouchedAt: now,
+    };
+    loginFailureState.set(userId, entry);
+  }
+  entry.count++;
+  entry.lastTouchedAt = now;
+  let burstMeta: string | undefined;
+  if (entry.count > LOGIN_FAILURE_THRESHOLD && !entry.burstLogged) {
+    entry.burstLogged = true;
+    burstMeta = `login failure threshold exceeded (${entry.count} in ${LOGIN_FAILURE_WINDOW_MS / 1000}s)`;
+  }
+  return { burstMeta };
+}
+
+// Decay (not full-reset) on a successful login. Same reasoning as
+// decayPasskeyFailures: an attacker shouldn't be able to launder a
+// long failure streak with a single successful guess. The streak
+// only fully clears when count reaches zero or the 5-min window
+// rolls.
+function decayLoginFailures(userId: string): void {
+  const entry = loginFailureState.get(userId);
+  if (!entry) return;
+  entry.count = Math.max(0, entry.count - 1);
+  entry.lastTouchedAt = Date.now();
+  if (entry.count === 0) {
+    loginFailureState.delete(userId);
+  }
+}
+
 // T003 hardening: per-(sessionId, ip, ua) dedup so the binding-drift
 // audit + security-signal hit fires AT MOST once per unique tuple
 // per dedup TTL. Without this, every authenticated request from a
@@ -582,6 +652,14 @@ if (!RATE_LIMIT_DISABLED) {
     for (const [k, v] of passkeyFailureState) {
       if (now - v.lastTouchedAt > PASSKEY_FAILURE_STATE_TTL_MS) {
         passkeyFailureState.delete(k);
+      }
+    }
+    // Same 5-min sweep also GCs the login-failure tracker — entries
+    // not touched in an hour can't be part of any active 5-min burst
+    // window and serve no further purpose.
+    for (const [k, v] of loginFailureState) {
+      if (now - v.lastTouchedAt > LOGIN_FAILURE_STATE_TTL_MS) {
+        loginFailureState.delete(k);
       }
     }
     // T003 hardening: piggyback on the same 5-min sweep to GC the
@@ -1833,6 +1911,13 @@ const DEDUPABLE_AUDIT_ACTIONS: ReadonlySet<string> = new Set([
   "device_mismatch",
   "untrusted_device_blocked",
   "new_device_detected",
+  // login_failed is dedupable but uses an IP-aware key (see
+  // shouldRecordAuditEvent below) so an attacker who rotates
+  // through many IPs against the same victim still leaves a
+  // distinct row per (user, ip, minute) — preserving the signal
+  // a per-user-only dedup would erase. Spec requirement: dedupe
+  // per (userId OR username) + IP + 60-second window.
+  "login_failed",
 ]);
 
 const auditDedupeBuckets = new Map<string, number>();
@@ -1854,7 +1939,16 @@ function shouldRecordAuditEvent(input: AuditEventInput): boolean {
   // "always record" to avoid coalescing distinct anonymous events.
   const userKey = input.userId ?? "_";
   const minute = Math.floor(Date.now() / 60_000);
-  const key = `${userKey}:${input.action}:${minute}`;
+  // login_failed dedup is per-(user, ip, minute) so a distributed
+  // brute-force from many IPs against the same account still yields
+  // a row per attacker-IP per minute. All other dedupable actions
+  // collapse to a single row per (user, action, minute), which is
+  // the right granularity for those signals (a UA flap or device-
+  // mismatch flap should not flood the table).
+  const key =
+    input.action === "login_failed"
+      ? `${userKey}:login_failed:${input.ipAddress ?? "_"}:${minute}`
+      : `${userKey}:${input.action}:${minute}`;
   if (auditDedupeBuckets.has(key)) return false;
   auditDedupeBuckets.set(key, minute);
   return true;
@@ -2170,6 +2264,40 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       const storedHash = Buffer.from(user.authHash, "hex");
 
       if (providedHash.length !== storedHash.length || !timingSafeEqual(providedHash, storedHash)) {
+        // Audit visibility: emit a generic login_failed row so the
+        // legitimate user sees the probe in their activity log,
+        // even though the response is the same generic 401 the
+        // not-found branch returns. The audit row is keyed under
+        // the REAL userId (we just confirmed the username exists
+        // and the password didn't match) — anyone reading their
+        // own log learns "someone tried my account from <ip>".
+        // Dedup is per (user, ip, minute) via shouldRecordAuditEvent
+        // so a high-volume guess from one IP is one row per minute,
+        // while a distributed attempt across many IPs leaves a
+        // distinct row per attacker.
+        recordAudit(storage, {
+          userId: user.id,
+          action: "login_failed",
+          ipAddress: clientIp,
+          userAgent: `reason=invalid_credentials; ua=${(captureUserAgent(req) ?? "").slice(0, 200)}`,
+        });
+        // Burst tracker: 6th failure inside a 5-min window escalates
+        // via the existing security-signal pipeline (anomaly_detected
+        // audit + recordSecuritySignalHit). hardLock=false because
+        // this is the unauthenticated path — an attacker who knows
+        // a victim username + can rotate IPs could otherwise soft-
+        // lock the legitimate user's writes (DoS vector).
+        const burst = recordLoginFailure(user.id);
+        if (burst.burstMeta) {
+          escalatePasskeyAnomaly(
+            storage,
+            user.id,
+            null,
+            clientIp,
+            `${burst.burstMeta}; source=password_login`,
+            { hardLock: false },
+          );
+        }
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
@@ -2263,6 +2391,12 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         ipAddress: ip,
         userAgent,
       });
+      // Decay (not full-reset) the login-failure burst counter on a
+      // clean success — same reasoning as decayPasskeyFailures: a
+      // single successful login should NOT erase a 5-attempt streak
+      // that came before it (an attacker who stumbles on the right
+      // password after 4 wrong guesses still leaves a partial trail).
+      decayLoginFailures(user.id);
       // New-device path: log the event AND raise the in-memory threat
       // signal so the very first request after login (the client's
       // initial /api/vault/fetch) already sees securityLevel=elevated.
@@ -3364,7 +3498,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
   //     the existing logout-all flow.
   // The user is therefore never trapped, but is also never falsely
   // told the underlying signals have all cleared.
-  app.post("/api/vault/recovery/acknowledge", async (req: Request, res: Response) => {
+  app.post("/api/vault/recovery/acknowledge", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
       const queryCheck = validateNoQueryParams(req);
       if (!queryCheck.ok) {
@@ -3459,7 +3593,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
   // had unblocked sync/restore when in fact the next request would
   // still trip the 403 (auth-hash callers are exempt from the device-
   // trust gate, but they're also incapable of toggling the flag).
-  app.post("/api/auth/trust-device", async (req: Request, res: Response) => {
+  app.post("/api/auth/trust-device", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
       const queryCheck = validateNoQueryParams(req);
       if (!queryCheck.ok) {
@@ -3616,7 +3750,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
   // so a stolen session cannot self-elevate. Audit on success
   // (device_trusted is NOT in DEDUPABLE — every user-initiated trust
   // toggle is recorded distinctly).
-  app.post("/api/security/device/trust", async (req: Request, res: Response) => {
+  app.post("/api/security/device/trust", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
       const queryCheck = validateNoQueryParams(req);
       if (!queryCheck.ok) {
@@ -3676,7 +3810,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
   // re-elevates the security posture (sync/restore will require
   // step-up again) without forcing a re-login, which matches the
   // existing trust-device / untrust-session UX.
-  app.post("/api/security/device/revoke", async (req: Request, res: Response) => {
+  app.post("/api/security/device/revoke", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
       const queryCheck = validateNoQueryParams(req);
       if (!queryCheck.ok) {
@@ -3754,7 +3888,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
     })
     .strict();
 
-  app.post("/api/security/device/label", async (req: Request, res: Response) => {
+  app.post("/api/security/device/label", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
       const queryCheck = validateNoQueryParams(req);
       if (!queryCheck.ok) {
@@ -3847,7 +3981,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
     })
     .strict();
 
-  app.post("/api/passkeys/revoke", async (req: Request, res: Response) => {
+  app.post("/api/passkeys/revoke", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
       const queryCheck = validateNoQueryParams(req);
       if (!queryCheck.ok) {
@@ -3930,7 +4064,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
   // Idempotent for in-flight setups: calling setup twice in a row
   // overwrites the pending entry, so a user who lost their first
   // QR code can simply re-trigger the flow.
-  app.post("/api/auth/totp/setup", async (req: Request, res: Response) => {
+  app.post("/api/auth/totp/setup", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
     try {
       const queryCheck = validateNoQueryParams(req);
       if (!queryCheck.ok) {
@@ -4138,7 +4272,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           tempLoginTokens.delete(tempTokenHash);
           return res
             .status(401)
-            .json({ error: "Invalid or expired credentials" });
+            .json({ error: "Invalid credentials" });
         }
 
         // ATOMIC CLAIM: delete BEFORE any await so two concurrent
@@ -4162,7 +4296,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // password phase. Same single-shape 401.
           return res
             .status(401)
-            .json({ error: "Invalid or expired credentials" });
+            .json({ error: "Invalid credentials" });
         }
 
         const secret = decryptTotpSecret(user.totpSecretEncrypted);
@@ -4201,9 +4335,38 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             ipAddress: clientIp,
             userAgent: captureUserAgent(req),
           });
+          // Audit visibility: also emit the unified login_failed
+          // event so a client (or operator) reading the audit log can
+          // count "failed login attempts of any kind" with a single
+          // action filter, instead of OR'ing across totp_login_failure
+          // / passkey_login_failure / etc. Dedup is per (user, ip,
+          // minute) — a fat-fingered code retry from the same IP
+          // collapses to one row per minute.
+          recordAudit(storage, {
+            userId: user.id,
+            action: "login_failed",
+            ipAddress: clientIp,
+            userAgent: `reason=invalid_credentials; ua=${(captureUserAgent(req) ?? "").slice(0, 200)}`,
+          });
+          // Burst tracker: TOTP failures count toward the same
+          // login-failure window as password failures (they're two
+          // halves of the same auth flow). 6th failure inside 5 min
+          // escalates via the existing security-signal pipeline.
+          // hardLock=false: this is the unauth (pre-session) path.
+          const burst = recordLoginFailure(user.id);
+          if (burst.burstMeta) {
+            escalatePasskeyAnomaly(
+              storage,
+              user.id,
+              null,
+              clientIp,
+              `${burst.burstMeta}; source=totp_login`,
+              { hardLock: false },
+            );
+          }
           return res
             .status(401)
-            .json({ error: "Invalid or expired credentials" });
+            .json({ error: "Invalid credentials" });
         }
 
         // SUCCESS: temp token already burned at the top of this
@@ -4246,6 +4409,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           ipAddress: clientIp,
           userAgent,
         });
+        // Decay (not full-reset) the login-failure burst counter on
+        // a clean TOTP success — same reasoning as the password
+        // login success path. Mirrors decayPasskeyFailures.
+        decayLoginFailures(user.id);
         if (!isKnownDevice) {
           recordAudit(storage, {
             userId: user.id,
@@ -5091,6 +5258,17 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             ipAddress: clientIp,
             userAgent: captureUserAgent(req),
           });
+          // Unified login_failed companion event — see the password
+          // login failure path for the full rationale. Both rows
+          // are emitted so a client filtering on either action sees
+          // the probe; both share the same (user, ip, minute)
+          // dedup window via shouldRecordAuditEvent.
+          recordAudit(storage, {
+            userId: user.id,
+            action: "login_failed",
+            ipAddress: clientIp,
+            userAgent: `reason=invalid_credentials; ua=${(captureUserAgent(req) ?? "").slice(0, 200)}`,
+          });
           // Failure-burst tracking with hardLock=false. This is the
           // unauthenticated path: an attacker who knows a victim
           // username + can rotate IPs could otherwise trigger a
@@ -5277,6 +5455,14 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
               ipAddress: clientIp,
               userAgent,
             });
+            // Unified login_failed companion event — see the password
+            // login failure path for the full rationale.
+            recordAudit(storage, {
+              userId: stored.userId,
+              action: "login_failed",
+              ipAddress: clientIp,
+              userAgent: `reason=invalid_credentials; ua=${(userAgent ?? "").slice(0, 200)}`,
+            });
             // Replay = single-event high-confidence signal. Escalate
             // with hardLock=true even though this is the unauth path:
             // counter_replay is essentially never benign (a cloned or
@@ -5307,6 +5493,14 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             action: "passkey_login_failure",
             ipAddress: clientIp,
             userAgent,
+          });
+          // Unified login_failed companion event — see the password
+          // login failure path for the full rationale.
+          recordAudit(storage, {
+            userId: stored.userId,
+            action: "login_failed",
+            ipAddress: clientIp,
+            userAgent: `reason=invalid_credentials; ua=${(userAgent ?? "").slice(0, 200)}`,
           });
           if (verified.code === "internal_error") {
             console.error(
@@ -5389,6 +5583,14 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             action: "passkey_login_failure",
             ipAddress: clientIp,
             userAgent,
+          });
+          // Unified login_failed companion event — see the password
+          // login failure path for the full rationale.
+          recordAudit(storage, {
+            userId: stored.userId,
+            action: "login_failed",
+            ipAddress: clientIp,
+            userAgent: `reason=invalid_credentials; ua=${(userAgent ?? "").slice(0, 200)}`,
           });
           escalatePasskeyAnomaly(
             storage,
