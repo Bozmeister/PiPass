@@ -7,6 +7,7 @@ import {
   sessions,
   vaultAuditLog,
   webauthnCredentials,
+  trustedDevices,
   type User,
   type VaultBlob,
   type Session,
@@ -126,6 +127,43 @@ export type CredentialListItem = {
   transports: string | null;
   createdAt: number;
   lastUsedAt: number | null;
+};
+
+// Public-safe projection of a trusted_devices row for the device
+// management screen. Mirrors CredentialListItem's "minimum fields the
+// UI needs" discipline: the fingerprint is the only stable handle the
+// client uses to address subsequent /trust /revoke /label calls; label
+// + trusted drive the row's display state; firstSeenAt + lastSeenAt
+// drive the "first seen … last seen …" subtitle.
+//
+// DELIBERATELY OMITS:
+//   - id (internal uuid PK; clients address rows by fingerprint, which
+//     is itself unique per (user, device) — exposing the PK would
+//     create a second handle to the same row and tempt callers to
+//     stash and reuse it across contexts).
+//   - userId (the client already knows its own userId from auth; echoing
+//     it back is dead weight and a minor disclosure if any response
+//     ever leaks cross-tenant).
+//   - raw IP / UA values (we never stored them — only the irreversible
+//     hash; this comment exists to make the absence intentional).
+export type DeviceListItem = {
+  fingerprint: string;
+  label: string | null;
+  trusted: boolean;
+  firstSeenAt: number;
+  lastSeenAt: number;
+};
+
+// Result of createOrUpdateDevice. `created` is true on first insert
+// (new device for this user) so the caller can fire the
+// new_device_detected audit row exactly once per device-discovery —
+// repeated authenticated requests from the same device subsequently
+// return created=false and audit nothing. `row` is the post-write
+// projection (same shape as DeviceListItem) so the caller doesn't
+// need a follow-up SELECT to know the device's current trust state.
+export type DeviceUpsertResult = {
+  created: boolean;
+  row: DeviceListItem;
 };
 
 // Input for createWebAuthnCredential. Required fields mirror what the
@@ -335,6 +373,58 @@ export interface IStorage {
   // user-facing security action ("remove this passkey") that MUST
   // surface failure rather than silently leaving the credential live.
   revokeCredential(credentialId: string): Promise<boolean>;
+
+  // ----- Trusted devices (T002) -----
+  //
+  // Upsert by (userId, deviceFingerprint). On first sight the row is
+  // inserted with trusted=false and label=null; subsequent calls only
+  // bump lastSeenAt — they NEVER overwrite the user's existing label
+  // or trust flag (the client must use the explicit /trust, /revoke,
+  // /label endpoints to mutate those, all of which are step-up gated).
+  //
+  // CONTRACT:
+  //   - Throws on DB error. Caller (authenticate()) wraps the call in
+  //     its own try/catch so the auth hot path remains fail-open even
+  //     if device tracking is briefly unavailable.
+  //   - Returned `created` distinguishes the FIRST sighting (caller
+  //     should audit new_device_detected) from a steady-state ping
+  //     (no audit). The DB-side computation uses xmax=0 — true when
+  //     ON CONFLICT DID NOT FIRE — so the signal is race-safe and
+  //     does not need a follow-up SELECT.
+  createOrUpdateDevice(input: {
+    userId: string;
+    deviceFingerprint: string;
+    now: number;
+  }): Promise<DeviceUpsertResult>;
+
+  // List a user's known devices for the management screen. Returns the
+  // public-safe projection (see DeviceListItem doc). Ordered by
+  // lastSeenAt DESC so the user's CURRENT device floats to the top.
+  // Scoped strictly by userId — there is no cross-tenant fallback path.
+  getDevicesForUser(userId: string): Promise<DeviceListItem[]>;
+
+  // Flip trusted=true. Scoped by (userId, fingerprint) so a caller
+  // cannot trust another user's device by guessing fingerprints.
+  // Returns true if a row was flipped, false if no matching device
+  // exists for this user OR it was already trusted (idempotent).
+  // Throws on DB error — like revokeCredential, this is a user-facing
+  // security action that MUST surface failure.
+  markDeviceTrusted(userId: string, deviceFingerprint: string): Promise<boolean>;
+
+  // Inverse of markDeviceTrusted. Same semantics — scoped by user,
+  // returns true on actual transition, false on already-untrusted or
+  // not-found.
+  revokeDeviceTrust(userId: string, deviceFingerprint: string): Promise<boolean>;
+
+  // Update the user-supplied label. Caller is responsible for length
+  // bounds + sanitization (route layer enforces ≤64 chars + control-
+  // char rejection). Scoped by user. Returns true on row write, false
+  // if the device does not exist for this user. Throws on DB error.
+  relabelDevice(
+    userId: string,
+    deviceFingerprint: string,
+    label: string,
+  ): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1079,6 +1169,148 @@ export class DatabaseStorage implements IStorage {
         ),
       )
       .returning({ id: webauthnCredentials.id });
+    return flipped.length > 0;
+  }
+
+  // ----- Trusted devices (T002) -----
+  //
+  // INSERT … ON CONFLICT (user_id, device_fingerprint) DO UPDATE
+  //   SET last_seen_at = excluded.last_seen_at
+  //   RETURNING ..., (xmax = 0) AS created
+  //
+  // The composite UNIQUE INDEX trusted_devices_user_fingerprint_uidx
+  // is the conflict target. ON CONFLICT only updates lastSeenAt — we
+  // deliberately leave label and trusted alone so a steady-state ping
+  // never silently re-trusts a device the user just revoked, or wipes
+  // a user-supplied label.
+  //
+  // The xmax=0 trick distinguishes inserts from updates without a
+  // separate SELECT: in Postgres, a freshly-inserted tuple has
+  // xmax=0 (no concurrent xact has tried to update it yet) while an
+  // ON CONFLICT update path has xmax = the updating xid. Drizzle's
+  // raw sql template surfaces this as a boolean we can type as
+  // `created`.
+  async createOrUpdateDevice(input: {
+    userId: string;
+    deviceFingerprint: string;
+    now: number;
+  }): Promise<DeviceUpsertResult> {
+    const rows = await db
+      .insert(trustedDevices)
+      .values({
+        userId: input.userId,
+        deviceFingerprint: input.deviceFingerprint,
+        trusted: false,
+        firstSeenAt: input.now,
+        lastSeenAt: input.now,
+      })
+      .onConflictDoUpdate({
+        target: [trustedDevices.userId, trustedDevices.deviceFingerprint],
+        set: { lastSeenAt: input.now },
+      })
+      .returning({
+        deviceFingerprint: trustedDevices.deviceFingerprint,
+        label: trustedDevices.label,
+        trusted: trustedDevices.trusted,
+        firstSeenAt: trustedDevices.firstSeenAt,
+        lastSeenAt: trustedDevices.lastSeenAt,
+        created: sql<boolean>`(xmax = 0)`,
+      });
+    const row = rows[0];
+    if (!row) {
+      // RETURNING from an INSERT … ON CONFLICT DO UPDATE always yields
+      // exactly one row in Postgres. Defensive throw so a future driver
+      // change can't silently produce an undefined return.
+      throw new Error("createOrUpdateDevice: empty RETURNING");
+    }
+    return {
+      created: row.created === true,
+      row: {
+        fingerprint: row.deviceFingerprint,
+        label: row.label,
+        trusted: row.trusted,
+        firstSeenAt: row.firstSeenAt,
+        lastSeenAt: row.lastSeenAt,
+      },
+    };
+  }
+
+  async getDevicesForUser(userId: string): Promise<DeviceListItem[]> {
+    const rows = await db
+      .select({
+        deviceFingerprint: trustedDevices.deviceFingerprint,
+        label: trustedDevices.label,
+        trusted: trustedDevices.trusted,
+        firstSeenAt: trustedDevices.firstSeenAt,
+        lastSeenAt: trustedDevices.lastSeenAt,
+      })
+      .from(trustedDevices)
+      .where(eq(trustedDevices.userId, userId))
+      .orderBy(desc(trustedDevices.lastSeenAt));
+    return rows.map((r) => ({
+      fingerprint: r.deviceFingerprint,
+      label: r.label,
+      trusted: r.trusted,
+      firstSeenAt: r.firstSeenAt,
+      lastSeenAt: r.lastSeenAt,
+    }));
+  }
+
+  async markDeviceTrusted(
+    userId: string,
+    deviceFingerprint: string,
+  ): Promise<boolean> {
+    // Idempotent: WHERE trusted = false so a re-call on an already-
+    // trusted device returns false (no DB write, no audit-worthy
+    // change). Scoped strictly by userId so guessing another user's
+    // fingerprint can't elevate trust on their device.
+    const flipped = await db
+      .update(trustedDevices)
+      .set({ trusted: true })
+      .where(
+        and(
+          eq(trustedDevices.userId, userId),
+          eq(trustedDevices.deviceFingerprint, deviceFingerprint),
+          eq(trustedDevices.trusted, false),
+        ),
+      )
+      .returning({ id: trustedDevices.id });
+    return flipped.length > 0;
+  }
+
+  async revokeDeviceTrust(
+    userId: string,
+    deviceFingerprint: string,
+  ): Promise<boolean> {
+    const flipped = await db
+      .update(trustedDevices)
+      .set({ trusted: false })
+      .where(
+        and(
+          eq(trustedDevices.userId, userId),
+          eq(trustedDevices.deviceFingerprint, deviceFingerprint),
+          eq(trustedDevices.trusted, true),
+        ),
+      )
+      .returning({ id: trustedDevices.id });
+    return flipped.length > 0;
+  }
+
+  async relabelDevice(
+    userId: string,
+    deviceFingerprint: string,
+    label: string,
+  ): Promise<boolean> {
+    const flipped = await db
+      .update(trustedDevices)
+      .set({ label })
+      .where(
+        and(
+          eq(trustedDevices.userId, userId),
+          eq(trustedDevices.deviceFingerprint, deviceFingerprint),
+        ),
+      )
+      .returning({ id: trustedDevices.id });
     return flipped.length > 0;
   }
 }

@@ -1,6 +1,16 @@
 import { z } from "zod";
 import { sql } from "drizzle-orm";
-import { pgTable, text, integer, bigint, uuid, boolean, check, index } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  text,
+  integer,
+  bigint,
+  uuid,
+  boolean,
+  check,
+  index,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 
 export const users = pgTable(
@@ -286,6 +296,82 @@ export const webauthnCredentials = pgTable(
   ],
 );
 
+// Per-user device trust ledger (separate from sessions). One row per
+// (user, device-fingerprint) pair; the SAME physical device that logs in
+// across multiple sessions reuses the same row (lastSeenAt is bumped on
+// every authenticated request via authenticate()). Compared to the
+// sessions table this is durable across logout/login cycles, so a user
+// who has trusted "my iPhone" once does NOT get re-prompted every time
+// they sign in from it.
+//
+// Why a separate table instead of reusing sessions.trusted:
+//   - sessions.trusted is per-session (a fresh login on the same
+//     device starts a new untrusted session) — useful for the "approve
+//     this NEW SESSION" flow but wrong for "I trust this device".
+//   - This table is per-device and persists across session lifetimes,
+//     so it can drive the management UI ("here are all devices that
+//     have ever signed into your account; revoke any you don't
+//     recognize") without polluting the auth hot path.
+//
+// deviceFingerprint is the SHA-256(lowercased+trimmed UA || \0 || IP)
+// computed by deriveDeviceFingerprint() in routes.ts. We deliberately
+// do NOT store raw IP / UA values here — only the irreversible hash —
+// so a leak of this table cannot be replayed to triangulate a user's
+// movements. The label column is a USER-SUPPLIED nickname (e.g.
+// "iPhone 15", "Work Laptop"); the server never auto-derives one.
+//
+// PRIMARY KEY shape matches every other id column in this file
+// (uuid().defaultRandom()) — see the project's standing rule about
+// preserving existing ID conventions for FK compatibility with users.id.
+export const trustedDevices = pgTable(
+  "trusted_devices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // SHA-256(lowercase(trim(user-agent)) || \0 || ip), hex-encoded.
+    // 64-char fixed length; storing as text (not varchar(64)) keeps
+    // the schema permissive in case the hash function is later
+    // upgraded — old rows still validate. The hash is irreversible
+    // by construction, so storing it does not leak the underlying
+    // (UA, IP) pair.
+    deviceFingerprint: text("device_fingerprint").notNull(),
+    // User-supplied label, e.g. "iPhone 15" or "Work Laptop". Nullable
+    // because devices appear here BEFORE the user has labeled them
+    // (createOrUpdateDevice is called from authenticate()), so a
+    // device that has never been visited in the management UI shows
+    // up with label=null.
+    label: text("label"),
+    // FALSE on first sight — the user must explicitly confirm trust
+    // via POST /api/security/device/trust (which itself requires a
+    // step-up, so a stolen session cannot self-elevate). TRUE means
+    // the device has been approved AT LEAST ONCE; the user can flip
+    // it back to FALSE via /api/security/device/revoke.
+    trusted: boolean("trusted").notNull().default(false),
+    firstSeenAt: bigint("first_seen_at", { mode: "number" }).notNull(),
+    lastSeenAt: bigint("last_seen_at", { mode: "number" }).notNull(),
+  },
+  (table) => [
+    // Hot-path lookups: "list this user's devices" (management UI) and
+    // "find this user's row for this fingerprint" (createOrUpdateDevice
+    // upsert path). The composite UNIQUE index serves the upsert
+    // ON CONFLICT target AND covers user-id-prefix queries at the
+    // same time — Postgres can scan the leading column alone.
+    uniqueIndex("trusted_devices_user_fingerprint_uidx").on(
+      table.userId,
+      table.deviceFingerprint,
+    ),
+    // Per-task spec: explicit single-column indexes on user_id and
+    // device_fingerprint. The user_id index is technically redundant
+    // with the composite uniqueIndex above (left-prefix), but kept
+    // explicitly to match the task spec verbatim and to remain
+    // readable to future maintainers.
+    index("trusted_devices_user_idx").on(table.userId),
+    index("trusted_devices_fingerprint_idx").on(table.deviceFingerprint),
+  ],
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type VaultBlob = typeof vaultBlobs.$inferSelect;
@@ -295,6 +381,8 @@ export type Session = typeof sessions.$inferSelect;
 export type VaultAuditLogEntry = typeof vaultAuditLog.$inferSelect;
 export type WebauthnCredential = typeof webauthnCredentials.$inferSelect;
 export type NewWebauthnCredential = typeof webauthnCredentials.$inferInsert;
+export type TrustedDevice = typeof trustedDevices.$inferSelect;
+export type NewTrustedDevice = typeof trustedDevices.$inferInsert;
 
 export const insertUserSchema = createInsertSchema(users, {
   username: (col) => col.min(3).max(64),

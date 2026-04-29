@@ -1,6 +1,7 @@
 import express, { type Express, type Request, type Response } from "express";
 import { createServer, type Server } from "node:http";
 import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
+import { z } from "zod";
 import {
   SESSION_LIFETIME_MS,
   AUDIT_LOG_LIMIT,
@@ -131,6 +132,26 @@ const PER_USER_RATE_LIMITS = {
   // replayed against /finish more than once.
   passkey_register_start: 5,
   passkey_register_finish: 5,
+  // Device management (T005, T008): READ endpoints. 10/min mirrors
+  // auth_sessions / vault_audit — same shape (per-user listing of
+  // metadata rows) and same brute-force surface (an attacker briefly
+  // holding a session has no incentive to scrape these faster than a
+  // legitimate user inspecting their own account).
+  security_devices: 10,
+  passkeys_list: 10,
+  // Device label (T010): MUTATE, but the surface area is just renaming
+  // a row the user already owns. 10/min matches recovery_ack — loose
+  // enough that a user fixing a typo doesn't 429 themselves, tight
+  // enough that a script flipping labels at unbounded rates trips.
+  device_label: 10,
+  // Device trust toggles (T006) and passkey revoke (T009): step-up-
+  // gated mutations of authoritative security state. 5/min matches
+  // trust_device / logout_all — these are deliberate user actions, not
+  // hot-path operations, and the step-up requirement already provides
+  // the brute-force defense; the rate limit here is purely a per-user
+  // abuse cap.
+  security_device_trust: 5,
+  passkey_revoke: 5,
   // Passkey step-up: same shape as totp_step_up. Slightly looser
   // than register/* because a real user pushing through several
   // sensitive actions in a row can legitimately re-prove on each
@@ -256,6 +277,36 @@ function getDeviceFingerprint(req: Request): string {
     .update(ip)
     .update("\u0000")
     .update(platform)
+    .digest("hex");
+}
+
+// T003 — Pure helper for the trusted_devices table fingerprint.
+// DELIBERATELY DIFFERENT from getDeviceFingerprint above:
+//   - Two inputs only (ip, ua) — no x-platform header dependency,
+//     so the same logical device produces a stable fingerprint across
+//     web / mobile contexts that may or may not send the header.
+//   - UA is normalized (lowercase + trim) so trivial whitespace /
+//     casing differences (some clients send "Mozilla/5.0..." others
+//     "mozilla/5.0...") collapse to the same row.
+//
+// Both fingerprints are SHA-256 hex (irreversible by construction).
+// We deliberately do NOT store raw IP+UA anywhere; only the hash is
+// persisted (sessions.deviceFingerprint and trusted_devices.deviceFingerprint).
+//
+// `userAgent` is typed `string | null` to mirror captureUserAgent —
+// a request with no UA header still produces a stable hash (the empty
+// string after the null-coalesce). This keeps the auth hot path total:
+// every request must yield a fingerprint, even ones from misbehaving
+// clients.
+function deriveDeviceFingerprint(
+  ip: string,
+  userAgent: string | null,
+): string {
+  const ua = (userAgent ?? "").toLowerCase().trim();
+  return createHash("sha256")
+    .update(ua)
+    .update("\u0000")
+    .update(ip)
     .digest("hex");
 }
 
@@ -778,6 +829,18 @@ type UserSecurityState = {
   // row, and the sync/restore endpoints re-check the in-memory set
   // populated by their own authenticate() call this same request.
   untrustedSessions: Set<string>;
+  // T007 — In-memory mirror of session ids whose CURRENT REQUEST's
+  // device-fingerprint matched a trusted_devices row with trusted=false
+  // (i.e. the device the user is on right now is not yet user-approved).
+  // Populated by authenticate() after the createOrUpdateDevice call;
+  // cleared by POST /api/security/device/trust on a successful flip.
+  // SEPARATE from `untrustedSessions` (which mirrors the per-SESSION
+  // sessions.trusted column): a device the user has globally trusted
+  // can still mint a fresh untrusted session, and an untrusted device
+  // can still hold a session the user previously trusted on a
+  // different device. Both signals contribute "elevated" via
+  // deriveSecurityLevel — neither overrides the other.
+  deviceUntrustedSessions: Set<string>;
   // Wall-clock epoch-ms of the last successful hydration from the
   // audit log. Set by hydrateSecurityStateFromAudit. Its mere
   // presence (alongside the entry being in userSecurityState at all)
@@ -815,10 +878,42 @@ function getOrInitSecurityState(userId: string): UserSecurityState {
       lastTouchedAt: Date.now(),
       suspiciousSessions: new Set(),
       untrustedSessions: new Set(),
+      deviceUntrustedSessions: new Set(),
     };
     userSecurityState.set(userId, s);
   }
+  // Backward-compat: existing UserSecurityState entries created by
+  // earlier process versions don't have the new field. Heal lazily so
+  // the very first hydrate after a deploy doesn't NPE on Set ops.
+  if (!s.deviceUntrustedSessions) {
+    s.deviceUntrustedSessions = new Set();
+  }
   return s;
+}
+
+// T007 — In-memory write helpers for the device-trust signal. Mirror
+// the recordUntrustedSession / clearUntrustedSession pair above. Both
+// are pure in-memory mutations — the DB row in trusted_devices is the
+// durable source of truth and is written by the storage layer; these
+// helpers just keep the synchronous hot-path check (deriveSecurityLevel)
+// in lock-step with what the most recent authenticate() call observed.
+function recordDeviceUntrustedSession(
+  userId: string,
+  sessionId: string,
+): void {
+  const s = getOrInitSecurityState(userId);
+  s.deviceUntrustedSessions.add(sessionId);
+  s.lastTouchedAt = Date.now();
+}
+
+function clearDeviceUntrustedSession(
+  userId: string,
+  sessionId: string,
+): void {
+  const s = userSecurityState.get(userId);
+  if (!s) return;
+  s.deviceUntrustedSessions?.delete(sessionId);
+  s.lastTouchedAt = Date.now();
 }
 
 // Mark a session as untrusted in the in-memory cache. Called by
@@ -1297,6 +1392,19 @@ function deriveSecurityLevel(
     // surface as "normal" — the user-facing client uses this to
     // gate the "trust this device?" prompt.
     if (s && sessionId && s.untrustedSessions.has(sessionId)) return "elevated";
+    // T007 — Device-table untrusted (parallel signal to the per-
+    // session sessions.trusted check above). Same "elevated" bump,
+    // for the same reason: the user-facing client uses this to gate
+    // the "trust this device?" prompt. Extends the anomaly logic;
+    // does NOT override soft-lock / suspicious-session checks above
+    // (worst-case-wins ordering is preserved by the early returns).
+    if (
+      s &&
+      sessionId &&
+      s.deviceUntrustedSessions?.has(sessionId)
+    ) {
+      return "elevated";
+    }
     return "normal";
   } catch {
     return "normal";
@@ -1883,6 +1991,52 @@ async function authenticate(
       clearUntrustedSession(session.userId, session.id);
     } else {
       recordUntrustedSession(session.userId, session.id);
+    }
+    // T004 — trusted_devices ledger upsert. Runs AFTER session
+    // validation + binding-drift check so the device-fingerprint we
+    // commit reflects this REQUEST (not the session's birth context),
+    // which is the right behavior for a "where has this user been
+    // signing in from?" management view. Wrapped in try/catch:
+    // device tracking is observability + a soft input to the security
+    // level, NEVER load-bearing for auth correctness — a transient
+    // DB error MUST NOT block the user's actual request.
+    try {
+      const fp = deriveDeviceFingerprint(
+        getClientIp(req),
+        captureUserAgent(req),
+      );
+      const upsert = await storage.createOrUpdateDevice({
+        userId: session.userId,
+        deviceFingerprint: fp,
+        now: Date.now(),
+      });
+      // Device-table trust signal mirrored into the in-memory cache so
+      // deriveSecurityLevel can consult it synchronously. Both
+      // branches run on every authenticate so a device freshly
+      // trusted via /api/security/device/trust is reflected on the
+      // very next request without waiting for process restart.
+      if (upsert.row.trusted === true) {
+        clearDeviceUntrustedSession(session.userId, session.id);
+      } else {
+        recordDeviceUntrustedSession(session.userId, session.id);
+      }
+      // First-sighting audit. The new_device_detected action is
+      // already in DEDUPABLE_AUDIT_ACTIONS so a flapping client can't
+      // flood the log; we still gate on `upsert.created` here so a
+      // steady-state ping doesn't even attempt to log.
+      if (upsert.created) {
+        recordAudit(storage, {
+          userId: session.userId,
+          action: "new_device_detected",
+          ipAddress: getClientIp(req),
+          // Truncated fingerprint for cross-referencing with
+          // /api/security/devices entries — same convention as the
+          // existing trust-device / login paths.
+          userAgent: `fingerprint=${fp.slice(0, 16)}`,
+        });
+      }
+    } catch (err) {
+      console.error("createOrUpdateDevice failed");
     }
     return {
       ok: true,
@@ -3355,6 +3509,388 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       return res.status(200).json({ success: true });
     } catch (err) {
       console.error("Trust-device error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Device + passkey management (T005-T010)
+  // -------------------------------------------------------------------------
+  //
+  // Five endpoints, all session-token-authenticated:
+  //   - GET  /api/security/devices        — list known devices (T005)
+  //   - POST /api/security/device/trust   — flip trusted=true (T006)
+  //   - POST /api/security/device/revoke  — flip trusted=false (T006)
+  //   - POST /api/security/device/label   — set user label (T010)
+  //   - GET  /api/passkeys                — list passkeys (T008)
+  //   - POST /api/passkeys/revoke         — revoke passkey (T009)
+  //
+  // Trust-toggle + passkey-revoke require step-up (TOTP OR passkey,
+  // requireAlways:true) so an attacker holding only a stolen session
+  // token cannot self-elevate trust or wipe the legitimate user's
+  // passkeys. Reads (devices list, passkeys list) require auth only —
+  // the projections are public-safe (no IP/UA/credential-id/public-key).
+
+  // Inline helper: enforce the step-up posture used by the three
+  // sensitive mutations below. Returns null on success, or an
+  // {status, body} pair the caller passes straight to res.status().json().
+  // Mirrors the inlined gate in /api/vault/restore.
+  async function enforceStepUpRequired(
+    auth: { userId: string; sessionId: string | null; totpVerifiedUntil: number | null },
+  ): Promise<{ status: number; body: { error: string; reason?: string } } | null> {
+    const sec = deriveSecurityLevel(auth.userId, auth.sessionId);
+    const isUntrusted = isSessionUntrusted(auth.userId, auth.sessionId);
+    const totpStepUp = await evaluateTotpStepUp({
+      userId: auth.userId,
+      sessionId: auth.sessionId,
+      sessionTotpVerifiedUntil: auth.totpVerifiedUntil,
+      securityLevel: sec,
+      isUntrusted,
+      requireAlways: true,
+    });
+    if (totpStepUp.required && !totpStepUp.satisfied) {
+      return {
+        status: 401,
+        body: { error: "Step-up authentication required", reason: "totp" },
+      };
+    }
+    const passkeyStepUp = await evaluatePasskeyStepUp({
+      userId: auth.userId,
+      sessionId: auth.sessionId,
+      sessionTotpVerifiedUntil: auth.totpVerifiedUntil,
+      securityLevel: sec,
+      isUntrusted,
+      requireAlways: true,
+      totpEnabled: totpStepUp.totpEnabled,
+    });
+    if (passkeyStepUp.required && !passkeyStepUp.satisfied) {
+      return {
+        status: 401,
+        body: { error: "Step-up authentication required", reason: "passkey" },
+      };
+    }
+    return null;
+  }
+
+  // T005 — GET /api/security/devices
+  // Returns the per-user trusted_devices ledger as a public-safe
+  // projection (fingerprint + label + trusted + first/lastSeenAt).
+  // Drives the management UI's "your devices" list. NEVER includes
+  // raw IP / UA — only the irreversible fingerprint hash.
+  app.get("/api/security/devices", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      if (checkUserRateLimit("security_devices", getClientIp(req), auth.userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+      const devices = await storage.getDevicesForUser(auth.userId);
+      return res.status(200).json({ devices });
+    } catch (err) {
+      console.error("List-devices error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Strict body schema for the trust / revoke endpoints. Fingerprint
+  // must be the 64-char SHA-256 hex deriveDeviceFingerprint produces;
+  // anything else is a client bug or a malformed probe. .strict() so
+  // unknown fields are rejected with 400 (same pattern as register/
+  // login/sync schemas in shared/schema.ts).
+  const deviceFingerprintSchema = z
+    .object({
+      fingerprint: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/, "fingerprint must be 64 lowercase hex chars"),
+    })
+    .strict();
+
+  // T006 — POST /api/security/device/trust
+  // Flip trusted=true on a (user, fingerprint) row. Step-up required
+  // so a stolen session cannot self-elevate. Audit on success
+  // (device_trusted is NOT in DEDUPABLE — every user-initiated trust
+  // toggle is recorded distinctly).
+  app.post("/api/security/device/trust", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      if (
+        checkUserRateLimit("security_device_trust", getClientIp(req), auth.userId)
+      ) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+      const parsed = deviceFingerprintSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid request body" });
+      }
+      const gate = await enforceStepUpRequired(auth);
+      if (gate) return res.status(gate.status).json(gate.body);
+
+      const flipped = await storage.markDeviceTrusted(
+        auth.userId,
+        parsed.data.fingerprint,
+      );
+      if (!flipped) {
+        // Either the device doesn't exist for this user OR it was
+        // already trusted (idempotent). 404 in the not-found case
+        // would leak existence; we return 200 with a flag so a
+        // client retry on a flaky network is forgiving and a
+        // probe gets no signal about which fingerprints exist.
+        return res.status(200).json({ success: true, changed: false });
+      }
+      // Clear the in-memory device-untrusted signal for this session
+      // immediately so the very next /api/auth/security-state call
+      // surfaces the new posture without waiting for the next
+      // authenticate() round-trip to repopulate from the DB.
+      if (auth.sessionId !== null) {
+        clearDeviceUntrustedSession(auth.userId, auth.sessionId);
+      }
+      recordAudit(storage, {
+        userId: auth.userId,
+        action: "device_trusted",
+        ipAddress: getClientIp(req),
+        userAgent: `fingerprint=${parsed.data.fingerprint.slice(0, 16)}`,
+      });
+      return res.status(200).json({ success: true, changed: true });
+    } catch (err) {
+      console.error("Device-trust error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // T006 — POST /api/security/device/revoke
+  // Inverse of /trust. Same step-up gate, same audit shape. Does NOT
+  // log the user out of any session on that device — revoking trust
+  // re-elevates the security posture (sync/restore will require
+  // step-up again) without forcing a re-login, which matches the
+  // existing trust-device / untrust-session UX.
+  app.post("/api/security/device/revoke", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      if (
+        checkUserRateLimit("security_device_trust", getClientIp(req), auth.userId)
+      ) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+      const parsed = deviceFingerprintSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid request body" });
+      }
+      const gate = await enforceStepUpRequired(auth);
+      if (gate) return res.status(gate.status).json(gate.body);
+
+      const flipped = await storage.revokeDeviceTrust(
+        auth.userId,
+        parsed.data.fingerprint,
+      );
+      if (!flipped) {
+        return res.status(200).json({ success: true, changed: false });
+      }
+      // If the user just untrusted the CURRENT device, immediately
+      // mark this session's device-untrusted signal so the very next
+      // request surfaces "elevated" without waiting for an authenticate
+      // round-trip.
+      if (auth.sessionId !== null) {
+        const currentFp = deriveDeviceFingerprint(
+          getClientIp(req),
+          captureUserAgent(req),
+        );
+        if (currentFp === parsed.data.fingerprint) {
+          recordDeviceUntrustedSession(auth.userId, auth.sessionId);
+        }
+      }
+      recordAudit(storage, {
+        userId: auth.userId,
+        action: "device_untrusted",
+        ipAddress: getClientIp(req),
+        userAgent: `fingerprint=${parsed.data.fingerprint.slice(0, 16)}`,
+      });
+      return res.status(200).json({ success: true, changed: true });
+    } catch (err) {
+      console.error("Device-revoke error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // T010 — POST /api/security/device/label
+  // Lightweight metadata write: rename a device the user already owns.
+  // No step-up required (renaming is not a security-state mutation;
+  // the worst-case abuse — stolen session relabels the user's device
+  // — is annoying but not exploitable). Validation enforces the spec's
+  // ≤64-char limit and rejects control characters so a malicious label
+  // can't break management-UI rendering.
+  const deviceLabelSchema = z
+    .object({
+      fingerprint: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/, "fingerprint must be 64 lowercase hex chars"),
+      label: z
+        .string()
+        .min(1)
+        .max(64)
+        // Reject \x00-\x1F and \x7F (control chars); allow everything
+        // else (unicode letters / emoji are fine — the column is
+        // unrestricted text and the UI handles its own escaping).
+        .regex(/^[^\x00-\x1F\x7F]+$/, "label contains control characters"),
+    })
+    .strict();
+
+  app.post("/api/security/device/label", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      if (checkUserRateLimit("device_label", getClientIp(req), auth.userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+      const parsed = deviceLabelSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid request body" });
+      }
+      // Trim AFTER schema validation so leading/trailing whitespace
+      // doesn't smuggle empty labels past the .min(1) check.
+      const cleanLabel = parsed.data.label.trim();
+      if (cleanLabel.length === 0 || cleanLabel.length > 64) {
+        return res.status(400).json({ error: "Invalid label" });
+      }
+      const updated = await storage.relabelDevice(
+        auth.userId,
+        parsed.data.fingerprint,
+        cleanLabel,
+      );
+      if (!updated) {
+        return res.status(200).json({ success: true, changed: false });
+      }
+      recordAudit(storage, {
+        userId: auth.userId,
+        action: "device_relabeled",
+        ipAddress: getClientIp(req),
+        userAgent: `fingerprint=${parsed.data.fingerprint.slice(0, 16)}`,
+      });
+      return res.status(200).json({ success: true, changed: true });
+    } catch (err) {
+      console.error("Device-label error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // T008 — GET /api/passkeys
+  // Per-spec safe projection: id + deviceName + createdAt + lastUsedAt.
+  // EXPLICITLY EXCLUDES credentialId, publicKey, counter, transports.
+  // The internal id is the handle the client uses to address /revoke
+  // (mapped server-side back to credentialId for the storage call —
+  // the wire surface area never exposes the WebAuthn credentialId).
+  app.get("/api/passkeys", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      if (checkUserRateLimit("passkeys_list", getClientIp(req), auth.userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+      const credentials = await storage.listCredentialsForUser(auth.userId);
+      const passkeys = credentials.map((c) => ({
+        id: c.id,
+        deviceName: c.deviceName,
+        createdAt: c.createdAt,
+        lastUsedAt: c.lastUsedAt,
+      }));
+      return res.status(200).json({ passkeys });
+    } catch (err) {
+      console.error("List-passkeys error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // T009 — POST /api/passkeys/revoke
+  // Step-up required so a stolen session cannot wipe the user's
+  // passkeys (which would lock them out if the password was lost
+  // and passkey was the only path back in).
+  //
+  // Body { passkeyId } where passkeyId is the INTERNAL uuid (id) the
+  // /api/passkeys list returned. We resolve it to credentialId via a
+  // user-scoped lookup — a request whose passkeyId belongs to a
+  // different user returns 404 indistinguishably from "not found",
+  // matching the project's invalid-vs-not-exist convention.
+  const passkeyRevokeSchema = z
+    .object({
+      passkeyId: z.string().uuid(),
+    })
+    .strict();
+
+  app.post("/api/passkeys/revoke", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      if (checkUserRateLimit("passkey_revoke", getClientIp(req), auth.userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+      const parsed = passkeyRevokeSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid request body" });
+      }
+      const gate = await enforceStepUpRequired(auth);
+      if (gate) return res.status(gate.status).json(gate.body);
+
+      // User-scoped resolve: only this user's NON-REVOKED credentials
+      // are eligible. Cross-tenant passkeyId returns the same 404 a
+      // bogus uuid would.
+      const credentials = await storage.listCredentialsForUser(auth.userId);
+      const target = credentials.find((c) => c.id === parsed.data.passkeyId);
+      if (!target) {
+        return res.status(404).json({ error: "Passkey not found" });
+      }
+      const revoked = await storage.revokeCredential(target.credentialId);
+      if (!revoked) {
+        // Concurrent revoke races (two tabs, both clicking revoke on
+        // the same passkey) — the second observes the row already
+        // soft-deleted. Treat as success-no-op so the UX is forgiving.
+        return res.status(200).json({ success: true, changed: false });
+      }
+      recordAudit(storage, {
+        userId: auth.userId,
+        action: "passkey_revoked",
+        ipAddress: getClientIp(req),
+        userAgent: `passkey_id=${target.id}`,
+      });
+      return res.status(200).json({ success: true, changed: true });
+    } catch (err) {
+      console.error("Passkey-revoke error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });

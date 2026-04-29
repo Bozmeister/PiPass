@@ -1,0 +1,297 @@
+TASK: Add Passkey Management UI backend + Device Visibility + User-Controlled Trust
+
+CONSTRAINTS (MANDATORY):
+
+DO NOT modify existing cryptographic logic
+DO NOT change any existing primary key types
+ONLY additive schema changes allowed
+Use uuid("id").primaryKey().defaultRandom() for any new tables
+DO NOT expose sensitive credential data (public_key, credential_id)
+ALL changes must be backward-compatible
+Audit logging MUST be used for all user-triggered actions
+
+FILES:
+
+shared/schema.ts
+server/storage.ts
+server/routes.ts
+
+OBJECTIVE:
+
+Give users visibility and control over:
+- Their passkeys (devices)
+- Active sessions (devices)
+- Trust status of each device
+- Ability to revoke or trust devices
+
+---
+
+### T001 — Add Trusted Devices Table
+
+FILE: shared/schema.ts
+
+ADD new table:
+
+trusted_devices
+
+COLUMNS:
+
+id (uuid PK, defaultRandom)
+user_id (uuid FK → users.id, cascade delete)
+device_fingerprint (text, not null)  // hash of ip + ua
+label (text, nullable)               // "iPhone 15", "Work Laptop"
+trusted (boolean, default false)
+first_seen_at (bigint, not null)
+last_seen_at (bigint, not null)
+
+INDEXES:
+
+index on user_id
+index on device_fingerprint
+
+DO NOT modify existing tables.
+
+RUN:
+
+npm run db:push
+
+VERIFY:
+
+no destructive changes
+
+---
+
+### T002 — Storage Layer (Trusted Devices)
+
+FILE: server/storage.ts
+
+ADD to IStorage:
+
+createOrUpdateDevice(device)
+getDevicesForUser(userId)
+markDeviceTrusted(deviceFingerprint)
+revokeDeviceTrust(deviceFingerprint)
+
+IMPLEMENT in DatabaseStorage:
+
+createOrUpdateDevice:
+- upsert by (user_id + device_fingerprint)
+- update last_seen_at
+
+getDevicesForUser:
+- return safe projection (NO sensitive data)
+
+markDeviceTrusted:
+- set trusted = true
+
+revokeDeviceTrust:
+- set trusted = false
+
+ENSURE:
+
+no sensitive logging
+queries scoped by userId
+
+---
+
+### T003 — Device Fingerprint Helper
+
+FILE: server/routes.ts
+
+ADD helper:
+
+deriveDeviceFingerprint(ip, userAgent)
+
+IMPLEMENT:
+
+- normalize UA (lowercase, trim)
+- combine with IP
+- hash using SHA-256
+- return hex string
+
+DO NOT store raw IP+UA as fingerprint
+
+---
+
+### T004 — Track Devices on Every Authenticated Request
+
+FILE: server/routes.ts
+
+IN authenticate():
+
+AFTER session validation:
+
+- derive fingerprint
+- call createOrUpdateDevice
+- update last_seen_at
+
+IF new device:
+
+- mark trusted = false
+- record audit event: new_device_detected
+
+---
+
+### T005 — Expose Device List Endpoint
+
+FILE: server/routes.ts
+
+ADD:
+
+GET /api/security/devices
+
+REQUIRES authentication
+
+RETURNS:
+
+{
+  devices: [
+    {
+      fingerprint,
+      label,
+      trusted,
+      firstSeenAt,
+      lastSeenAt
+    }
+  ]
+}
+
+DO NOT include IP or raw user-agent
+
+---
+
+### T006 — Trust / Untrust Device Endpoints
+
+FILE: server/routes.ts
+
+ADD:
+
+POST /api/security/device/trust
+POST /api/security/device/revoke
+
+BODY:
+
+{ fingerprint }
+
+VALIDATION:
+
+- must belong to user
+- strict body validation
+
+SECURITY:
+
+REQUIRE step-up authentication (TOTP OR passkey)
+
+ON SUCCESS:
+
+- update trusted flag
+- log audit:
+
+device_trusted
+device_untrusted
+
+---
+
+### T007 — Integrate Device Trust into Security Model
+
+FILE: server/routes.ts
+
+MODIFY deriveSecurityLevel / threat logic:
+
+IF device NOT trusted:
+
+- increase baseline risk slightly
+- contributes to elevated/high states
+
+DO NOT:
+
+- override existing anomaly logic
+- only extend it
+
+---
+
+### T008 — Passkey Management Endpoint
+
+FILE: server/routes.ts
+
+ADD:
+
+GET /api/passkeys
+
+RETURNS:
+
+{
+  passkeys: [
+    {
+      id,
+      deviceName,
+      createdAt,
+      lastUsedAt
+    }
+  ]
+}
+
+EXCLUDE:
+
+- public_key
+- credential_id
+- counter
+
+---
+
+### T009 — Revoke Passkey Endpoint
+
+FILE: server/routes.ts
+
+ADD:
+
+POST /api/passkeys/revoke
+
+BODY:
+
+{ passkeyId }
+
+VALIDATION:
+
+- must belong to user
+
+SECURITY:
+
+REQUIRE step-up authentication
+
+ON SUCCESS:
+
+- call revokeCredential
+- log audit:
+
+passkey_revoked (already exists)
+
+---
+
+### T010 — Optional: Label Device / Passkey
+
+FILE: server/routes.ts
+
+ADD:
+
+POST /api/security/device/label
+
+BODY:
+
+{ fingerprint, label }
+
+VALIDATION:
+
+- max length 64
+- sanitize input
+
+---
+
+### FINAL VERIFICATION
+
+- Type-check passes
+- Backend boots cleanly
+- No sensitive data exposed
+- Device tracking works across requests
+- Trust/untrust requires step-up
+- Audit events logged correctly
