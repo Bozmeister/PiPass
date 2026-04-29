@@ -416,6 +416,143 @@ if (!RATE_LIMIT_DISABLED) {
 }
 
 // ---------------------------------------------------------------------------
+// Passkey failure-burst tracker (in-memory)
+// ---------------------------------------------------------------------------
+//
+// EXTENDS the security model — does NOT replace or modify the existing
+// recordAnomaly machinery above. Counts CONSECUTIVE failed passkey
+// attempts (login/finish + step-up/finish + login/start with no
+// registered credentials) per user inside a sliding window. When the
+// burst threshold is crossed the caller escalates via
+// escalatePasskeyAnomaly below. A single successful passkey assertion
+// resets the counter (resetPasskeyFailures) so a legitimate user who
+// fumbled a few attempts before getting it right doesn't carry a
+// suspicion tail.
+//
+// Threshold + window are deliberately tighter than the vault rate
+// anomaly: passkey traffic is far lower volume, so MORE THAN 5
+// failures in 5min is genuinely unusual (a real user re-tapping
+// their YubiKey or re-trying biometrics typically converges in
+// 1–3 attempts and finishes inside the window). The trigger uses
+// strict `>` against the threshold (i.e. fires on the 6th failure),
+// matching the existing `>` semantic in recordAnomaly above for
+// consistency — an attacker who stops at exactly 5 failures per
+// window stays under the radar for THIS hook, but the per-IP
+// `login:` rate limiter still caps total attempts. Counter-replay
+// is NOT counted here — that is its own single-event signal and is
+// escalated unconditionally at the call site (see
+// passkey_counter_replay_detected paths).
+const PASSKEY_FAILURE_THRESHOLD = 5;
+const PASSKEY_FAILURE_WINDOW_MS = 5 * 60_000;
+const PASSKEY_FAILURE_STATE_TTL_MS = 60 * 60_000;
+
+type PasskeyFailureState = {
+  windowStart: number;
+  count: number;
+  // Dedup so the burst escalation fires AT MOST once per window —
+  // additional failures past the threshold inside the same window
+  // are still counted (so the next window starts from a clean slate
+  // only after PASSKEY_FAILURE_WINDOW_MS elapses) but they don't
+  // emit additional anomaly_detected rows.
+  burstLogged: boolean;
+  lastTouchedAt: number;
+};
+const passkeyFailureState = new Map<string, PasskeyFailureState>();
+
+function recordPasskeyFailure(userId: string): { burstMeta?: string } {
+  const now = Date.now();
+  let entry = passkeyFailureState.get(userId);
+  if (!entry || now - entry.windowStart > PASSKEY_FAILURE_WINDOW_MS) {
+    entry = {
+      windowStart: now,
+      count: 0,
+      burstLogged: false,
+      lastTouchedAt: now,
+    };
+    passkeyFailureState.set(userId, entry);
+  }
+  entry.count++;
+  entry.lastTouchedAt = now;
+  let burstMeta: string | undefined;
+  if (entry.count > PASSKEY_FAILURE_THRESHOLD && !entry.burstLogged) {
+    entry.burstLogged = true;
+    burstMeta = `passkey failure threshold exceeded (${entry.count} in ${PASSKEY_FAILURE_WINDOW_MS / 1000}s)`;
+  }
+  return { burstMeta };
+}
+
+// Called from successful passkey login + step-up paths. A clean
+// authentication invalidates the failure streak so a transient flurry
+// of typos / wrong-finger taps doesn't keep the account in elevated
+// state once the user has actually proven possession.
+function resetPasskeyFailures(userId: string): void {
+  passkeyFailureState.delete(userId);
+}
+
+if (!RATE_LIMIT_DISABLED) {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of passkeyFailureState) {
+      if (now - v.lastTouchedAt > PASSKEY_FAILURE_STATE_TTL_MS) {
+        passkeyFailureState.delete(k);
+      }
+    }
+  }, 5 * 60_000);
+}
+
+// Single chokepoint that EXTENDS the existing security model with a
+// passkey-side anomaly. Mirrors the rate-spike escalation block in
+// /api/vault/sync (anomaly_detected audit + recordSecuritySignalHit
+// + markSessionSuspicious + optionally triggerSoftLock) using the
+// same hooks — does NOT introduce a parallel security state machine
+// and does NOT mutate the existing recordAnomaly counters.
+//
+// hardLock semantics:
+//
+//   - true  → also call triggerSoftLock(userId). Used for replay
+//             detection (always — that's a near-zero-false-positive
+//             signal) and for AUTHENTICATED step-up failure bursts
+//             (the caller already proved session ownership).
+//
+//   - false → skip triggerSoftLock; still record anomaly_detected
+//             + recordSecuritySignalHit (paints securityLevel
+//             "elevated", increases threatLevel via the existing
+//             unified ladder). Used for UNAUTHENTICATED passkey
+//             login failure bursts where soft-locking on a known
+//             username + many attacker IPs would be a remote DoS
+//             vector against the legitimate user's writes. The
+//             elevated level + audit row still surface in the
+//             owner's activity log, and the per-IP login rate
+//             limit (already in place upstream) is the primary
+//             defense against the brute-force burst itself.
+//
+// sessionId may be null for unauthenticated paths (login/start,
+// login/finish). markSessionSuspicious + the suspicious-session set
+// are both gated on a non-null sessionId.
+function escalatePasskeyAnomaly(
+  storage: IStorage,
+  userId: string,
+  sessionId: string | null,
+  ip: string,
+  meta: string,
+  opts: { hardLock: boolean },
+): void {
+  recordAudit(storage, {
+    userId,
+    action: "anomaly_detected",
+    ipAddress: ip,
+    userAgent: meta,
+  });
+  if (opts.hardLock) {
+    triggerSoftLock(userId);
+  }
+  if (sessionId) {
+    void storage.markSessionSuspicious(sessionId);
+  }
+  recordSecuritySignalHit(userId, sessionId, true);
+}
+
+// ---------------------------------------------------------------------------
 // Soft-lock + IP-burst response system (in-memory, fail-open)
 // ---------------------------------------------------------------------------
 //
@@ -3488,6 +3625,22 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             ipAddress: clientIp,
             userAgent,
           });
+          // Extends the security model: count this attempt toward the
+          // passkey-failure burst tracker. Step-up runs under an
+          // authenticated session, so escalating with hardLock=true is
+          // appropriate when the burst threshold is crossed (matches
+          // the existing rate-spike escalation pattern in vault/sync).
+          const burst = recordPasskeyFailure(userId);
+          if (burst.burstMeta) {
+            escalatePasskeyAnomaly(
+              storage,
+              userId,
+              sessionId,
+              clientIp,
+              `${burst.burstMeta}; source=step_up`,
+              { hardLock: true },
+            );
+          }
           return res.status(401).json({ error: "Step-up failed" });
         }
 
@@ -3554,6 +3707,19 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
               ipAddress: clientIp,
               userAgent,
             });
+            // Replay detection is a single-event signal — escalate
+            // unconditionally with the hard soft-lock. The credential
+            // is already revoked above, so this lock primarily
+            // protects the user's WRITE surface for 5 min while they
+            // notice the activity-log entry and react.
+            escalatePasskeyAnomaly(
+              storage,
+              userId,
+              sessionId,
+              clientIp,
+              `passkey replay detected; source=step_up`,
+              { hardLock: true },
+            );
             return res.status(401).json({ error: "Step-up failed" });
           }
           if (verified.code === "internal_error") {
@@ -3565,6 +3731,23 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             ipAddress: clientIp,
             userAgent,
           });
+          // Same failure-burst tracking as the credential-mismatch
+          // branch above. Verifier failures (no_challenge,
+          // challenge_expired, verification_failed, internal_error)
+          // are still ATTEMPTS from the user's perspective and count
+          // the same. counter_replay is handled separately above and
+          // does NOT count here (it has its own single-event escalation).
+          const burst = recordPasskeyFailure(userId);
+          if (burst.burstMeta) {
+            escalatePasskeyAnomaly(
+              storage,
+              userId,
+              sessionId,
+              clientIp,
+              `${burst.burstMeta}; source=step_up`,
+              { hardLock: true },
+            );
+          }
           return res.status(401).json({ error: "Step-up failed" });
         }
 
@@ -3621,6 +3804,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           ipAddress: clientIp,
           userAgent,
         });
+        // Successful step-up = clean possession proof. Drop any
+        // accumulated failure-burst state so a previously-fumbled
+        // streak doesn't keep the account in an elevated posture
+        // after the user actually authenticated.
+        resetPasskeyFailures(userId);
 
         return res.status(200).json({
           success: true,
@@ -3923,6 +4111,26 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             ipAddress: clientIp,
             userAgent: captureUserAgent(req),
           });
+          // Failure-burst tracking with hardLock=false. This is the
+          // unauthenticated path: an attacker who knows a victim
+          // username + can rotate IPs could otherwise trigger a
+          // soft-lock against the legitimate user's writes — a
+          // remote DoS vector. Painting securityLevel "elevated" +
+          // emitting anomaly_detected still surfaces the burst in
+          // the user's activity log; the per-IP `login:` rate limit
+          // upstream is the primary defense against the brute force
+          // itself.
+          const burst = recordPasskeyFailure(user.id);
+          if (burst.burstMeta) {
+            escalatePasskeyAnomaly(
+              storage,
+              user.id,
+              null,
+              clientIp,
+              `${burst.burstMeta}; source=login_start`,
+              { hardLock: false },
+            );
+          }
           return res.status(401).json({ error: "Invalid credentials" });
         }
 
@@ -4082,6 +4290,22 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
               ipAddress: clientIp,
               userAgent,
             });
+            // Replay = single-event high-confidence signal. Escalate
+            // with hardLock=true even though this is the unauth path:
+            // counter_replay is essentially never benign (a cloned or
+            // captured-then-replayed assertion), the credential is
+            // already revoked above, and the soft-lock guards the
+            // owner's WRITE surface for 5 min while they read the
+            // activity log entry. sessionId is null here — login
+            // mints a new session on success, never on failure.
+            escalatePasskeyAnomaly(
+              storage,
+              stored.userId,
+              null,
+              clientIp,
+              `passkey replay detected; source=login`,
+              { hardLock: true },
+            );
             return res
               .status(401)
               .json({ error: "Invalid credentials" });
@@ -4100,6 +4324,20 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           if (verified.code === "internal_error") {
             console.error(
               `passkey login/finish internal error: ${verified.reason ?? "unknown"}`,
+            );
+          }
+          // Same failure-burst tracking + hardLock=false reasoning as
+          // the login/start no-credentials branch above. counter_replay
+          // is handled separately and does NOT count here.
+          const burst = recordPasskeyFailure(stored.userId);
+          if (burst.burstMeta) {
+            escalatePasskeyAnomaly(
+              storage,
+              stored.userId,
+              null,
+              clientIp,
+              `${burst.burstMeta}; source=login_finish`,
+              { hardLock: false },
             );
           }
           return res.status(401).json({ error: "Invalid credentials" });
@@ -4166,6 +4404,11 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             ipAddress: clientIp,
             userAgent,
           });
+          // Passkey assertion verified — clear the failure-burst
+          // counter even though TOTP is still pending. The passkey
+          // half is proven; a fresh attacker can't keep the burst
+          // alive purely by exhausting passkey attempts.
+          resetPasskeyFailures(stored.userId);
           // The ABSENCE of sessionToken is the signal that more
           // factors are needed. requiresTOTP + tempToken matches
           // /api/auth/login's 2FA-required response shape exactly.
@@ -4216,6 +4459,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           ipAddress: clientIp,
           userAgent,
         });
+        // Successful full-session passkey login = clean possession
+        // proof. Drop any accumulated failure-burst state.
+        resetPasskeyFailures(stored.userId);
         if (!isKnownDevice) {
           // Mirror the new-device handling from /api/auth/login:
           // log the event, raise the in-memory threat signal, and
