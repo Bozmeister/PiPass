@@ -441,7 +441,7 @@ export default function HoneytokensScreen() {
           >
             <Ionicons name="cloud-offline-outline" size={18} color="#ef4444" />
             <Text style={{ color: "#ef4444", fontSize: 13, flex: 1 }}>
-              Couldn't load decoys. Pull to refresh.
+              Couldn&apos;t load decoys. Pull to refresh.
             </Text>
           </View>
         ) : null}

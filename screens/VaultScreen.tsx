@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { 
   View, Text, FlatList, Pressable, Alert, Platform, 
-  ActivityIndicator, AppState, Modal, Switch, TextInput 
+  ActivityIndicator, AppState, Modal, Switch, TextInput, InteractionManager
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -114,6 +114,9 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
 
   const recentlyDeletedEntryRef = useRef<VaultEntry | null>(null);
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deleteTargetRef = useRef<{ id: string; title: string } | null>(null);
+  const deleteFlowTokenRef = useRef(0);
+  const isMountedRef = useRef(true);
 
   const settingsTapCountRef = useRef(0);
   const settingsTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -148,8 +151,8 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       setShowKeyprintViewer(false);
       setShowNuclearReset(false);
       setShowDeleteModal(false);
-      setDeleteTargetId(null);
-      setDeleteTargetTitle("");
+      clearDeleteTarget();
+      deleteFlowTokenRef.current++;
       commitPendingDeletion();
       setPendingProfileIterations(null);
       setProfilePassword("");
@@ -289,6 +292,8 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       }
     });
     return () => {
+      isMountedRef.current = false;
+      deleteFlowTokenRef.current++;
       if (autoLockTimerRef.current) clearInterval(autoLockTimerRef.current);
       if (undoTimerRef.current) {
         clearTimeout(undoTimerRef.current);
@@ -303,6 +308,33 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
 
   function resetActivity() {
     if (!lockedRef.current) lastActivityRef.current = Date.now();
+  }
+
+  function waitForModalTransition(): Promise<void> {
+    return new Promise((resolve) => {
+      InteractionManager.runAfterInteractions(() => {
+        if (Platform.OS === "ios") {
+          setTimeout(resolve, 80);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
+  function canContinueDeleteFlow(token: number, entryId: string): boolean {
+    return (
+      isMountedRef.current &&
+      !lockedRef.current &&
+      deleteFlowTokenRef.current === token &&
+      deleteTargetRef.current?.id === entryId
+    );
+  }
+
+  function clearDeleteTarget() {
+    deleteTargetRef.current = null;
+    setDeleteTargetId(null);
+    setDeleteTargetTitle("");
   }
 
   async function loadVault() {
@@ -418,34 +450,62 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   function handleRequestDelete(entryId: string) {
     const target = entries.find(e => e.id === entryId);
     if (!target) return;
+    const deleteTarget = { id: target.id, title: target.title };
+    const token = ++deleteFlowTokenRef.current;
+
+    deleteTargetRef.current = deleteTarget;
+    setDeleteTargetId(deleteTarget.id);
+    setDeleteTargetTitle(deleteTarget.title);
+    setShowDeleteModal(false);
+    setSelectedEntry(null);
+    setDecryptedEntry(null);
+
+    void showDeleteAlertAfterDetailDismiss(token, deleteTarget.id, deleteTarget.title);
+  }
+
+  async function showDeleteAlertAfterDetailDismiss(
+    token: number,
+    entryId: string,
+    entryTitle: string
+  ) {
+    await waitForModalTransition();
+    if (!canContinueDeleteFlow(token, entryId)) return;
 
     Alert.alert(
       "Delete entry?",
       "This will permanently delete this vault item from this device and from sync.",
       [
-        { text: "Cancel", style: "cancel" },
+        { text: "Cancel", style: "cancel", onPress: clearDeleteTarget },
         {
           text: "Delete",
           style: "destructive",
-          onPress: () => beginSecureDeleteFlow(entryId, target.title),
+          onPress: () => beginSecureDeleteFlow(token, entryId, entryTitle),
         },
       ]
     );
   }
 
-  async function beginSecureDeleteFlow(entryId: string, entryTitle: string) {
+  async function beginSecureDeleteFlow(token: number, entryId: string, entryTitle: string) {
+    if (!canContinueDeleteFlow(token, entryId)) return;
     try {
       isBiometricActive.current = true;
       const authenticated = await requireFreshBiometric();
-      isBiometricActive.current = false;
 
-      if (!authenticated) return;
-      if (lockedRef.current) return;
+      if (!authenticated) {
+        if (canContinueDeleteFlow(token, entryId)) clearDeleteTarget();
+        return;
+      }
+      if (!canContinueDeleteFlow(token, entryId)) return;
+
+      await waitForModalTransition();
+      if (!canContinueDeleteFlow(token, entryId)) return;
 
       setDeleteTargetId(entryId);
       setDeleteTargetTitle(entryTitle);
       setShowDeleteModal(true);
     } catch {
+      if (canContinueDeleteFlow(token, entryId)) clearDeleteTarget();
+    } finally {
       isBiometricActive.current = false;
     }
   }
@@ -463,8 +523,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     setSelectedEntry(null);
     setDecryptedEntry(null);
     setShowDeleteModal(false);
-    setDeleteTargetId(null);
-    setDeleteTargetTitle("");
+    clearDeleteTarget();
     setShowUndoSnackbar(true);
 
     undoTimerRef.current = setTimeout(() => {
@@ -712,7 +771,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         visible={showDeleteModal}
         entryTitle={deleteTargetTitle}
         onConfirmDelete={handleConfirmDelete}
-        onCancel={() => { setShowDeleteModal(false); setDeleteTargetId(null); setDeleteTargetTitle(""); }}
+        onCancel={() => { setShowDeleteModal(false); clearDeleteTarget(); }}
         onActivity={resetActivity}
       />
 

@@ -39,7 +39,7 @@ export default function RecoveryBanner({
           Suspicious activity detected
         </Text>
         <Text style={{ color: "#aaa", fontSize: 12, lineHeight: 16 }}>
-          Some actions are restricted until you confirm you've reviewed it.
+          Some actions are restricted until you confirm you&apos;ve reviewed it.
         </Text>
       </View>
       <Pressable

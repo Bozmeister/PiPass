@@ -19,7 +19,7 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.pipass.app",
       "infoPlist": {
-        "NSFaceIDUsageDescription": "PiPass uses Face ID to securely unlock your vault."
+        "NSFaceIDUsageDescription": "Allow PiPass to use Face ID to protect your vault."
       },
       "entitlements": {
         "keychain-access-groups": [
@@ -44,6 +44,18 @@
         "expo-router",
         {
           "origin": "https://replit.com/"
+        }
+      ],
+      [
+        "expo-secure-store",
+        {
+          "faceIDPermission": "Allow PiPass to use Face ID to protect your vault."
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow PiPass to use Face ID to protect your vault."
         }
       ],
       "expo-font",

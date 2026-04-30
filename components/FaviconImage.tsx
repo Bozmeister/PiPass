@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Image, View, Platform } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import * as FileSystem from "expo-file-system";
+import * as FileSystem from "expo-file-system/legacy";
 import { getLogoUrl, extractDomain } from "../lib/logoUrl";
 
 interface FaviconImageProps {
