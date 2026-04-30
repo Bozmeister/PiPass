@@ -100,22 +100,23 @@ function deriveEncryptionKey(): Buffer {
   return parseEncryptionKey(fromEnv);
 }
 
+// Module-local cache for the derived AES key. Primed at boot by
+// `assertTotpKeyConfigured()`; falls back to lazy derivation on first
+// use (e.g. tests that import this module without a boot path).
+let cachedKey: Buffer | null = null;
+
 // Eager boot-time validation. server/index.ts calls this BEFORE the
 // HTTP listener binds, so a missing/invalid TOTP key fails the process
 // immediately rather than waiting for the first 2FA enrollment to
-// blow up at runtime. Idempotent — safe to call multiple times.
+// blow up at runtime. Also primes `cachedKey` so the value validated
+// at boot is guaranteed to be the same Buffer used by every subsequent
+// encrypt/decrypt — even if process.env.TOTP_ENCRYPTION_KEY is later
+// mutated in-process. Idempotent: re-calling after a successful
+// derivation is a no-op.
 export function assertTotpKeyConfigured(): void {
-  // We deliberately re-derive (rather than just checking the env var
-  // is non-empty) so format errors also surface at boot.
-  deriveEncryptionKey();
+  if (cachedKey === null) cachedKey = deriveEncryptionKey();
 }
 
-// Lazy single-shot derivation, primed by `assertTotpKeyConfigured()`
-// at boot. We do NOT cache the env var string directly so an
-// operator who fixes a typo and re-calls `assertTotpKeyConfigured()`
-// without a process restart can still recover (the cached Buffer is
-// only set on successful derivation).
-let cachedKey: Buffer | null = null;
 function getKey(): Buffer {
   if (cachedKey === null) cachedKey = deriveEncryptionKey();
   return cachedKey;
