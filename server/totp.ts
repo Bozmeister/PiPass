@@ -9,7 +9,6 @@ import {
 import {
   createCipheriv,
   createDecipheriv,
-  createHash,
   randomBytes,
 } from "node:crypto";
 
@@ -48,70 +47,74 @@ const TOTP_TOLERANCE_SECONDS = 30;
 // leaked, every user's 2FA is bypassable. We wrap each secret in
 // AES-256-GCM with a per-deployment key.
 //
-// Key source order:
-//   1. process.env.TOTP_ENCRYPTION_KEY (preferred — operator-managed)
-//      Must be 64 hex chars (32 bytes) or base64 of 32 bytes.
-//   2. SHA-256 of process.env.SESSION_SECRET (existing app secret, if any)
-//   3. SHA-256 of process.env.DATABASE_URL (last-resort dev fallback)
-//
-// Path #3 lets local dev work without extra config — it derives a
-// stable key from a value the dev environment already has. It is
-// deliberately NOT acceptable in production: every prod deployment
-// must set TOTP_ENCRYPTION_KEY explicitly. We log a warning on boot if
-// we fall through to #2 or #3.
+// KEY SOURCE: process.env.TOTP_ENCRYPTION_KEY ONLY.
+//   - 64 hex chars (32 bytes) OR 44-char base64 of 32 bytes.
+//   - No fallback chain. Earlier revisions of this code transparently
+//     fell back to SHA-256(SESSION_SECRET) and then SHA-256(DATABASE_URL)
+//     when this var was unset. Both fallbacks are removed because they
+//     coupled TOTP at-rest encryption to unrelated rotation cycles
+//     (rotating SESSION_SECRET silently corrupted every user's 2FA),
+//     and because "silent fallback to a derived secret" is the kind of
+//     surprise this codebase explicitly tries to avoid in security
+//     paths. The operator MUST set TOTP_ENCRYPTION_KEY explicitly.
+//   - The value is validated eagerly at server boot via
+//     `assertTotpKeyConfigured()` (called from server/index.ts) so a
+//     missing/misformatted key fails loudly at startup rather than the
+//     first time a user enables 2FA.
 const KEY_LEN_BYTES = 32; // AES-256
 const IV_LEN_BYTES = 12; // GCM standard nonce length
 const TAG_LEN_BYTES = 16; // GCM auth tag
 
-function deriveEncryptionKey(): Buffer {
-  const fromEnv = process.env.TOTP_ENCRYPTION_KEY;
-  if (typeof fromEnv === "string" && fromEnv.length > 0) {
-    // Accept hex (64 chars) or base64 (44 chars w/ padding) of 32 bytes.
-    if (/^[0-9a-fA-F]{64}$/.test(fromEnv)) {
-      return Buffer.from(fromEnv, "hex");
-    }
-    try {
-      const buf = Buffer.from(fromEnv, "base64");
-      if (buf.length === KEY_LEN_BYTES) return buf;
-    } catch {
-      // fall through to error
-    }
-    throw new Error(
-      "TOTP_ENCRYPTION_KEY must be 32 bytes (64 hex chars or 44 base64 chars).",
-    );
+const TOTP_KEY_HELP =
+  "Set the TOTP_ENCRYPTION_KEY secret to a freshly-generated 32-byte value. " +
+  "Generate one with: `node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"` " +
+  "and add it via Replit Secrets. Do not reuse SESSION_SECRET or any other secret.";
+
+function parseEncryptionKey(raw: string): Buffer {
+  // Accept hex (64 chars) or base64 (44 chars w/ padding) of 32 bytes.
+  if (/^[0-9a-fA-F]{64}$/.test(raw)) {
+    return Buffer.from(raw, "hex");
   }
-  const sessionSecret = process.env.SESSION_SECRET;
-  if (typeof sessionSecret === "string" && sessionSecret.length > 0) {
-    if (process.env.NODE_ENV === "production") {
-      console.warn(
-        "[totp] Falling back to SHA-256(SESSION_SECRET) for TOTP encryption. " +
-          "Set TOTP_ENCRYPTION_KEY explicitly in production.",
-      );
-    }
-    return createHash("sha256").update(sessionSecret).digest();
-  }
-  const dbUrl = process.env.DATABASE_URL;
-  if (typeof dbUrl === "string" && dbUrl.length > 0) {
-    if (process.env.NODE_ENV === "production") {
-      console.warn(
-        "[totp] Falling back to SHA-256(DATABASE_URL) for TOTP encryption. " +
-          "Set TOTP_ENCRYPTION_KEY explicitly in production.",
-      );
-    }
-    return createHash("sha256").update(dbUrl).digest();
+  // base64: tolerate either padded ("=") or unpadded forms; both must
+  // decode to exactly 32 bytes.
+  try {
+    const buf = Buffer.from(raw, "base64");
+    if (buf.length === KEY_LEN_BYTES) return buf;
+  } catch {
+    // fall through to throw below
   }
   throw new Error(
-    "TOTP encryption key cannot be derived: set TOTP_ENCRYPTION_KEY (or " +
-      "SESSION_SECRET, or DATABASE_URL) in the environment.",
+    "TOTP_ENCRYPTION_KEY must decode to exactly 32 bytes " +
+      "(64 hex chars or base64 of 32 bytes). " +
+      TOTP_KEY_HELP,
   );
 }
 
-// Lazy single-shot derivation. Throws on first use if no source is
-// available — that's the right time to fail (the server is already up
-// and serving non-TOTP routes; the explosion happens only when someone
-// actually touches the TOTP flow). We do NOT cache the env var directly
-// at module load so a missing-but-later-set value (devs editing .env
-// without restart) still surfaces with the right error message.
+function deriveEncryptionKey(): Buffer {
+  const fromEnv = process.env.TOTP_ENCRYPTION_KEY;
+  if (typeof fromEnv !== "string" || fromEnv.length === 0) {
+    throw new Error(
+      "TOTP_ENCRYPTION_KEY is not set. " + TOTP_KEY_HELP,
+    );
+  }
+  return parseEncryptionKey(fromEnv);
+}
+
+// Eager boot-time validation. server/index.ts calls this BEFORE the
+// HTTP listener binds, so a missing/invalid TOTP key fails the process
+// immediately rather than waiting for the first 2FA enrollment to
+// blow up at runtime. Idempotent — safe to call multiple times.
+export function assertTotpKeyConfigured(): void {
+  // We deliberately re-derive (rather than just checking the env var
+  // is non-empty) so format errors also surface at boot.
+  deriveEncryptionKey();
+}
+
+// Lazy single-shot derivation, primed by `assertTotpKeyConfigured()`
+// at boot. We do NOT cache the env var string directly so an
+// operator who fixes a typo and re-calls `assertTotpKeyConfigured()`
+// without a process restart can still recover (the cached Buffer is
+// only set on successful derivation).
 let cachedKey: Buffer | null = null;
 function getKey(): Buffer {
   if (cachedKey === null) cachedKey = deriveEncryptionKey();

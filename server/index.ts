@@ -2,6 +2,7 @@ import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { DatabaseStorage } from "./storage";
+import { assertTotpKeyConfigured } from "./totp";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -223,6 +224,21 @@ function setupErrorHandler(app: express.Application) {
 }
 
 (async () => {
+  // Eager security-config validation. We deliberately do this BEFORE
+  // any middleware wiring or route registration so a misconfigured
+  // deployment fails immediately with a clear error message instead
+  // of booting "successfully" and then exploding the first time a
+  // user touches a 2FA endpoint. assertTotpKeyConfigured() throws
+  // with a fix-it message if TOTP_ENCRYPTION_KEY is missing or
+  // malformed.
+  try {
+    assertTotpKeyConfigured();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[boot] FATAL: ${msg}`);
+    process.exit(1);
+  }
+
   setupCors(app);
   setupBodyParsing(app);
   setupRequestLogging(app);
