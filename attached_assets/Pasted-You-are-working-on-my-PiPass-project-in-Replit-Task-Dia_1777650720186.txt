@@ -1,0 +1,70 @@
+You are working on my PiPass project in Replit.
+
+Task:
+Diagnose and set up a safe PostgreSQL test database workflow for PiPass. This is Prompt 001E. Do not modify app logic, crypto logic, auth logic, vault logic, server routes, storage workers, UI components, or encryption code.
+
+Context:
+I downloaded this Replit project to Windows at C:\PiPass.
+Locally, npm run db:push fails with:
+getaddrinfo ENOTFOUND helium
+
+This suggests the current DATABASE_URL points to a Replit-internal Postgres hostname that works inside Replit but not from my Windows laptop.
+
+Current local baseline:
+- npm run lint passes with warnings only.
+- npm run typecheck passes.
+- npm test now runs but fails because /api/auth/register returns 500.
+- The likely cause is database connectivity/schema setup.
+
+Goals:
+1. Confirm whether the current DATABASE_URL uses a Replit-internal Postgres host such as helium.
+2. Do not print, reveal, copy, or expose the real DATABASE_URL, SESSION_SECRET, TOTP_ENCRYPTION_KEY, or any other secret.
+3. Confirm whether npm run db:push works inside Replit.
+4. Confirm whether npm test works inside Replit after db:push.
+5. Recommend the safest way to run tests without risking production/user data.
+6. Prefer a dedicated test database or dedicated test schema if possible.
+7. If a separate test database is not available, clearly warn that running tests against the main development database may insert/delete test data.
+8. Do not hardcode secrets into files.
+9. Use Replit Secrets for real secret values.
+10. Add documentation only if helpful, for example LOCAL_DATABASE_SETUP.md or TEST_DATABASE_SETUP.md.
+
+Important safety rules:
+- Never print actual secret values.
+- Never commit .env or real database URLs.
+- Never weaken server/db.ts fail-fast behavior.
+- Never bypass the database requirement.
+- Never make tests pass by hiding failures.
+- Do not change application behaviour.
+- Do not touch crypto, auth semantics, vault logic, encryption, sync behaviour, or UI.
+
+Investigation steps:
+1. Inspect package.json, drizzle.config.ts, server/db.ts, .env.example, and existing test files.
+2. Confirm what environment variable the server and Drizzle use for Postgres.
+3. Run npm run db:push inside Replit.
+4. Run npm run lint.
+5. Run npm run typecheck.
+6. Run npm test.
+7. If tests fail, identify whether the failure is:
+   - missing schema,
+   - database connection issue,
+   - test data collision,
+   - missing env variable,
+   - or an actual app/server bug.
+8. If possible, propose a safe test DB workflow such as:
+   - TEST_DATABASE_URL for tests,
+   - .env.test.example with placeholders only,
+   - npm script that loads .env.test locally,
+   - or documentation explaining how I should configure an externally reachable Postgres DB for VS Code testing.
+9. If you need to change package.json to add a test database script, keep it minimal and explain it before changing.
+
+Output format:
+1. Summary
+2. Root cause of the helium/Windows issue
+3. Replit db:push result
+4. Replit test result
+5. Recommended safe test database setup
+6. Files changed, if any
+7. Commands I should run next in VS Code
+8. Any manual Replit Secrets steps I need to perform
+
+Do not proceed to Prompt 005 or any vault security changes.
