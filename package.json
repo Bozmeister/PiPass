@@ -16,7 +16,7 @@
     "ios": "expo run:ios",
     "prebuild": "expo prebuild",
     "typecheck": "tsc --noEmit --pretty false",
-    "test": "tsx --test --test-force-exit server/__tests__/security.test.ts",
+    "test": "node --env-file=.env --import tsx --test --test-force-exit server/__tests__/security.test.ts",
     "lint": "npx expo lint",
     "lint:fix": "npx expo lint --fix"
   },
