@@ -47,7 +47,7 @@ import type { Server } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { registerRoutes } from "../routes";
-import { DatabaseStorage } from "../storage";
+import { DatabaseStorage, type AuditLogItem } from "../storage";
 import {
   encryptTotpSecret,
   generateTotpSecret,
@@ -214,6 +214,59 @@ async function legacyVaultFetch(
       "x-forwarded-for": opts.ip ?? randomIp(),
     },
   });
+}
+
+async function legacyVaultRestore(
+  user: Registered,
+  version: number,
+  opts: { ip?: string } = {},
+): Promise<Response> {
+  return fetch(`${baseUrl}/api/vault/restore`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-user-id": user.userId,
+      "x-auth-hash": user.authHash,
+      "x-forwarded-for": opts.ip ?? randomIp(),
+    },
+    body: JSON.stringify({ version }),
+  });
+}
+
+function assertAuditRowSafe(
+  row: AuditLogItem,
+  forbiddenValues: readonly string[] = [],
+): void {
+  const text = JSON.stringify(row);
+  for (const field of [
+    "encryptedBlob",
+    "authHash",
+    "credentialId",
+    "credential_id",
+    "publicKey",
+    "public_key",
+    "headers",
+    "body",
+  ]) {
+    assert.ok(!text.includes(field), `audit row leaked forbidden field ${field}`);
+  }
+  for (const value of forbiddenValues) {
+    assert.ok(!text.includes(value), "audit row leaked forbidden value");
+  }
+}
+
+async function waitForAuditEvent(
+  userId: string,
+  predicate: (entry: AuditLogItem) => boolean,
+  label: string,
+): Promise<AuditLogItem> {
+  for (let i = 0; i < 20; i++) {
+    const entries = await storage.getAuditLog(userId, 100);
+    const found = entries.find(predicate);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`timed out waiting for ${label}`);
 }
 
 async function expectRateLimitResponse(
@@ -1004,11 +1057,17 @@ test("T006 — /api/vault/audit response leaks no credential / public-key fields
   // String-search the raw response. False-positive risk is low — these
   // names are camelCase / snake_case identifiers, not English words.
   for (const banned of [
+    "authHash",
+    "auth_hash",
+    "encryptedBlob",
+    "encrypted_blob",
     "credentialId",
     "credential_id",
     "publicKey",
     "public_key",
     "counter",
+    "headers",
+    "body",
     "DEADBEEF", // the actual leaked-key string we just persisted
   ]) {
     assert.ok(
@@ -1016,6 +1075,194 @@ test("T006 — /api/vault/audit response leaks no credential / public-key fields
       `audit response must not include ${banned}; sample: ${text.slice(0, 200)}`,
     );
   }
+  assert.ok(!text.includes(u.authHash), "audit response must not echo authHash");
+});
+
+test("T006.b — vault sync and fetch emit safe audit rows", async () => {
+  const u = await registerUser();
+  const blob = validEncryptedBlob("t006b:sync");
+
+  const sync = await legacyVaultSync(u, blob, 0);
+  await expectStatus(sync, 200, "vault sync should succeed");
+  const syncAudit = await waitForAuditEvent(
+    u.userId,
+    (entry) =>
+      entry.action === "vault_sync" &&
+      entry.versionBefore === 0 &&
+      entry.versionAfter === 1,
+    "vault_sync audit row",
+  );
+  assert.equal(syncAudit.blobSize, Buffer.byteLength(blob, "utf8"));
+  assertAuditRowSafe(syncAudit, [blob, u.authHash, u.userId]);
+
+  const fetchRes = await legacyVaultFetch(u);
+  await expectStatus(fetchRes, 200, "vault fetch should succeed");
+  const fetchAudit = await waitForAuditEvent(
+    u.userId,
+    (entry) => entry.action === "vault_fetch",
+    "vault_fetch audit row",
+  );
+  assert.equal(fetchAudit.versionBefore, null);
+  assert.equal(fetchAudit.versionAfter, null);
+  assert.equal(fetchAudit.blobSize, null);
+  assertAuditRowSafe(fetchAudit, [blob, u.authHash, u.userId]);
+});
+
+test("T006.c — vault sync version conflict does not create a success audit row", async () => {
+  const u = await registerUser();
+  const blob = validEncryptedBlob("t006c:first");
+  await expectStatus(
+    await legacyVaultSync(u, blob, 0),
+    200,
+    "initial sync should succeed",
+  );
+  await waitForAuditEvent(
+    u.userId,
+    (entry) => entry.action === "vault_sync" && entry.versionAfter === 1,
+    "initial vault_sync audit row",
+  );
+  const before = (await storage.getAuditLog(u.userId, 100)).filter(
+    (entry) => entry.action === "vault_sync",
+  ).length;
+
+  const conflictBlob = validEncryptedBlob("t006c:conflict");
+  await expectVersionConflict(
+    await legacyVaultSync(u, conflictBlob, 0),
+    1,
+    [blob, conflictBlob, u.authHash, u.userId],
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const after = (await storage.getAuditLog(u.userId, 100)).filter(
+    (entry) => entry.action === "vault_sync",
+  ).length;
+  assert.equal(after, before, "version conflict must not add vault_sync audit rows");
+});
+
+test("T006.d — successful vault restore emits safe audit metadata", async () => {
+  const u = await registerUser();
+  const firstBlob = validEncryptedBlob("t006d:first");
+  const secondBlob = validEncryptedBlob("t006d:second");
+
+  await expectStatus(
+    await legacyVaultSync(u, firstBlob, 0),
+    200,
+    "first sync should succeed",
+  );
+  await expectStatus(
+    await legacyVaultSync(u, secondBlob, 1),
+    200,
+    "second sync should succeed",
+  );
+
+  const restore = await legacyVaultRestore(u, 1);
+  await expectStatus(restore, 200, "restore should succeed");
+  const restoreBody = (await restore.json()) as { version: number };
+  assert.equal(restoreBody.version, 3);
+
+  const restoreAudit = await waitForAuditEvent(
+    u.userId,
+    (entry) =>
+      entry.action === "vault_restore" &&
+      entry.versionBefore === 2 &&
+      entry.versionAfter === 3,
+    "vault_restore audit row",
+  );
+  assert.equal(restoreAudit.blobSize, null);
+  assertAuditRowSafe(restoreAudit, [firstBlob, secondBlob, u.authHash, u.userId]);
+
+  const before = (await storage.getAuditLog(u.userId, 100)).filter(
+    (entry) => entry.action === "vault_restore",
+  ).length;
+  await expectStatus(
+    await legacyVaultRestore(u, 999),
+    404,
+    "missing restore target should 404",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const after = (await storage.getAuditLog(u.userId, 100)).filter(
+    (entry) => entry.action === "vault_restore",
+  ).length;
+  assert.equal(after, before, "failed restore must not add vault_restore audit rows");
+});
+
+test("T006.e — untrusted-device sync block emits a safe audit row", async () => {
+  const u = await registerUser();
+  const ua = "T006e-Agent/1.0";
+  const ip = "10.6.0.5";
+  const login = await loginUser(u.username, u.authHash, { ua, ip });
+  assert.ok(login.sessionToken);
+
+  const blob = validEncryptedBlob("t006e:blocked");
+  const sync = await authedFetch("/api/vault/sync", login.sessionToken!, {
+    method: "POST",
+    body: JSON.stringify({ encryptedBlob: blob, expectedPrevVersion: 0 }),
+    ua,
+    ip,
+  });
+  assert.equal(sync.status, 403);
+
+  const blockedAudit = await waitForAuditEvent(
+    u.userId,
+    (entry) =>
+      entry.action === "untrusted_device_blocked" &&
+      entry.userAgent === "attemptedAction=sync",
+    "untrusted_device_blocked audit row",
+  );
+  assertAuditRowSafe(blockedAudit, [
+    blob,
+    u.authHash,
+    login.sessionToken ?? "",
+    u.userId,
+  ]);
+});
+
+test("T006.f — login and device trust changes emit safe audit rows", async () => {
+  const u = await registerUser();
+  const ua = "T006f-Agent/1.0";
+  const ip = "10.6.0.6";
+  const login = await loginUser(u.username, u.authHash, { ua, ip });
+  assert.equal(login.status, 200);
+  assert.ok(login.sessionToken);
+
+  for (const action of ["login_success", "session_created", "new_device_detected"]) {
+    const row = await waitForAuditEvent(
+      u.userId,
+      (entry) => entry.action === action,
+      `${action} audit row`,
+    );
+    assertAuditRowSafe(row, [u.authHash, login.sessionToken ?? "", u.userId]);
+  }
+
+  const fingerprint = predictFingerprint({ ua, ip });
+  const trustRes = await authedFetch(
+    "/api/security/device/trust",
+    login.sessionToken,
+    { method: "POST", body: JSON.stringify({ fingerprint }), ua, ip },
+  );
+  await expectStatus(trustRes, 200, "device trust should succeed");
+  const trusted = await waitForAuditEvent(
+    u.userId,
+    (entry) =>
+      entry.action === "device_trusted" &&
+      entry.userAgent === `fingerprint=${fingerprint.slice(0, 16)}`,
+    "device_trusted audit row",
+  );
+  assertAuditRowSafe(trusted, [u.authHash, login.sessionToken, u.userId]);
+
+  const revokeRes = await authedFetch(
+    "/api/security/device/revoke",
+    login.sessionToken,
+    { method: "POST", body: JSON.stringify({ fingerprint }), ua, ip },
+  );
+  await expectStatus(revokeRes, 200, "device revoke should succeed");
+  const revoked = await waitForAuditEvent(
+    u.userId,
+    (entry) =>
+      entry.action === "device_untrusted" &&
+      entry.userAgent === `fingerprint=${fingerprint.slice(0, 16)}`,
+    "device_untrusted audit row",
+  );
+  assertAuditRowSafe(revoked, [u.authHash, login.sessionToken, u.userId]);
 });
 
 // ---------------------------------------------------------------------------
