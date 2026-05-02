@@ -44,7 +44,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { registerRoutes } from "../routes";
 import { DatabaseStorage } from "../storage";
@@ -1270,6 +1270,48 @@ test("T010.vault_fetch — repeated vault fetch requests are rate-limited safely
 
   assert.ok(limited, "expected repeated vault fetch requests to hit 429");
   await expectRateLimitResponse(limited, [u.authHash, u.userId]);
+});
+
+test("T010.vault_audit — per-user bucket trips even when IP changes", async () => {
+  const u = await registerUser();
+  let limited: Response | null = null;
+
+  for (let i = 0; i < 15; i++) {
+    const res = await fetch(`${baseUrl}/api/vault/audit`, {
+      headers: {
+        "x-user-id": u.userId,
+        "x-auth-hash": u.authHash,
+        "x-forwarded-for": `10.13.${i}.1`,
+      },
+    });
+    if (res.status === 429) {
+      limited = res;
+      break;
+    }
+    if (res.status !== 200) {
+      assert.fail(`expected pre-limit audit requests to 200; got ${res.status} ${await res.text()}`);
+    }
+  }
+
+  assert.ok(limited, "expected same-user audit requests across IPs to hit 429");
+  await expectRateLimitResponse(limited, [u.authHash, u.userId]);
+});
+
+test("T010.vault_audit — unknown userId stays on collapsed auth error, not 429", async () => {
+  const missingUserId = randomUUID();
+  const authHash = hex64("missing-user-auth");
+
+  for (let i = 0; i < 15; i++) {
+    const res = await fetch(`${baseUrl}/api/vault/audit`, {
+      headers: {
+        "x-user-id": missingUserId,
+        "x-auth-hash": authHash,
+        "x-forwarded-for": `10.14.${i}.1`,
+      },
+    });
+    assert.equal(res.status, 401);
+    assert.deepEqual(await res.json(), { error: "Invalid credentials" });
+  }
 });
 
 // T011 — audit visibility: a failed password login (known user, wrong
