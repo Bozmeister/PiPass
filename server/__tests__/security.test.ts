@@ -110,6 +110,16 @@ function validEncryptedBlob(seed = "vault"): string {
   return `${hex64(`${seed}:iv`).slice(0, 32)}:${hex64(`${seed}:cipher`)}:${hex64(`${seed}:mac`)}`;
 }
 
+async function expectInvalidVaultBlob(encryptedBlob: string): Promise<void> {
+  const res = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ encryptedBlob, version: 1 }),
+  });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Invalid blob" });
+}
+
 // Random 10.x.y.z address. The route module rate-limits register/login
 // per-IP, so reusing 127.0.0.1 across the suite trips the budget after
 // a handful of tests. Each register/login call gets its own bucket by
@@ -580,46 +590,30 @@ test("T004.b — sync from an untrusted device is blocked (step-up required)", a
 });
 
 test("T004.c — vault sync rejects an empty encryptedBlob", async () => {
-  const res = await fetch(`${baseUrl}/api/vault/sync`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ encryptedBlob: "", version: 1 }),
-  });
-  assert.equal(res.status, 400);
-  assert.deepEqual(await res.json(), { error: "Invalid blob" });
+  await expectInvalidVaultBlob("");
 });
 
-test("T004.d — vault sync rejects a whitespace-only encryptedBlob", async () => {
-  const res = await fetch(`${baseUrl}/api/vault/sync`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ encryptedBlob: "     ", version: 1 }),
-  });
-  assert.equal(res.status, 400);
-  assert.deepEqual(await res.json(), { error: "Invalid blob" });
+test("T004.d — vault sync rejects a single-space encryptedBlob", async () => {
+  await expectInvalidVaultBlob(" ");
 });
 
-test("T004.e — vault sync rejects null placeholder encryptedBlob text", async () => {
-  const res = await fetch(`${baseUrl}/api/vault/sync`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ encryptedBlob: "null", version: 1 }),
-  });
-  assert.equal(res.status, 400);
-  assert.deepEqual(await res.json(), { error: "Invalid blob" });
+test("T004.e — vault sync rejects whitespace-only encryptedBlob text", async () => {
+  await expectInvalidVaultBlob("     ");
 });
 
-test("T004.f — vault sync rejects empty-array placeholder encryptedBlob text", async () => {
-  const res = await fetch(`${baseUrl}/api/vault/sync`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ encryptedBlob: "[]", version: 1 }),
-  });
-  assert.equal(res.status, 400);
-  assert.deepEqual(await res.json(), { error: "Invalid blob" });
+test("T004.f — vault sync rejects null placeholder encryptedBlob text", async () => {
+  await expectInvalidVaultBlob("null");
 });
 
-test("T004.g — vault sync accepts a sufficiently long opaque encryptedBlob", async () => {
+test("T004.g — vault sync rejects empty-array placeholder encryptedBlob text", async () => {
+  await expectInvalidVaultBlob("[]");
+});
+
+test("T004.h — vault sync rejects a trimmed encryptedBlob shorter than 64 characters", async () => {
+  await expectInvalidVaultBlob(`  ${"a".repeat(63)}  `);
+});
+
+test("T004.i — vault sync accepts a sufficiently long opaque encryptedBlob", async () => {
   const u = await registerUser();
   const res = await fetch(`${baseUrl}/api/vault/sync`, {
     method: "POST",
