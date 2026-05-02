@@ -1155,10 +1155,11 @@ test("T006.b — vault sync and fetch emit safe audit rows", async () => {
     u.userId,
     (entry) =>
       entry.action === "vault_sync" &&
-      entry.versionBefore === 0 &&
+      entry.versionBefore === null &&
       entry.versionAfter === 1,
     "vault_sync audit row",
   );
+  assert.equal(syncAudit.versionBefore, null);
   assert.equal(syncAudit.blobSize, Buffer.byteLength(blob, "utf8"));
   assertAuditRowSafe(syncAudit, [blob, u.authHash, u.userId]);
 
