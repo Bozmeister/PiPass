@@ -50,7 +50,7 @@ function setupCors(app: express.Application) {
       // session-token requests to fail before reaching route handlers.
       res.header(
         "Access-Control-Allow-Headers",
-        "Content-Type, X-User-Id, X-Auth-Hash, X-Session-Token",
+        "Content-Type, X-User-Id, X-Auth-Hash, X-Session-Token, X-Install-Id",
       );
       res.header("Access-Control-Allow-Credentials", "true");
     }

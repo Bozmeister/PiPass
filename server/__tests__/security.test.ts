@@ -190,46 +190,52 @@ async function legacyVaultSync(
   user: Registered,
   encryptedBlob: string,
   expectedPrevVersion: number,
-  opts: { ip?: string } = {},
+  opts: { ip?: string; installId?: string } = {},
 ): Promise<Response> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-user-id": user.userId,
+    "x-auth-hash": user.authHash,
+    "x-forwarded-for": opts.ip ?? randomIp(),
+  };
+  if (opts.installId) headers["x-install-id"] = opts.installId;
   return fetch(`${baseUrl}/api/vault/sync`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-user-id": user.userId,
-      "x-auth-hash": user.authHash,
-      "x-forwarded-for": opts.ip ?? randomIp(),
-    },
+    headers,
     body: JSON.stringify({ encryptedBlob, expectedPrevVersion }),
   });
 }
 
 async function legacyVaultFetch(
   user: Registered,
-  opts: { ip?: string } = {},
+  opts: { ip?: string; installId?: string } = {},
 ): Promise<Response> {
+  const headers: Record<string, string> = {
+    "x-user-id": user.userId,
+    "x-auth-hash": user.authHash,
+    "x-forwarded-for": opts.ip ?? randomIp(),
+  };
+  if (opts.installId) headers["x-install-id"] = opts.installId;
   return fetch(`${baseUrl}/api/vault/fetch`, {
-    headers: {
-      "x-user-id": user.userId,
-      "x-auth-hash": user.authHash,
-      "x-forwarded-for": opts.ip ?? randomIp(),
-    },
+    headers,
   });
 }
 
 async function legacyVaultRestore(
   user: Registered,
   version: number,
-  opts: { ip?: string } = {},
+  opts: { ip?: string; installId?: string } = {},
 ): Promise<Response> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-user-id": user.userId,
+    "x-auth-hash": user.authHash,
+    "x-forwarded-for": opts.ip ?? randomIp(),
+  };
+  if (opts.installId) headers["x-install-id"] = opts.installId;
   return fetch(`${baseUrl}/api/vault/restore`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-user-id": user.userId,
-      "x-auth-hash": user.authHash,
-      "x-forwarded-for": opts.ip ?? randomIp(),
-    },
+    headers,
     body: JSON.stringify({ version }),
   });
 }
@@ -420,6 +426,7 @@ function assertLogOutputSafe(
   for (const field of [
     "x-auth-hash",
     "x-user-id",
+    "x-install-id",
     "authorization",
     "cookie",
     "encryptedBlob",
@@ -1148,8 +1155,9 @@ test("T006 — /api/vault/audit response leaks no credential / public-key fields
 test("T006.b — vault sync and fetch emit safe audit rows", async () => {
   const u = await registerUser();
   const blob = validEncryptedBlob("t006b:sync");
+  const installId = "11111111-1111-4111-8111-111111111111";
 
-  const sync = await legacyVaultSync(u, blob, 0);
+  const sync = await legacyVaultSync(u, blob, 0, { installId });
   await expectStatus(sync, 200, "vault sync should succeed");
   const syncAudit = await waitForAuditEvent(
     u.userId,
@@ -1160,10 +1168,14 @@ test("T006.b — vault sync and fetch emit safe audit rows", async () => {
     "vault_sync audit row",
   );
   assert.equal(syncAudit.versionBefore, null);
+  assert.ok(
+    syncAudit.userAgent?.includes(`installId=${installId}`),
+    "vault_sync audit row should include valid installId context",
+  );
   assert.equal(syncAudit.blobSize, Buffer.byteLength(blob, "utf8"));
   assertAuditRowSafe(syncAudit, [blob, u.authHash, u.userId]);
 
-  const fetchRes = await legacyVaultFetch(u);
+  const fetchRes = await legacyVaultFetch(u, { installId });
   await expectStatus(fetchRes, 200, "vault fetch should succeed");
   const fetchAudit = await waitForAuditEvent(
     u.userId,
@@ -1173,7 +1185,28 @@ test("T006.b — vault sync and fetch emit safe audit rows", async () => {
   assert.equal(fetchAudit.versionBefore, null);
   assert.equal(fetchAudit.versionAfter, null);
   assert.equal(fetchAudit.blobSize, null);
+  assert.ok(
+    fetchAudit.userAgent?.includes(`installId=${installId}`),
+    "vault_fetch audit row should include valid installId context",
+  );
   assertAuditRowSafe(fetchAudit, [blob, u.authHash, u.userId]);
+});
+
+test("T006.b2 — invalid installId header is ignored without blocking vault fetch", async () => {
+  const u = await registerUser();
+  const invalidInstallId = "SENTINEL_INVALID_INSTALL_ID_DO_NOT_AUDIT";
+
+  const fetchRes = await legacyVaultFetch(u, { installId: invalidInstallId });
+  await expectStatus(fetchRes, 200, "vault fetch should ignore invalid installId");
+  const fetchAudit = await waitForAuditEvent(
+    u.userId,
+    (entry) => entry.action === "vault_fetch",
+    "vault_fetch audit row with invalid installId",
+  );
+  const text = JSON.stringify(fetchAudit);
+  assert.ok(!text.includes(invalidInstallId), "invalid installId must not be audited");
+  assert.ok(!text.includes("installId="), "invalid installId must be treated as absent");
+  assertAuditRowSafe(fetchAudit, [invalidInstallId, u.authHash, u.userId]);
 });
 
 test("T006.c — vault sync version conflict does not create a success audit row", async () => {
@@ -1638,6 +1671,7 @@ test("T012.a - API request logging omits sensitive headers, body, and query valu
   const sentinelUserId = "SENTINEL_USER_ID_DO_NOT_LOG";
   const sentinelBearer = "SENTINEL_AUTHORIZATION_DO_NOT_LOG";
   const sentinelCookie = "SENTINEL_COOKIE_DO_NOT_LOG";
+  const sentinelInstallId = "22222222-2222-4222-8222-222222222222";
   const sentinelBlob = "SENTINEL_ENCRYPTED_BLOB_DO_NOT_LOG";
   const sentinelQuery = "SENTINEL_QUERY_VALUE_DO_NOT_LOG";
   const sentinels = [
@@ -1645,6 +1679,7 @@ test("T012.a - API request logging omits sensitive headers, body, and query valu
     sentinelUserId,
     sentinelBearer,
     sentinelCookie,
+    sentinelInstallId,
     sentinelBlob,
     sentinelQuery,
   ];
@@ -1668,6 +1703,7 @@ test("T012.a - API request logging omits sensitive headers, body, and query valu
             "content-type": "application/json",
             "x-user-id": sentinelUserId,
             "x-auth-hash": sentinelAuthHash,
+            "x-install-id": sentinelInstallId,
             authorization: `Bearer ${sentinelBearer}`,
             cookie: `sid=${sentinelCookie}`,
           },

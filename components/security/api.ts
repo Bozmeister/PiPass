@@ -1,6 +1,7 @@
 import { fetch } from "expo/fetch";
 import { getApiUrl } from "../../lib/query-client";
 import { getCredentials } from "../../lib/credentials";
+import { getInstallId } from "../../lib/install-id";
 
 // Local fetch helper for the security dashboard.
 //
@@ -124,6 +125,11 @@ async function securityFetch<T>(
     "x-user-id": creds.userId,
     "x-auth-hash": creds.authHash,
   };
+  try {
+    headers["x-install-id"] = await getInstallId();
+  } catch {
+    // Non-secret audit context only; never block security actions on it.
+  }
   if (body !== undefined) headers["Content-Type"] = "application/json";
 
   const res = await fetch(url.toString(), {

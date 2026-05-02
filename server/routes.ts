@@ -29,6 +29,7 @@ import {
   validatePasskeyRegisterFinish,
   validatePasskeyLoginStart,
   validatePasskeyLoginFinish,
+  getOptionalInstallId,
 } from "./validation";
 import {
   generateTotpSecret,
@@ -2725,6 +2726,19 @@ function captureUserAgent(req: Request): string | null {
     : raw;
 }
 
+function captureAuditUserAgent(req: Request): string | null {
+  const userAgent = captureUserAgent(req);
+  const installId = getOptionalInstallId(req);
+  if (!installId) return userAgent;
+
+  const value = userAgent
+    ? `installId=${installId}; ua=${userAgent}`
+    : `installId=${installId}`;
+  return value.length > USER_AGENT_MAX_BYTES
+    ? value.slice(0, USER_AGENT_MAX_BYTES)
+    : value;
+}
+
 type VersionConflictResponse = {
   error: "Version conflict";
   serverVersion: number;
@@ -3277,7 +3291,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // would break zero-knowledge). versionBefore is captured inside
       // syncVault's transaction so it's race-free.
       const ip = getClientIp(req);
-      const userAgent = captureUserAgent(req);
+      const userAgent = captureAuditUserAgent(req);
       recordAudit(storage, {
         userId,
         action: "vault_sync",
@@ -3365,7 +3379,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // (the user simply has no vault yet) — log it. Spec says log
       // every successful fetch; doesn't carve out the empty case.
       const ip = getClientIp(req);
-      const userAgent = captureUserAgent(req);
+      const userAgent = captureAuditUserAgent(req);
       recordAudit(storage, {
         userId,
         action: "vault_fetch",
@@ -3670,7 +3684,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         versionBefore: result.previousVersion,
         versionAfter: result.blob.version,
         ipAddress: restoreIp,
-        userAgent: captureUserAgent(req),
+        userAgent: captureAuditUserAgent(req),
       });
       // IP-burst tracking on restore too — restore is a write endpoint
       // and an attacker spamming restores from rotating IPs should be

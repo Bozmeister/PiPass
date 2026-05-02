@@ -237,6 +237,18 @@ export function validateSessionTokenHeader(req: Request): Result<string> {
   return { ok: true, data: parsed.data };
 }
 
+const INSTALL_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function getOptionalInstallId(req: Request): string | null {
+  const raw = req.headers["x-install-id"];
+  if (typeof raw !== "string") return null;
+
+  const trimmed = raw.trim();
+  if (!INSTALL_ID_RE.test(trimmed)) return null;
+  return trimmed.toLowerCase();
+}
+
 // Rejects any request that carries query parameters. None of the API endpoints
 // accept query input today, so the safe default is "any unexpected query
 // param is a 400". Mirrors the .strict() behaviour we apply to JSON bodies.

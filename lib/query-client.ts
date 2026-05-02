@@ -1,6 +1,7 @@
 import { fetch } from "expo/fetch";
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 import { clearCredentials, getCredentials } from "./credentials";
+import { getInstallId } from "./install-id";
 
 /**
  * Gets the base URL for the Express API server (e.g., "http://localhost:3000")
@@ -37,6 +38,15 @@ async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
     const text = (await res.text()) || res.statusText;
     throw new Error(`${res.status}: ${text}`);
+  }
+}
+
+async function attachInstallIdHeader(headers: Record<string, string>): Promise<void> {
+  try {
+    headers["x-install-id"] = await getInstallId();
+  } catch {
+    // installId is a non-secret audit label. A failure to create/read it must
+    // never block an authenticated request.
   }
 }
 
@@ -112,6 +122,7 @@ export async function authedApiRequest(
     "x-user-id": creds.userId,
     "x-auth-hash": creds.authHash,
   };
+  await attachInstallIdHeader(headers);
   if (data !== undefined) {
     headers["Content-Type"] = "application/json";
   }
