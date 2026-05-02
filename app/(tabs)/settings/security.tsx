@@ -20,6 +20,7 @@ import {
   relativeTime,
   type DeviceItem,
   type PasskeyItem,
+  type SessionItem,
 } from "../../../components/security/api";
 import SecurityStatus from "../../../components/security/SecurityStatus";
 import RecoveryBanner from "../../../components/security/RecoveryBanner";
@@ -39,10 +40,11 @@ const DASHBOARD_FRACTAL_SEED = 8675309;
 
 // Security Dashboard screen (T001-T010).
 //
-// Three sections, in this fixed order so the most-urgent UI is at the
-// top: Status (level + threat canary + recovery banner), Devices,
-// Passkeys. All data comes from three GETs:
+// Dashboard sections stay in a fixed order so the most-urgent UI is
+// at the top: Status, Sessions, Devices, Passkeys. All data comes
+// from existing safe GETs:
 //   - /api/vault/audit       (level, threat, recoveryMode, anomaly bit)
+//   - /api/auth/sessions     (safe session metadata)
 //   - /api/security/devices  (device ledger)
 //   - /api/passkeys          (registered passkeys)
 //
@@ -54,6 +56,7 @@ const DASHBOARD_FRACTAL_SEED = 8675309;
 
 const QK = {
   audit: ["/api/vault/audit"] as const,
+  sessions: ["/api/auth/sessions"] as const,
   devices: ["/api/security/devices"] as const,
   passkeys: ["/api/passkeys"] as const,
 };
@@ -127,6 +130,86 @@ function EmptyState({ icon, text }: { icon: keyof typeof Ionicons.glyphMap; text
   );
 }
 
+function TrustBadge({ trusted }: { trusted: boolean }) {
+  return (
+    <View
+      style={{
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 10,
+        backgroundColor: trusted ? "#0a1a10" : "#1a1208",
+        borderWidth: 1,
+        borderColor: trusted ? "#143a25" : "#3a2510",
+      }}
+    >
+      <Text
+        style={{
+          color: trusted ? "#22c55e" : "#eab308",
+          fontSize: 10,
+          fontWeight: "600" as const,
+        }}
+      >
+        {trusted ? "TRUSTED" : "UNTRUSTED"}
+      </Text>
+    </View>
+  );
+}
+
+function sessionTitle(session: SessionItem): string {
+  if (session.current) return "Current session";
+  const ua = session.userAgent?.trim();
+  if (!ua) return "Recent session";
+  return ua.length > 72 ? `${ua.slice(0, 69)}...` : ua;
+}
+
+function sessionDetail(session: SessionItem): string {
+  const parts = [`last seen ${relativeTime(session.lastSeenAt)}`];
+  if (session.ipAddress) parts.push(session.ipAddress);
+  return parts.join(" - ");
+}
+
+function SessionSummary({ session }: { session: SessionItem }) {
+  return (
+    <View
+      style={{
+        backgroundColor: "#0f0f0f",
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: session.suspicious ? "#3a2510" : "#1a1a1a",
+        padding: 14,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 12,
+      }}
+    >
+      <Ionicons
+        name={session.suspicious ? "warning-outline" : "phone-portrait-outline"}
+        size={20}
+        color={session.suspicious ? "#f97316" : session.trusted ? "#22c55e" : "#888"}
+      />
+      <View style={{ flex: 1 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <Text
+            style={{ color: "#fff", fontSize: 14, fontWeight: "600" as const, flexShrink: 1 }}
+            numberOfLines={1}
+          >
+            {sessionTitle(session)}
+          </Text>
+          <TrustBadge trusted={session.trusted} />
+        </View>
+        <Text style={{ color: "#777", fontSize: 12, marginTop: 4 }} numberOfLines={1}>
+          {sessionDetail(session)}
+        </Text>
+      </View>
+      {session.suspicious ? (
+        <Text style={{ color: "#f97316", fontSize: 11, fontWeight: "600" as const }}>
+          REVIEW
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
 export default function SecurityScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
@@ -138,7 +221,7 @@ export default function SecurityScreen() {
   // T002 — single source of truth for the fractal's reactive params.
   const securityState = useSecurityState();
 
-  // T002 — Three independent fetches. Each one's loading state is
+  // T002 — Independent fetches. Each one's loading state is
   // surfaced separately so a slow audit endpoint doesn't blank the
   // (already-cached) device list. retry:false matches the project
   // QueryClient default so a transient 500 doesn't re-fire the call
@@ -146,6 +229,11 @@ export default function SecurityScreen() {
   const auditQ = useQuery({
     queryKey: QK.audit,
     queryFn: securityApi.fetchAudit,
+    retry: false,
+  });
+  const sessionsQ = useQuery({
+    queryKey: QK.sessions,
+    queryFn: securityApi.fetchSessions,
     retry: false,
   });
   const devicesQ = useQuery({
@@ -165,6 +253,7 @@ export default function SecurityScreen() {
     try {
       await Promise.all([
         qc.invalidateQueries({ queryKey: QK.audit }),
+        qc.invalidateQueries({ queryKey: QK.sessions }),
         qc.invalidateQueries({ queryKey: QK.devices }),
         qc.invalidateQueries({ queryKey: QK.passkeys }),
       ]);
@@ -213,6 +302,7 @@ export default function SecurityScreen() {
       // Trust changes can shift securityLevel; refresh audit too so
       // the status block reflects the new posture immediately.
       qc.invalidateQueries({ queryKey: QK.audit });
+      qc.invalidateQueries({ queryKey: QK.sessions });
     },
   });
 
@@ -259,7 +349,8 @@ export default function SecurityScreen() {
   }
 
   const audit = auditQ.data;
-  const devices = devicesQ.data?.devices ?? [];
+  const sessions = sessionsQ.data?.sessions;
+  const devices = devicesQ.data?.devices;
   const passkeys = passkeysQ.data?.passkeys ?? [];
 
   // Web-only top inset (per Expo guidelines): a fixed 67px header
@@ -271,14 +362,22 @@ export default function SecurityScreen() {
   // Fail-open: any of the three queries failing surfaces a single
   // soft error block at the top instead of a screen-wide error so
   // the user can still see whichever sections did load.
-  const anyError = auditQ.isError || devicesQ.isError || passkeysQ.isError;
+  const anyError = auditQ.isError || sessionsQ.isError || devicesQ.isError || passkeysQ.isError;
+
+  const currentSession = useMemo(() => {
+    return sessions?.find((s) => s.current === true) ?? null;
+  }, [sessions]);
+
+  const recentSessions = useMemo(() => {
+    return [...(sessions ?? [])].sort((a, b) => b.lastSeenAt - a.lastSeenAt).slice(0, 3);
+  }, [sessions]);
 
   // useMemo: stable device sort — trusted-current device most
   // recent first. Server already returns by lastSeenAt DESC; we
   // just push untrusted-but-recent above trusted-but-stale so the
   // user's current (likely-new) device is the one they see first.
   const sortedDevices = useMemo(() => {
-    return [...devices].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+    return [...(devices ?? [])].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
   }, [devices]);
 
   return (
@@ -385,6 +484,53 @@ export default function SecurityScreen() {
             threatLevel={audit?.threatLevel}
             hasRecentAnomalies={audit?.hasRecentAnomalies}
           />
+        )}
+
+        {/* Section: Sessions. Existing safe endpoint data only; installId is not shown here. */}
+        <SectionHeading>Sessions</SectionHeading>
+        {sessionsQ.isLoading ? (
+          <>
+            <Skeleton height={76} />
+            <Skeleton height={76} />
+          </>
+        ) : recentSessions.length === 0 ? (
+          <EmptyState icon="phone-portrait-outline" text="No active sessions found." />
+        ) : (
+          <View style={{ gap: 8 }}>
+            <View
+              style={{
+                backgroundColor: "#0f0f0f",
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: "#1a1a1a",
+                padding: 14,
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 12,
+              }}
+            >
+              <Ionicons
+                name={currentSession?.trusted ? "shield-checkmark-outline" : "shield-outline"}
+                size={20}
+                color={currentSession?.trusted ? "#22c55e" : "#888"}
+              />
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: "#fff", fontSize: 14, fontWeight: "600" as const }}>
+                  Current session
+                </Text>
+                <Text style={{ color: "#777", fontSize: 12, marginTop: 4 }}>
+                  {currentSession
+                    ? currentSession.trusted
+                      ? "Server trust state: trusted."
+                      : "Server trust state: untrusted."
+                    : "Current session details are not available for this sign-in method."}
+                </Text>
+              </View>
+            </View>
+            {recentSessions.map((s) => (
+              <SessionSummary key={s.id} session={s} />
+            ))}
+          </View>
         )}
 
         {/* Section: Devices (T003) */}
@@ -501,7 +647,7 @@ export default function SecurityScreen() {
           </View>
         </View>
 
-        {(devicesQ.isFetching || passkeysQ.isFetching || auditQ.isFetching) && !refreshing ? (
+        {(sessionsQ.isFetching || devicesQ.isFetching || passkeysQ.isFetching || auditQ.isFetching) && !refreshing ? (
           <View style={{ padding: 12, alignItems: "center" }}>
             <ActivityIndicator size="small" color="#444" />
           </View>

@@ -46,6 +46,25 @@ export type DeviceItem = {
   lastSeenAt: number;
 };
 
+export type SessionItem = {
+  id: string;
+  createdAt: number;
+  lastSeenAt: number;
+  expiresAt: number;
+  userAgent: string | null;
+  ipAddress: string | null;
+  suspicious: boolean;
+  trusted: boolean;
+  current?: boolean;
+};
+
+export type SessionsResponse = {
+  sessions: SessionItem[];
+  securityLevel?: SecurityLevel;
+  threatLevel?: number;
+  recoveryMode?: boolean;
+};
+
 export type PasskeyItem = {
   id: string;
   deviceName: string | null;
@@ -177,6 +196,8 @@ async function securityFetch<T>(
 
 export const securityApi = {
   fetchAudit: () => securityFetch<AuditResponse>("GET", "/api/vault/audit"),
+  fetchSessions: () =>
+    securityFetch<SessionsResponse>("GET", "/api/auth/sessions"),
   fetchDevices: () =>
     securityFetch<{ devices: DeviceItem[] }>("GET", "/api/security/devices"),
   fetchPasskeys: () =>
