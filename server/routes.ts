@@ -2672,7 +2672,10 @@ async function authenticate(
           // Truncated fingerprint for cross-referencing with
           // /api/security/devices entries — same convention as the
           // existing trust-device / login paths.
-          userAgent: `fingerprint=${fp.slice(0, 16)}`,
+          userAgent: appendInstallIdMetadata(
+            req,
+            `fingerprint=${fp.slice(0, 16)}`,
+          ),
         });
       }
     } catch (err) {
@@ -2726,17 +2729,28 @@ function captureUserAgent(req: Request): string | null {
     : raw;
 }
 
-function captureAuditUserAgent(req: Request): string | null {
-  const userAgent = captureUserAgent(req);
+function appendInstallIdMetadata(
+  req: Request,
+  metadata: string | null,
+): string | null {
   const installId = getOptionalInstallId(req);
-  if (!installId) return userAgent;
+  if (!installId) return metadata;
 
-  const value = userAgent
-    ? `installId=${installId}; ua=${userAgent}`
-    : `installId=${installId}`;
-  return value.length > USER_AGENT_MAX_BYTES
-    ? value.slice(0, USER_AGENT_MAX_BYTES)
-    : value;
+  const installMeta = `installId=${installId}`;
+  if (!metadata) return installMeta;
+
+  const separator = "; ";
+  const maxMetadataLength =
+    USER_AGENT_MAX_BYTES - separator.length - installMeta.length;
+  const safeMetadata =
+    metadata.length > maxMetadataLength
+      ? metadata.slice(0, maxMetadataLength)
+      : metadata;
+  return `${safeMetadata}${separator}${installMeta}`;
+}
+
+function captureAuditUserAgent(req: Request): string | null {
+  return appendInstallIdMetadata(req, captureUserAgent(req));
 }
 
 type VersionConflictResponse = {
@@ -2979,7 +2993,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // exchange) and session_created (a new server-side session row).
       // Both fire-and-forget — the response is sent regardless.
       const ip = getClientIp(req);
-      const userAgent = captureUserAgent(req);
+      const userAgent = captureAuditUserAgent(req);
       recordAudit(storage, {
         userId: user.id,
         action: "login_success",
@@ -3024,7 +3038,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // as anomaly_detected) so an operator reading the audit log
           // can correlate this row with the specific session row by
           // joining on sessions.device_fingerprint.
-          userAgent: `fingerprint=${deviceFingerprint.slice(0, 16)}`,
+          userAgent: appendInstallIdMetadata(
+            req,
+            `fingerprint=${deviceFingerprint.slice(0, 16)}`,
+          ),
         });
         recordSecuritySignalHit(user.id, session.id, false);
         recordUntrustedSession(user.id, session.id);
@@ -3235,7 +3252,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           userId,
           action: "untrusted_device_blocked",
           ipAddress: getClientIp(req),
-          userAgent: `attemptedAction=sync`,
+          userAgent: appendInstallIdMetadata(req, "attemptedAction=sync"),
         });
         return res
           .status(403)
@@ -3628,7 +3645,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           userId,
           action: "untrusted_device_blocked",
           ipAddress: getClientIp(req),
-          userAgent: `attemptedAction=restore`,
+          userAgent: appendInstallIdMetadata(req, "attemptedAction=restore"),
         });
         return res
           .status(403)
@@ -4169,7 +4186,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // already drifted down to elevated/normal as the underlying
           // signals decayed). Keeping both gives operators the full
           // before/after picture.
-          userAgent: `previous=critical; current=${currentLevel}`,
+          userAgent: appendInstallIdMetadata(
+            req,
+            `previous=critical; current=${currentLevel}`,
+          ),
         });
       }
       // Idempotent success — same response shape whether we cleared
@@ -4235,7 +4255,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // Stash the (truncated) fingerprint for cross-referencing with
         // the corresponding new_device_detected entry — same convention
         // as the login path.
-        userAgent: `fingerprint=${getDeviceFingerprint(req).slice(0, 16)}`,
+        userAgent: appendInstallIdMetadata(
+          req,
+          `fingerprint=${getDeviceFingerprint(req).slice(0, 16)}`,
+        ),
       });
 
       return res.status(200).json({ success: true });
@@ -4393,7 +4416,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         userId: auth.userId,
         action: "device_trusted",
         ipAddress: getClientIp(req),
-        userAgent: `fingerprint=${parsed.data.fingerprint.slice(0, 16)}`,
+        userAgent: appendInstallIdMetadata(
+          req,
+          `fingerprint=${parsed.data.fingerprint.slice(0, 16)}`,
+        ),
       });
       return res.status(200).json({ success: true, changed: true });
     } catch (err) {
@@ -4454,7 +4480,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         userId: auth.userId,
         action: "device_untrusted",
         ipAddress: getClientIp(req),
-        userAgent: `fingerprint=${parsed.data.fingerprint.slice(0, 16)}`,
+        userAgent: appendInstallIdMetadata(
+          req,
+          `fingerprint=${parsed.data.fingerprint.slice(0, 16)}`,
+        ),
       });
       return res.status(200).json({ success: true, changed: true });
     } catch (err) {
@@ -5313,7 +5342,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           trusted: isKnownDevice,
         });
 
-        const userAgent = captureUserAgent(req);
+        const userAgent = captureAuditUserAgent(req);
         recordAudit(storage, {
           userId: user.id,
           action: "totp_login_success",
@@ -5337,7 +5366,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             userId: user.id,
             action: "new_device_detected",
             ipAddress: clientIp,
-            userAgent: `fingerprint=${deviceFingerprint.slice(0, 16)}`,
+            userAgent: appendInstallIdMetadata(
+              req,
+              `fingerprint=${deviceFingerprint.slice(0, 16)}`,
+            ),
           });
           recordSecuritySignalHit(user.id, session.id, false);
           recordUntrustedSession(user.id, session.id);
@@ -6339,6 +6371,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         }
 
         const userAgent = captureUserAgent(req);
+        const auditUserAgent = captureAuditUserAgent(req);
 
         const verified = await verifyAuthenticationResponseFor({
           userId: stored.userId,
@@ -6659,13 +6692,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           userId: stored.userId,
           action: "passkey_login_success",
           ipAddress: clientIp,
-          userAgent,
+          userAgent: auditUserAgent,
         });
         recordAudit(storage, {
           userId: stored.userId,
           action: "session_created",
           ipAddress: clientIp,
-          userAgent,
+          userAgent: auditUserAgent,
         });
         // Successful full-session passkey login = clean possession
         // proof. T006: decay (not full-reset) the failure-burst
@@ -6689,7 +6722,10 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             userId: stored.userId,
             action: "new_device_detected",
             ipAddress: clientIp,
-            userAgent: `fingerprint=${deviceFingerprint.slice(0, 16)}`,
+            userAgent: appendInstallIdMetadata(
+              req,
+              `fingerprint=${deviceFingerprint.slice(0, 16)}`,
+            ),
           });
           recordSecuritySignalHit(stored.userId, session.id, false);
           recordUntrustedSession(stored.userId, session.id);

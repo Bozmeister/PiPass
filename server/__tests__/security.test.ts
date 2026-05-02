@@ -336,7 +336,12 @@ async function expectVersionConflict(
   }
 }
 
-type LoginOpts = { ua?: string; ip?: string; platform?: string };
+type LoginOpts = {
+  ua?: string;
+  ip?: string;
+  platform?: string;
+  installId?: string;
+};
 
 async function loginUser(
   username: string,
@@ -349,6 +354,7 @@ async function loginUser(
   };
   if (opts.ua) headers["user-agent"] = opts.ua;
   if (opts.platform) headers["x-platform"] = opts.platform;
+  if (opts.installId) headers["x-install-id"] = opts.installId;
   const res = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers,
@@ -373,6 +379,7 @@ async function authedFetch(
   if (init.ua) headers["user-agent"] = init.ua;
   if (init.ip) headers["x-forwarded-for"] = init.ip;
   if (init.platform) headers["x-platform"] = init.platform;
+  if (init.installId) headers["x-install-id"] = init.installId;
   return fetch(`${baseUrl}${path}`, { ...init, headers });
 }
 
@@ -1033,6 +1040,7 @@ test("T005.a — recovery acknowledge without step-up is rejected (TOTP user)", 
 test("T005.b — recovery acknowledge succeeds after step-up", async () => {
   const u = await registerUser();
   const secret = await enableTotp(u.userId);
+  const installId = "33333333-3333-4333-8333-333333333333";
   const initial = await loginUser(u.username, u.authHash);
   const totpLogin = await fetch(`${baseUrl}/api/auth/totp/login`, {
     method: "POST",
@@ -1044,18 +1052,34 @@ test("T005.b — recovery acknowledge succeeds after step-up", async () => {
   });
   const tlBody = (await totpLogin.json()) as { sessionToken: string };
 
+  for (let i = 0; i < 31; i++) {
+    const fetchRes = await authedFetch("/api/vault/fetch", tlBody.sessionToken, {
+      installId,
+      ip: "10.5.0.2",
+    });
+    await expectStatus(fetchRes, 200, "recovery setup fetch should succeed");
+  }
+
   await stepUp(tlBody.sessionToken, secret);
 
   const ack = await authedFetch(
     "/api/vault/recovery/acknowledge",
     tlBody.sessionToken,
-    { method: "POST", body: JSON.stringify({}) },
+    { method: "POST", body: JSON.stringify({}), installId },
   );
   assert.equal(
     ack.status,
     200,
     `recovery ack after step-up must succeed; got ${ack.status} ${await ack.text()}`,
   );
+  const acknowledged = await waitForAuditEvent(
+    u.userId,
+    (entry) =>
+      entry.action === "recovery_acknowledged" &&
+      entry.userAgent?.includes(`installId=${installId}`) === true,
+    "recovery_acknowledged audit row with installId",
+  );
+  assertAuditRowSafe(acknowledged, [u.authHash, tlBody.sessionToken, u.userId]);
 });
 
 test("T005.c — anomaly audit row visibly elevates the security signal", async () => {
@@ -1243,6 +1267,7 @@ test("T006.d — successful vault restore emits safe audit metadata", async () =
   const u = await registerUser();
   const firstBlob = validEncryptedBlob("t006d:first");
   const secondBlob = validEncryptedBlob("t006d:second");
+  const installId = "44444444-4444-4444-8444-444444444444";
 
   await expectStatus(
     await legacyVaultSync(u, firstBlob, 0),
@@ -1255,7 +1280,7 @@ test("T006.d — successful vault restore emits safe audit metadata", async () =
     "second sync should succeed",
   );
 
-  const restore = await legacyVaultRestore(u, 1);
+  const restore = await legacyVaultRestore(u, 1, { installId });
   await expectStatus(restore, 200, "restore should succeed");
   const restoreBody = (await restore.json()) as { version: number };
   assert.equal(restoreBody.version, 3);
@@ -1269,6 +1294,10 @@ test("T006.d — successful vault restore emits safe audit metadata", async () =
     "vault_restore audit row",
   );
   assert.equal(restoreAudit.blobSize, null);
+  assert.ok(
+    restoreAudit.userAgent?.includes(`installId=${installId}`),
+    "vault_restore audit row should include valid installId context",
+  );
   assertAuditRowSafe(restoreAudit, [firstBlob, secondBlob, u.authHash, u.userId]);
 
   const before = (await storage.getAuditLog(u.userId, 100)).filter(
@@ -1290,6 +1319,7 @@ test("T006.e — untrusted-device sync block emits a safe audit row", async () =
   const u = await registerUser();
   const ua = "T006e-Agent/1.0";
   const ip = "10.6.0.5";
+  const installId = "55555555-5555-4555-8555-555555555555";
   const login = await loginUser(u.username, u.authHash, { ua, ip });
   assert.ok(login.sessionToken);
 
@@ -1299,6 +1329,7 @@ test("T006.e — untrusted-device sync block emits a safe audit row", async () =
     body: JSON.stringify({ encryptedBlob: blob, expectedPrevVersion: 0 }),
     ua,
     ip,
+    installId,
   });
   assert.equal(sync.status, 403);
 
@@ -1306,7 +1337,8 @@ test("T006.e — untrusted-device sync block emits a safe audit row", async () =
     u.userId,
     (entry) =>
       entry.action === "untrusted_device_blocked" &&
-      entry.userAgent === "attemptedAction=sync",
+      entry.userAgent?.includes("attemptedAction=sync") === true &&
+      entry.userAgent.includes(`installId=${installId}`),
     "untrusted_device_blocked audit row",
   );
   assertAuditRowSafe(blockedAudit, [
@@ -1321,7 +1353,8 @@ test("T006.f — login and device trust changes emit safe audit rows", async () 
   const u = await registerUser();
   const ua = "T006f-Agent/1.0";
   const ip = "10.6.0.6";
-  const login = await loginUser(u.username, u.authHash, { ua, ip });
+  const installId = "66666666-6666-4666-8666-666666666666";
+  const login = await loginUser(u.username, u.authHash, { ua, ip, installId });
   assert.equal(login.status, 200);
   assert.ok(login.sessionToken);
 
@@ -1331,6 +1364,10 @@ test("T006.f — login and device trust changes emit safe audit rows", async () 
       (entry) => entry.action === action,
       `${action} audit row`,
     );
+    assert.ok(
+      row.userAgent?.includes(`installId=${installId}`),
+      `${action} audit row should include valid installId context`,
+    );
     assertAuditRowSafe(row, [u.authHash, login.sessionToken ?? "", u.userId]);
   }
 
@@ -1338,14 +1375,15 @@ test("T006.f — login and device trust changes emit safe audit rows", async () 
   const trustRes = await authedFetch(
     "/api/security/device/trust",
     login.sessionToken,
-    { method: "POST", body: JSON.stringify({ fingerprint }), ua, ip },
+    { method: "POST", body: JSON.stringify({ fingerprint }), ua, ip, installId },
   );
   await expectStatus(trustRes, 200, "device trust should succeed");
   const trusted = await waitForAuditEvent(
     u.userId,
     (entry) =>
       entry.action === "device_trusted" &&
-      entry.userAgent === `fingerprint=${fingerprint.slice(0, 16)}`,
+      entry.userAgent?.includes(`fingerprint=${fingerprint.slice(0, 16)}`) === true &&
+      entry.userAgent.includes(`installId=${installId}`),
     "device_trusted audit row",
   );
   assertAuditRowSafe(trusted, [u.authHash, login.sessionToken, u.userId]);
@@ -1353,14 +1391,15 @@ test("T006.f — login and device trust changes emit safe audit rows", async () 
   const revokeRes = await authedFetch(
     "/api/security/device/revoke",
     login.sessionToken,
-    { method: "POST", body: JSON.stringify({ fingerprint }), ua, ip },
+    { method: "POST", body: JSON.stringify({ fingerprint }), ua, ip, installId },
   );
   await expectStatus(revokeRes, 200, "device revoke should succeed");
   const revoked = await waitForAuditEvent(
     u.userId,
     (entry) =>
       entry.action === "device_untrusted" &&
-      entry.userAgent === `fingerprint=${fingerprint.slice(0, 16)}`,
+      entry.userAgent?.includes(`fingerprint=${fingerprint.slice(0, 16)}`) === true &&
+      entry.userAgent.includes(`installId=${installId}`),
     "device_untrusted audit row",
   );
   assertAuditRowSafe(revoked, [u.authHash, login.sessionToken, u.userId]);
