@@ -311,6 +311,8 @@ See `docs/INSTALL_ID_UI_RULES.md` for UI language.
 
 Nuclear reset is now the "fresh local install" boundary. It clears local API credentials, installId, and `deviceUUID`. Lock, logout, and future password rotation must keep those boundaries separate.
 
+See `docs/LOGOUT_RESET_BOUNDARIES.md` for the dedicated logout, server session revocation, local credential clearing, account reset, and nuclear reset boundary map.
+
 ## 11. Password Rotation Impact Map
 
 Current architecture requires local re-encryption because entry/note keys derive from master password-derived key material.
