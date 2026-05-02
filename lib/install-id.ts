@@ -1,6 +1,8 @@
-import { Platform } from "react-native";
-import * as ExpoCrypto from "expo-crypto";
-import * as SecureStore from "expo-secure-store";
+import {
+  deletePlatformItem,
+  readPlatformItem,
+  writePlatformItem,
+} from "./platformStorage";
 
 const INSTALL_ID_KEY = "pipass.installId";
 const UUID_RE =
@@ -8,10 +10,7 @@ const UUID_RE =
 
 async function readItem(key: string): Promise<string | null> {
   try {
-    if (Platform.OS === "web") {
-      return localStorage.getItem(key);
-    }
-    return await SecureStore.getItemAsync(key);
+    return await readPlatformItem(key);
   } catch {
     return null;
   }
@@ -19,11 +18,7 @@ async function readItem(key: string): Promise<string | null> {
 
 async function writeItem(key: string, value: string): Promise<void> {
   try {
-    if (Platform.OS === "web") {
-      localStorage.setItem(key, value);
-      return;
-    }
-    await SecureStore.setItemAsync(key, value);
+    await writePlatformItem(key, value);
   } catch {
     // installId is a non-secret label. Storage failure must never block auth,
     // crypto, vault access, or any protected request.
@@ -32,11 +27,7 @@ async function writeItem(key: string, value: string): Promise<void> {
 
 async function deleteItem(key: string): Promise<void> {
   try {
-    if (Platform.OS === "web") {
-      localStorage.removeItem(key);
-      return;
-    }
-    await SecureStore.deleteItemAsync(key);
+    await deletePlatformItem(key);
   } catch {
     // installId is non-secret metadata. Reset should try to remove it, but a
     // platform storage failure must not strand the user in a half-reset flow.
@@ -53,6 +44,7 @@ export async function getInstallId(): Promise<string> {
     return existing.toLowerCase();
   }
 
+  const ExpoCrypto = await import("expo-crypto");
   const installId = ExpoCrypto.randomUUID().toLowerCase();
   await writeItem(INSTALL_ID_KEY, installId);
   return installId;

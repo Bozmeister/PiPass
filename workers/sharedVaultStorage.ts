@@ -1,5 +1,9 @@
-import { Platform } from "react-native";
-import * as SecureStore from "expo-secure-store";
+import {
+  deletePlatformItem,
+  isWebStoragePlatform,
+  readPlatformItem,
+  writePlatformItem,
+} from "../lib/platformStorage";
 
 const SHARED_VAULT_KEY = "pipass_shared_vault";
 
@@ -12,34 +16,30 @@ export interface SharedVaultBlob {
 }
 
 async function getSharedItem(key: string): Promise<string | null> {
-  if (Platform.OS === "web") {
-    try {
-      return localStorage.getItem(key);
-    } catch {
-      return null;
-    }
+  if (await isWebStoragePlatform()) {
+    return await readPlatformItem(key);
   }
-  return await SecureStore.getItemAsync(key, {
+  return await readPlatformItem(key, {
     keychainService: KEYCHAIN_SERVICE,
   });
 }
 
 async function setSharedItem(key: string, value: string): Promise<void> {
-  if (Platform.OS === "web") {
-    localStorage.setItem(key, value);
+  if (await isWebStoragePlatform()) {
+    await writePlatformItem(key, value);
     return;
   }
-  await SecureStore.setItemAsync(key, value, {
+  await writePlatformItem(key, value, {
     keychainService: KEYCHAIN_SERVICE,
   });
 }
 
 async function deleteSharedItem(key: string): Promise<void> {
-  if (Platform.OS === "web") {
-    localStorage.removeItem(key);
+  if (await isWebStoragePlatform()) {
+    await deletePlatformItem(key);
     return;
   }
-  await SecureStore.deleteItemAsync(key, {
+  await deletePlatformItem(key, {
     keychainService: KEYCHAIN_SERVICE,
   });
 }

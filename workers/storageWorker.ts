@@ -1,10 +1,14 @@
-import { Platform } from "react-native";
-import * as SecureStore from "expo-secure-store";
-import { VaultEntry, SecureNote } from "./vaultWorker";
+import type { VaultEntry, SecureNote } from "./vaultWorker";
 import { saveSharedVaultBlob, getSharedVaultBlob, clearSharedVault } from "./sharedVaultStorage";
-import { clearDeviceUUID } from "../crypto/keyDerivation";
+import { clearDeviceUUID } from "../crypto/deviceUUIDStorage";
 import { clearCredentials } from "../lib/credentials";
 import { clearInstallId } from "../lib/install-id";
+import {
+  deletePlatformItem,
+  isWebStoragePlatform,
+  readPlatformItem,
+  writePlatformItem,
+} from "../lib/platformStorage";
 
 const VAULT_KEY_PREFIX = "pipass_vault_";
 const VAULT_INDEX_KEY = "pipass_vault_index";
@@ -20,30 +24,15 @@ const RECOVERY_KEY_HASH_KEY = "pipass_recovery_key_hash";
 const MIGRATION_DONE_KEY = "pipass_shared_migration_done";
 
 async function getItem(key: string): Promise<string | null> {
-  if (Platform.OS === "web") {
-    try {
-      return localStorage.getItem(key);
-    } catch {
-      return null;
-    }
-  }
-  return await SecureStore.getItemAsync(key);
+  return await readPlatformItem(key);
 }
 
 async function setItem(key: string, value: string): Promise<void> {
-  if (Platform.OS === "web") {
-    localStorage.setItem(key, value);
-    return;
-  }
-  await SecureStore.setItemAsync(key, value);
+  await writePlatformItem(key, value);
 }
 
 async function deleteItem(key: string): Promise<void> {
-  if (Platform.OS === "web") {
-    localStorage.removeItem(key);
-    return;
-  }
-  await SecureStore.deleteItemAsync(key);
+  await deletePlatformItem(key);
 }
 
 async function getVaultIndex(): Promise<string[]> {
@@ -304,7 +293,7 @@ const KEYCHAIN_SERVICE = "group.com.pipass.shared";
 let cachedBiometricAvailable: boolean | null = null;
 
 async function isBiometricAvailable(): Promise<boolean> {
-  if (Platform.OS === "web") return false;
+  if (await isWebStoragePlatform()) return false;
   if (cachedBiometricAvailable !== null) return cachedBiometricAvailable;
   try {
     const LocalAuthentication = await import("expo-local-authentication");
@@ -319,12 +308,12 @@ async function isBiometricAvailable(): Promise<boolean> {
 }
 
 export async function storeMasterKeySecurely(keyHex: string): Promise<void> {
-  if (Platform.OS === "web") return;
+  if (await isWebStoragePlatform()) return;
 
   const useBiometric = await isBiometricAvailable();
 
   try {
-    await SecureStore.setItemAsync(KEYCHAIN_KEY, keyHex, {
+    await writePlatformItem(KEYCHAIN_KEY, keyHex, {
       keychainService: KEYCHAIN_SERVICE,
       requireAuthentication: useBiometric,
     });
@@ -338,7 +327,7 @@ export async function storeMasterKeySecurely(keyHex: string): Promise<void> {
     }
     if (useBiometric) {
       try {
-        await SecureStore.setItemAsync(KEYCHAIN_KEY, keyHex, {
+        await writePlatformItem(KEYCHAIN_KEY, keyHex, {
           keychainService: KEYCHAIN_SERVICE,
           requireAuthentication: false,
         });
@@ -357,12 +346,12 @@ export async function storeMasterKeySecurely(keyHex: string): Promise<void> {
 }
 
 export async function getMasterKeySecurely(): Promise<string | null> {
-  if (Platform.OS === "web") return null;
+  if (await isWebStoragePlatform()) return null;
 
   const useBiometric = await isBiometricAvailable();
 
   try {
-    return await SecureStore.getItemAsync(KEYCHAIN_KEY, {
+    return await readPlatformItem(KEYCHAIN_KEY, {
       keychainService: KEYCHAIN_SERVICE,
       requireAuthentication: useBiometric,
     });
@@ -378,9 +367,9 @@ export async function getMasterKeySecurely(): Promise<string | null> {
 }
 
 export async function clearMasterKeySecurely(): Promise<void> {
-  if (Platform.OS === "web") return;
+  if (await isWebStoragePlatform()) return;
   try {
-    await SecureStore.deleteItemAsync(KEYCHAIN_KEY, {
+    await deletePlatformItem(KEYCHAIN_KEY, {
       keychainService: KEYCHAIN_SERVICE,
     });
   } catch (err) {

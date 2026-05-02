@@ -1,5 +1,9 @@
-import { Platform } from "react-native";
-import * as SecureStore from "expo-secure-store";
+import {
+  deletePlatformItem,
+  isWebStoragePlatform,
+  readPlatformItem,
+  writePlatformItem,
+} from "./platformStorage";
 
 const USER_ID_KEY = "pipass.auth.userId";
 const AUTH_HASH_KEY = "pipass.auth.authHash";
@@ -11,37 +15,29 @@ const AUTH_HASH_RE = /^[0-9a-fA-F]{64,128}$/;
 export type Credentials = { userId: string; authHash: string };
 
 async function readItem(key: string): Promise<string | null> {
-  if (Platform.OS === "web") {
-    try {
-      return localStorage.getItem(key);
-    } catch {
-      return null;
-    }
-  }
-  return await SecureStore.getItemAsync(key);
+  return await readPlatformItem(key);
 }
 
 async function writeItem(key: string, value: string): Promise<void> {
-  if (Platform.OS === "web") {
-    try {
-      localStorage.setItem(key, value);
-    } catch {
-      // localStorage unavailable (private mode, quota) — fail silently per
-      // the credentials contract: caller cannot rely on persistence.
+  try {
+    await writePlatformItem(key, value);
+  } catch (err) {
+    if (!(await isWebStoragePlatform())) {
+      throw err;
     }
-    return;
+    // localStorage unavailable (private mode, quota) - fail silently per
+    // the credentials contract: caller cannot rely on persistence.
   }
-  await SecureStore.setItemAsync(key, value);
 }
 
 async function deleteItem(key: string): Promise<void> {
-  if (Platform.OS === "web") {
-    try {
-      localStorage.removeItem(key);
-    } catch {}
-    return;
+  try {
+    await deletePlatformItem(key);
+  } catch (err) {
+    if (!(await isWebStoragePlatform())) {
+      throw err;
+    }
   }
-  await SecureStore.deleteItemAsync(key);
 }
 
 export function isValidUserId(value: unknown): value is string {
