@@ -106,6 +106,10 @@ function hex64(seed = ""): string {
     .digest("hex");
 }
 
+function validEncryptedBlob(seed = "vault"): string {
+  return `${hex64(`${seed}:iv`).slice(0, 32)}:${hex64(`${seed}:cipher`)}:${hex64(`${seed}:mac`)}`;
+}
+
 // Random 10.x.y.z address. The route module rate-limits register/login
 // per-IP, so reusing 127.0.0.1 across the suite trips the budget after
 // a handful of tests. Each register/login call gets its own bucket by
@@ -560,7 +564,7 @@ test("T004.b — sync from an untrusted device is blocked (step-up required)", a
   // do NOT silently succeed from an unapproved device".
   const sync = await authedFetch("/api/vault/sync", login.sessionToken!, {
     method: "POST",
-    body: JSON.stringify({ encryptedBlob: "AA==", version: 1 }),
+    body: JSON.stringify({ encryptedBlob: validEncryptedBlob("t004b"), version: 1 }),
     ua: "T004b-Agent/1.0",
     ip: "10.0.4.10",
   });
@@ -572,6 +576,65 @@ test("T004.b — sync from an untrusted device is blocked (step-up required)", a
   assert.ok(
     [401, 403].includes(sync.status),
     `expected 401/403 from sync on untrusted device; got ${sync.status}`,
+  );
+});
+
+test("T004.c — vault sync rejects an empty encryptedBlob", async () => {
+  const res = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ encryptedBlob: "", version: 1 }),
+  });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Invalid blob" });
+});
+
+test("T004.d — vault sync rejects a whitespace-only encryptedBlob", async () => {
+  const res = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ encryptedBlob: "     ", version: 1 }),
+  });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Invalid blob" });
+});
+
+test("T004.e — vault sync rejects null placeholder encryptedBlob text", async () => {
+  const res = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ encryptedBlob: "null", version: 1 }),
+  });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Invalid blob" });
+});
+
+test("T004.f — vault sync rejects empty-array placeholder encryptedBlob text", async () => {
+  const res = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ encryptedBlob: "[]", version: 1 }),
+  });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Invalid blob" });
+});
+
+test("T004.g — vault sync accepts a sufficiently long opaque encryptedBlob", async () => {
+  const u = await registerUser();
+  const res = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-user-id": u.userId,
+      "x-auth-hash": u.authHash,
+      "x-forwarded-for": randomIp(),
+    },
+    body: JSON.stringify({ encryptedBlob: validEncryptedBlob("t004g"), version: 1 }),
+  });
+  assert.equal(
+    res.status,
+    200,
+    `valid opaque blob should sync; got ${res.status} ${await res.text()}`,
   );
 });
 

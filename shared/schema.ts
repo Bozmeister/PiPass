@@ -475,8 +475,19 @@ export const insertUserSchema = createInsertSchema(users, {
 });
 export const selectUserSchema = createSelectSchema(users);
 
+const VAULT_BLOB_MAX_LENGTH = 10 * 1024 * 1024;
+const VAULT_BLOB_MIN_LENGTH = 64;
+const INVALID_VAULT_BLOB_PLACEHOLDERS = new Set(["null", "[]"]);
+
 export const insertVaultBlobSchema = createInsertSchema(vaultBlobs, {
-  encryptedBlob: (col) => col.max(10 * 1024 * 1024),
+  encryptedBlob: (col) =>
+    col.max(VAULT_BLOB_MAX_LENGTH).refine((value) => {
+      const trimmed = value.trim();
+      return (
+        trimmed.length >= VAULT_BLOB_MIN_LENGTH &&
+        !INVALID_VAULT_BLOB_PLACEHOLDERS.has(trimmed.toLowerCase())
+      );
+    }),
   version: (col) => col.min(1),
 });
 export const selectVaultBlobSchema = createSelectSchema(vaultBlobs);
