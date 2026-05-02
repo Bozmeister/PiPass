@@ -19,6 +19,7 @@ import {
 // storage growth O(N) per user — without a cap, a malicious creds-holder
 // could spam syncs and balloon the table indefinitely.
 export const VAULT_HISTORY_LIMIT = 10;
+const VAULT_VERSION_MAX = 2_147_483_647;
 
 // Session lifetime. 30 days mirrors industry-standard "remember me" tokens
 // (1Password, Bitwarden) and bounds the compromise window for a stolen
@@ -254,7 +255,7 @@ export interface IStorage {
   syncVault(
     userId: string,
     encryptedBlob: string,
-    version: number,
+    expectedPrevVersion: number,
   ): Promise<SyncVaultResult>;
   getVaultHistory(userId: string): Promise<VaultHistoryEntry[]>;
   restoreVault(
@@ -583,17 +584,22 @@ export class DatabaseStorage implements IStorage {
     return rows[0];
   }
 
-  // Atomic sync — all of (lock + version-check + archive previous + write new
-  // + prune history) happens inside a single PG transaction so concurrent
-  // syncs cannot corrupt either the main row or the history ring buffer.
+  // Atomic sync — all of (lock + expected-version check + server-minted next
+  // version + archive previous + write new + prune history) happens inside a
+  // single PG transaction so concurrent syncs cannot corrupt either the main
+  // row or the history ring buffer.
   //
   // Race scenario this prevents: client A and client B both try to sync.
-  //   - A sees existing version 5, decides to write version 6
-  //   - B sees existing version 5, decides to write version 6
+  //   - A expects previous version 5
+  //   - B expects previous version 5
   // Without locking, both could succeed (race on the CAS) or both could
   // archive the same v5 row (race on the read). With SELECT ... FOR UPDATE,
   // whichever transaction grabs the lock first wins; the loser sees the
   // updated row and aborts cleanly with version_conflict.
+  //
+  // The caller NEVER provides the stored version. It provides only the last
+  // version it saw, and storage mints currentVersion + 1 after verifying that
+  // expectation under the transaction lock.
   //
   // History side-effects (archive + prune) only run on the success path. A
   // version_conflict short-circuits the transaction with no writes at all,
@@ -601,7 +607,7 @@ export class DatabaseStorage implements IStorage {
   async syncVault(
     userId: string,
     encryptedBlob: string,
-    version: number,
+    expectedPrevVersion: number,
   ): Promise<SyncVaultResult> {
     return await db.transaction(async (tx) => {
       // Lock the existing row (if any) so concurrent syncs serialize.
@@ -614,14 +620,25 @@ export class DatabaseStorage implements IStorage {
         .for("update")
         .limit(1);
       const existing = existingRows[0];
+      const currentVersion = existing?.version ?? 0;
 
-      if (existing && existing.version >= version) {
+      if (currentVersion !== expectedPrevVersion) {
         return {
           ok: false as const,
           code: "version_conflict" as const,
-          serverVersion: existing.version,
+          serverVersion: currentVersion,
         };
       }
+
+      if (currentVersion >= VAULT_VERSION_MAX) {
+        return {
+          ok: false as const,
+          code: "version_conflict" as const,
+          serverVersion: currentVersion,
+        };
+      }
+
+      const nextVersion = currentVersion + 1;
 
       // Archive the row we are about to overwrite. First-write case
       // (existing is undefined) creates no history entry, per spec.
@@ -638,24 +655,23 @@ export class DatabaseStorage implements IStorage {
       // non-existent row, so two concurrent first-writes for the same
       // user could both see "no row" and both reach this point. Plain
       // INSERT in that case would surface a unique-constraint violation
-      // as a 500. With ON CONFLICT + the version-CAS WHERE clause, the
-      // second writer either (a) successfully overwrites the racing
-      // insert because its version is higher, or (b) gets an empty
+      // as a 500. With ON CONFLICT + the expected-version WHERE clause, the
+      // second writer cannot jump the stored version; it gets an empty
       // RETURNING and is mapped to version_conflict below — never 500.
       const now = Date.now();
       const writtenRows = await tx
         .insert(vaultBlobs)
-        .values({ userId, encryptedBlob, version, updatedAt: now })
+        .values({ userId, encryptedBlob, version: nextVersion, updatedAt: now })
         .onConflictDoUpdate({
           target: vaultBlobs.userId,
-          set: { encryptedBlob, version, updatedAt: now },
-          where: sql`${vaultBlobs.version} < ${version}`,
+          set: { encryptedBlob, version: nextVersion, updatedAt: now },
+          where: sql`${vaultBlobs.version} = ${expectedPrevVersion}`,
         })
         .returning();
 
       if (writtenRows.length === 0) {
         // ON CONFLICT fired AND the WHERE blocked the UPDATE — a
-        // concurrent inserter already won with version >= ours. Re-read
+        // concurrent inserter already won with a different version. Re-read
         // the current row to report the truth back to the client.
         const currentRows = await tx
           .select()

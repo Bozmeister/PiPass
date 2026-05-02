@@ -478,7 +478,7 @@ export const selectUserSchema = createSelectSchema(users);
 const VAULT_BLOB_MAX_LENGTH = 10 * 1024 * 1024;
 const VAULT_BLOB_MIN_LENGTH = 64;
 const INVALID_VAULT_BLOB_PLACEHOLDERS = new Set(["null", "[]"]);
-const VAULT_EXPECTED_PREV_VERSION_MAX = 2_147_483_646;
+const VAULT_EXPECTED_PREV_VERSION_MAX = 2_147_483_647;
 
 function isValidEncryptedVaultBlob(value: string): boolean {
   const trimmed = value.trim();
