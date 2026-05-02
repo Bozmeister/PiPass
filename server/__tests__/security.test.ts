@@ -47,6 +47,7 @@ import type { Server } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { registerRoutes } from "../routes";
+import { setupErrorHandler, setupRequestLogging } from "../logging";
 import { DatabaseStorage, type AuditLogItem } from "../storage";
 import {
   encryptTotpSecret,
@@ -367,6 +368,72 @@ async function authedFetch(
   if (init.ip) headers["x-forwarded-for"] = init.ip;
   if (init.platform) headers["x-platform"] = init.platform;
   return fetch(`${baseUrl}${path}`, { ...init, headers });
+}
+
+async function withCapturedConsole<T>(
+  run: () => Promise<T>,
+): Promise<{ output: string; result: T }> {
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  const lines: string[] = [];
+  const capture: typeof console.log = (...args) => {
+    lines.push(args.map((arg) => String(arg)).join(" "));
+  };
+
+  console.log = capture;
+  console.warn = capture;
+  console.error = capture;
+  try {
+    const result = await run();
+    return { output: lines.join("\n"), result };
+  } finally {
+    console.log = originalLog;
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
+}
+
+async function withTemporaryServer<T>(
+  app: express.Express,
+  run: (url: string) => Promise<T>,
+): Promise<T> {
+  const localServer = await new Promise<Server>((resolve) => {
+    const listeningServer = app.listen(0, "127.0.0.1", () =>
+      resolve(listeningServer),
+    );
+  });
+  try {
+    const addr = localServer.address() as AddressInfo;
+    return await run(`http://127.0.0.1:${addr.port}`);
+  } finally {
+    await new Promise<void>((resolve) =>
+      localServer.close(() => resolve()),
+    );
+  }
+}
+
+function assertLogOutputSafe(
+  output: string,
+  forbiddenValues: readonly string[] = [],
+): void {
+  for (const field of [
+    "x-auth-hash",
+    "x-user-id",
+    "authorization",
+    "cookie",
+    "encryptedBlob",
+    "DATABASE_URL",
+    "SESSION_SECRET",
+    "TOTP_ENCRYPTION_KEY",
+    "headers",
+    "body",
+  ]) {
+    assert.ok(!output.includes(field), `console output leaked ${field}`);
+  }
+  for (const value of forbiddenValues) {
+    assert.ok(!output.includes(value), "console output leaked sentinel value");
+  }
 }
 
 // Plant a TOTP secret on a user without going through the setup HTTP
@@ -1559,6 +1626,143 @@ test("T010.vault_audit — unknown userId stays on collapsed auth error, not 429
     assert.equal(res.status, 401);
     assert.deepEqual(await res.json(), { error: "Invalid credentials" });
   }
+});
+
+// ---------------------------------------------------------------------------
+// T012 - Console logging redaction
+// ---------------------------------------------------------------------------
+
+test("T012.a - API request logging omits sensitive headers, body, and query values", async () => {
+  const sentinelAuthHash = "SENTINEL_AUTH_HASH_DO_NOT_LOG";
+  const sentinelUserId = "SENTINEL_USER_ID_DO_NOT_LOG";
+  const sentinelBearer = "SENTINEL_AUTHORIZATION_DO_NOT_LOG";
+  const sentinelCookie = "SENTINEL_COOKIE_DO_NOT_LOG";
+  const sentinelBlob = "SENTINEL_ENCRYPTED_BLOB_DO_NOT_LOG";
+  const sentinelQuery = "SENTINEL_QUERY_VALUE_DO_NOT_LOG";
+  const sentinels = [
+    sentinelAuthHash,
+    sentinelUserId,
+    sentinelBearer,
+    sentinelCookie,
+    sentinelBlob,
+    sentinelQuery,
+  ];
+
+  const app = express();
+  setupRequestLogging(app);
+  app.post(
+    "/api/vault/sync",
+    express.json({ limit: "11mb" }),
+    (_req, res) => res.status(409).json({ error: "Version conflict", serverVersion: 0 }),
+  );
+  setupErrorHandler(app);
+
+  const { output, result } = await withCapturedConsole(() =>
+    withTemporaryServer(app, async (url) => {
+      const res = await fetch(
+        `${url}/api/vault/sync?token=${encodeURIComponent(sentinelQuery)}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-user-id": sentinelUserId,
+            "x-auth-hash": sentinelAuthHash,
+            authorization: `Bearer ${sentinelBearer}`,
+            cookie: `sid=${sentinelCookie}`,
+          },
+          body: JSON.stringify({
+            encryptedBlob: sentinelBlob,
+            expectedPrevVersion: 999,
+          }),
+        },
+      );
+      return { status: res.status, text: await res.text() };
+    }),
+  );
+
+  assert.equal(result.status, 409);
+  assert.deepEqual(JSON.parse(result.text), {
+    error: "Version conflict",
+    serverVersion: 0,
+  });
+  assert.match(output, /POST \/api\/vault\/sync 409 in \d+ms/);
+  assert.ok(!output.includes("?token="), "request log must omit query string");
+  assertLogOutputSafe(output, sentinels);
+});
+
+test("T012.b - malformed JSON logs no request body, secrets, or stack trace", async () => {
+  const sentinelAuthHash = "SENTINEL_AUTH_HASH_BAD_JSON_DO_NOT_LOG";
+  const sentinelCookie = "SENTINEL_COOKIE_BAD_JSON_DO_NOT_LOG";
+  const sentinelBlob = "SENTINEL_BAD_JSON_BLOB_DO_NOT_LOG";
+  const sentinelBodySecret = "SENTINEL_BODY_SECRET_DO_NOT_LOG";
+  const sentinels = [
+    sentinelAuthHash,
+    sentinelCookie,
+    sentinelBlob,
+    sentinelBodySecret,
+  ];
+
+  const app = express();
+  setupRequestLogging(app);
+  app.post("/api/bad-json", express.json({ limit: "4kb" }), (_req, res) =>
+    res.status(200).json({ ok: true }),
+  );
+  setupErrorHandler(app);
+
+  const { output, result } = await withCapturedConsole(() =>
+    withTemporaryServer(app, async (url) => {
+      const res = await fetch(`${url}/api/bad-json`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-auth-hash": sentinelAuthHash,
+          cookie: `sid=${sentinelCookie}`,
+        },
+        body: `{"encryptedBlob":"${sentinelBlob}","secret":"${sentinelBodySecret}"`,
+      });
+      return { status: res.status, text: await res.text() };
+    }),
+  );
+
+  assert.equal(result.status, 400);
+  assert.deepEqual(JSON.parse(result.text), { error: "Invalid JSON" });
+  assert.match(output, /POST \/api\/bad-json 400 in \d+ms/);
+  assert.ok(!output.includes("SyntaxError"), "parse errors must not log internals");
+  assert.ok(!/\n\s+at\s+/.test(output), "parse errors must not log stack traces");
+  assertLogOutputSafe(output, sentinels);
+});
+
+test("T012.c - internal errors log only a generic message and safe request metadata", async () => {
+  const sentinelAuthHash = "SENTINEL_AUTH_HASH_500_DO_NOT_LOG";
+  const sentinelBearer = "SENTINEL_AUTHORIZATION_500_DO_NOT_LOG";
+  const sentinelErrorMessage = "SENTINEL_INTERNAL_ERROR_DO_NOT_LOG";
+  const sentinels = [sentinelAuthHash, sentinelBearer, sentinelErrorMessage];
+
+  const app = express();
+  setupRequestLogging(app);
+  app.get("/api/internal-error", () => {
+    throw new Error(sentinelErrorMessage);
+  });
+  setupErrorHandler(app);
+
+  const { output, result } = await withCapturedConsole(() =>
+    withTemporaryServer(app, async (url) => {
+      const res = await fetch(`${url}/api/internal-error`, {
+        headers: {
+          "x-auth-hash": sentinelAuthHash,
+          authorization: `Bearer ${sentinelBearer}`,
+        },
+      });
+      return { status: res.status, text: await res.text() };
+    }),
+  );
+
+  assert.equal(result.status, 500);
+  assert.deepEqual(JSON.parse(result.text), { error: "Internal server error" });
+  assert.match(output, /GET \/api\/internal-error 500 in \d+ms/);
+  assert.ok(output.includes("Internal Server Error"));
+  assert.ok(!/\n\s+at\s+/.test(output), "internal errors must not log stack traces");
+  assertLogOutputSafe(output, sentinels);
 });
 
 // T011 — audit visibility: a failed password login (known user, wrong
