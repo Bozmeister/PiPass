@@ -11,6 +11,7 @@
     "server:build": "esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=server_dist",
     "server:prod": "cross-env NODE_ENV=production node server_dist/index.js",
     "db:push": "drizzle-kit push",
+    "db:push:test": "node scripts/db-push-test.mjs",
     "start": "npx expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
