@@ -2,6 +2,9 @@ import { Platform } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { VaultEntry, SecureNote } from "./vaultWorker";
 import { saveSharedVaultBlob, getSharedVaultBlob, clearSharedVault } from "./sharedVaultStorage";
+import { clearDeviceUUID } from "../crypto/keyDerivation";
+import { clearCredentials } from "../lib/credentials";
+import { clearInstallId } from "../lib/install-id";
 
 const VAULT_KEY_PREFIX = "pipass_vault_";
 const VAULT_INDEX_KEY = "pipass_vault_index";
@@ -188,6 +191,11 @@ export async function destroyAllData(): Promise<void> {
   await deleteItem(RECOVERY_KEY_HASH_KEY);
   await deleteItem(MIGRATION_DONE_KEY);
   await clearMasterKeySecurely();
+  // Nuclear reset is the "fresh install" boundary for local state. Ordinary
+  // lock/logout/password-rotation flows must not clear these identifiers.
+  await clearCredentials();
+  await clearInstallId();
+  await clearDeviceUUID();
 }
 
 async function getNotesIndex(): Promise<string[]> {
@@ -379,4 +387,3 @@ export async function clearMasterKeySecurely(): Promise<void> {
     if (__DEV__) console.warn("[storageWorker] clearMasterKeySecurely failed:", err);
   }
 }
-

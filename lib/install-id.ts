@@ -30,6 +30,19 @@ async function writeItem(key: string, value: string): Promise<void> {
   }
 }
 
+async function deleteItem(key: string): Promise<void> {
+  try {
+    if (Platform.OS === "web") {
+      localStorage.removeItem(key);
+      return;
+    }
+    await SecureStore.deleteItemAsync(key);
+  } catch {
+    // installId is non-secret metadata. Reset should try to remove it, but a
+    // platform storage failure must not strand the user in a half-reset flow.
+  }
+}
+
 export function isValidInstallId(value: unknown): value is string {
   return typeof value === "string" && UUID_RE.test(value);
 }
@@ -43,4 +56,8 @@ export async function getInstallId(): Promise<string> {
   const installId = ExpoCrypto.randomUUID().toLowerCase();
   await writeItem(INSTALL_ID_KEY, installId);
   return installId;
+}
+
+export async function clearInstallId(): Promise<void> {
+  await deleteItem(INSTALL_ID_KEY);
 }

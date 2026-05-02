@@ -8,6 +8,8 @@ import { wipeBuffer } from "./secureMemory";
 // Argon2id is attempted first (if WebAssembly is available), with PBKDF2 as fallback.
 // No custom cryptographic algorithms are used in the security-critical path.
 
+const DEVICE_UUID_KEY = "deviceUUID";
+
 type Argon2BinaryParams = {
   password: Uint8Array;
   salt: Uint8Array;
@@ -39,19 +41,27 @@ async function loadArgon2(): Promise<((params: Argon2BinaryParams) => Promise<Ui
 
 async function getDeviceUUID(): Promise<string> {
   if (Platform.OS === "web") {
-    let uuid = localStorage.getItem("deviceUUID");
+    let uuid = localStorage.getItem(DEVICE_UUID_KEY);
     if (!uuid) {
       uuid = ExpoCrypto.randomUUID();
-      localStorage.setItem("deviceUUID", uuid);
+      localStorage.setItem(DEVICE_UUID_KEY, uuid);
     }
     return uuid;
   }
-  let uuid = await SecureStore.getItemAsync("deviceUUID");
+  let uuid = await SecureStore.getItemAsync(DEVICE_UUID_KEY);
   if (!uuid) {
     uuid = ExpoCrypto.randomUUID();
-    await SecureStore.setItemAsync("deviceUUID", uuid);
+    await SecureStore.setItemAsync(DEVICE_UUID_KEY, uuid);
   }
   return uuid;
+}
+
+export async function clearDeviceUUID(): Promise<void> {
+  if (Platform.OS === "web") {
+    localStorage.removeItem(DEVICE_UUID_KEY);
+    return;
+  }
+  await SecureStore.deleteItemAsync(DEVICE_UUID_KEY);
 }
 
 export function generateMasterSalt(): string {
