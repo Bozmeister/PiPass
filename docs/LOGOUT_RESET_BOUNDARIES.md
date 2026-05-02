@@ -11,7 +11,7 @@ It is an audit and product-semantics reference only. It does not add endpoints, 
 | Boundary | Current implementation status | Local vault data | Local API credentials | installId | deviceUUID | Server sessions | Server vault/history | Server audit/trust |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Vault lock | Implemented in `app/(tabs)/index.tsx` and vault UI state | Kept | Kept | Kept | Kept | No server call | Unchanged | Unchanged |
-| Local logout | No dedicated client helper found | Should be kept unless user chooses reset | Should clear `pipass.auth.*` | Keep | Keep | Optional server call if session token exists | Unchanged | May add logout audit if server logout called |
+| Local logout | Implemented as `logoutCurrentSession()` in `lib/logout.ts` | Kept | Clears `pipass.auth.*` | Kept | Kept | Best-effort server call only if caller provides a session token | Unchanged | May add logout audit if server logout is attempted and succeeds |
 | Server current-session logout | Implemented as `POST /api/auth/logout` | Client responsibility | Client responsibility | Client responsibility | Client responsibility | Deletes current session row by session token | Unchanged | Adds `logout` audit row |
 | Logout all sessions | Implemented as `POST /api/auth/logout-all` | Client responsibility | Client should clear current local `pipass.auth.*` | Keep | Keep | Deletes all session rows for user | Unchanged | Adds `logout_all` audit row |
 | `clearVault()` | Implemented and tested | Deletes entries/index/hash/shared blob | Kept | Kept | Kept | No server call | Unchanged | Unchanged |
@@ -41,14 +41,14 @@ Important distinction: vault lock is not account logout. A locked vault may stil
 
 ## 4. Local Logout
 
-A dedicated local logout helper was not found in this audit. `lib/credentials.ts` provides `clearCredentials()`, and `lib/query-client.ts` clears credentials on server `401`, but there is no obvious exported app-level "logout" function that combines a server logout call with local credential clearing.
+`logoutCurrentSession()` exists in `lib/logout.ts`.
 
-Recommended semantics for a future local logout helper:
+Current behavior:
 
 - clear `pipass.auth.userId`
 - clear `pipass.auth.authHash`
-- clear any locally held raw session token if the client later persists one
-- clear React Query/authenticated API caches where relevant
+- attempt `POST /api/auth/logout` only when a caller provides a session token
+- ignore server/network logout failures for local cleanup purposes
 - keep local encrypted vault data unless the user chooses reset
 - keep master salt/hash/security profile
 - keep cached vault data only according to the separate vault-lock policy
@@ -57,7 +57,7 @@ Recommended semantics for a future local logout helper:
 - keep recovery key hash
 - do not call `clearVault()` or `destroyAllData()`
 
-If the client has a current session token available, local logout should call `POST /api/auth/logout` first or concurrently, then clear local credentials even if the network request fails. The local user intent is to stop this app install from using stored API credentials.
+Current limitation: no client-side stored session token was found. Protected client API calls currently use `pipass.auth.userId` plus `pipass.auth.authHash`, so the helper normally performs local credential clearing only. If a future caller has a raw server session token, it can pass that token to `logoutCurrentSession()` and the helper will make the existing server logout call before clearing credentials.
 
 ## 5. Server Current-Session Logout
 
@@ -108,7 +108,7 @@ Data ownership:
 
 Recommended client behavior:
 
-- after a successful logout-all, clear the current app install's `pipass.auth.*`
+- after a successful logout-all, call `logoutCurrentSession()` or otherwise clear the current app install's `pipass.auth.*`
 - keep local encrypted vault data unless the user chooses reset
 - keep `installId` and `deviceUUID`
 - route the user to sign in again
@@ -251,21 +251,19 @@ Covered:
 
 - `workers/__tests__/storage-reset.test.ts` verifies `clearVault()` clears local vault data while preserving credentials, installId, and deviceUUID.
 - `workers/__tests__/storage-reset.test.ts` verifies `destroyAllData()` clears vault data, notes, unlock metadata, cached key marker, recovery hash, shared blob, credentials, installId, and deviceUUID.
-- Existing server tests cover sessions, device trust, audit hygiene, auth, rate limits, and vault operations, but this audit did not identify focused logout endpoint tests.
+- `workers/__tests__/storage-reset.test.ts` verifies `logoutCurrentSession()` clears `pipass.auth.*`, preserves vault data, installId, and deviceUUID, is idempotent without a stored session token, and still clears local credentials when a server logout attempt fails.
+- `server/__tests__/security.test.ts` verifies `POST /api/auth/logout` revokes only the current session, `POST /api/auth/logout-all` revokes all sessions, and neither deletes vault blob/history, trusted device state, or audit history.
 
 Not directly covered yet:
 
-- a client local logout helper, because one does not currently exist
-- `POST /api/auth/logout` deletes exactly the current session
-- `POST /api/auth/logout-all` deletes all sessions and leaves trusted devices/vault blobs intact
-- client behavior after logout-all clears local credentials
+- UI wiring for a logout action
+- client behavior after logout-all clears local credentials from an actual screen
 - account deletion/reset, because it is not implemented
 
 ## 13. Gaps / Recommended Future Prompts
 
-1. Add focused server tests for `POST /api/auth/logout` and `POST /api/auth/logout-all`.
-2. Add a small client logout helper that clears `pipass.auth.*` and, when a session token is available, calls server logout.
-3. Decide whether logout should also lock the vault by wiping in-memory key shares.
-4. Decide whether the client will persist session tokens or keep using legacy auth-hash credentials for most protected calls.
-5. Design account deletion/reset separately, including server data deletion/retention policy and audit requirements.
-6. Keep password rotation and auth credential rotation separate from logout until these boundaries have tests.
+1. Wire `logoutCurrentSession()` into an explicit UI action if product wants visible logout.
+2. Decide whether logout should also lock the vault by wiping in-memory key shares.
+3. Decide whether the client will persist session tokens or keep using legacy auth-hash credentials for most protected calls.
+4. Design account deletion/reset separately, including server data deletion/retention policy and audit requirements.
+5. Keep password rotation and auth credential rotation separate from logout until these boundaries have tests.

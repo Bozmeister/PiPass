@@ -2,37 +2,9 @@ import { fetch } from "expo/fetch";
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 import { clearCredentials, getCredentials } from "./credentials";
 import { getInstallId } from "./install-id";
+import { getApiUrl } from "./api-url";
 
-/**
- * Gets the base URL for the Express API server (e.g., "http://localhost:3000")
- * @returns {string} The API base URL
- */
-export function getApiUrl(): string {
-  const explicitUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
-
-  if (explicitUrl) {
-    if (/^https?:\/\/https?:\/\//i.test(explicitUrl)) {
-      throw new Error("EXPO_PUBLIC_API_URL must be a valid http or https URL");
-    }
-
-    const url = new URL(explicitUrl);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      throw new Error("EXPO_PUBLIC_API_URL must use http or https");
-    }
-    return url.href;
-  }
-
-  const domain = process.env.EXPO_PUBLIC_DOMAIN?.trim();
-
-  if (!domain) {
-    throw new Error("EXPO_PUBLIC_API_URL or EXPO_PUBLIC_DOMAIN is not set");
-  }
-
-  const host = domain.replace(/^https?:\/\//i, "");
-  const url = new URL(`https://${host}`);
-
-  return url.href;
-}
+export { getApiUrl };
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
