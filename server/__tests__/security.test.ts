@@ -450,6 +450,26 @@ function assertLogOutputSafe(
   }
 }
 
+function assertHttpPayloadSafe(
+  text: string,
+  forbiddenValues: readonly string[] = [],
+): void {
+  for (const field of [
+    "encryptedBlob",
+    "authHash",
+    "x-auth-hash",
+    "x-user-id",
+    "authorization",
+    "cookie",
+    "body",
+  ]) {
+    assert.ok(!text.includes(field), `response leaked forbidden field ${field}`);
+  }
+  for (const value of forbiddenValues) {
+    assert.ok(!text.includes(value), "response leaked forbidden value");
+  }
+}
+
 // Plant a TOTP secret on a user without going through the setup HTTP
 // dance. Returns the raw secret so the test can derive valid step-up
 // codes from it.
@@ -1403,6 +1423,234 @@ test("T006.f — login and device trust changes emit safe audit rows", async () 
     "device_untrusted audit row",
   );
   assertAuditRowSafe(revoked, [u.authHash, login.sessionToken, u.userId]);
+});
+
+test("T006.g - logout revokes one session; logout-all revokes all without deleting vault, trust, or audit data", async () => {
+  const u = await registerUser();
+  const firstBlob = validEncryptedBlob("t006g:first");
+  const secondBlob = validEncryptedBlob("t006g:second");
+
+  await expectStatus(
+    await legacyVaultSync(u, firstBlob, 0),
+    200,
+    "first sync should create a vault blob",
+  );
+  await expectStatus(
+    await legacyVaultSync(u, secondBlob, 1),
+    200,
+    "second sync should create vault history",
+  );
+  await waitForAuditEvent(
+    u.userId,
+    (entry) => entry.action === "vault_sync" && entry.versionAfter === 2,
+    "second vault_sync audit row",
+  );
+
+  const uaA = "T006g-Session-A/1.0";
+  const ipA = "10.6.0.21";
+  const uaB = "T006g-Session-B/1.0";
+  const ipB = "10.6.0.22";
+  const loginA = await loginUser(u.username, u.authHash, { ua: uaA, ip: ipA });
+  const loginB = await loginUser(u.username, u.authHash, { ua: uaB, ip: ipB });
+  assert.equal(loginA.status, 200);
+  assert.equal(loginB.status, 200);
+  assert.ok(loginA.sessionToken);
+  assert.ok(loginB.sessionToken);
+
+  const fpB = predictFingerprint({ ua: uaB, ip: ipB });
+  const trustB = await authedFetch(
+    "/api/security/device/trust",
+    loginB.sessionToken,
+    { method: "POST", body: JSON.stringify({ fingerprint: fpB }), ua: uaB, ip: ipB },
+  );
+  await expectStatus(trustB, 200, "device trust should succeed before logout");
+
+  const beforeVault = await storage.getVaultBlob(u.userId);
+  const beforeHistory = await storage.getVaultHistory(u.userId);
+  const beforeDevices = await storage.getDevicesForUser(u.userId);
+  const beforeAudit = await storage.getAuditLog(u.userId, 100);
+  assert.equal(beforeVault?.version, 2);
+  assert.equal(beforeVault?.encryptedBlob, secondBlob);
+  assert.equal(beforeHistory.some((h) => h.version === 1), true);
+  assert.equal(
+    beforeDevices.some((d) => d.fingerprint === fpB && d.trusted === true),
+    true,
+    "trusted device row should exist before logout",
+  );
+  assert.equal(
+    beforeAudit.some((entry) => entry.action === "vault_sync"),
+    true,
+    "audit history should exist before logout",
+  );
+
+  const missingLogout = await fetch(`${baseUrl}/api/auth/logout`, {
+    method: "POST",
+  });
+  assert.equal(missingLogout.status, 400);
+  const missingLogoutText = await missingLogout.text();
+  assert.deepEqual(JSON.parse(missingLogoutText), {
+    error: "Invalid authentication headers",
+  });
+  assertHttpPayloadSafe(missingLogoutText, [
+    u.authHash,
+    firstBlob,
+    secondBlob,
+    loginA.sessionToken,
+    loginB.sessionToken,
+  ]);
+
+  const logoutA = await authedFetch("/api/auth/logout", loginA.sessionToken, {
+    method: "POST",
+    ua: uaA,
+    ip: ipA,
+  });
+  await expectStatus(logoutA, 200, "logout should revoke session A");
+  const logoutAText = await logoutA.text();
+  assert.deepEqual(JSON.parse(logoutAText), { ok: true });
+  assertHttpPayloadSafe(logoutAText, [
+    u.authHash,
+    firstBlob,
+    secondBlob,
+    loginA.sessionToken,
+    loginB.sessionToken,
+  ]);
+
+  const logoutAudit = await waitForAuditEvent(
+    u.userId,
+    (entry) => entry.action === "logout" && entry.ipAddress === ipA,
+    "logout audit row",
+  );
+  assertAuditRowSafe(logoutAudit, [
+    u.authHash,
+    firstBlob,
+    secondBlob,
+    loginA.sessionToken,
+    loginB.sessionToken,
+  ]);
+
+  const revokedA = await authedFetch("/api/auth/sessions", loginA.sessionToken, {
+    ua: uaA,
+    ip: ipA,
+  });
+  assert.equal(revokedA.status, 401);
+  const revokedAText = await revokedA.text();
+  assert.deepEqual(JSON.parse(revokedAText), { error: "Invalid credentials" });
+  assertHttpPayloadSafe(revokedAText, [
+    u.authHash,
+    firstBlob,
+    secondBlob,
+    loginA.sessionToken,
+    loginB.sessionToken,
+  ]);
+
+  const stillB = await authedFetch("/api/auth/sessions", loginB.sessionToken, {
+    ua: uaB,
+    ip: ipB,
+  });
+  await expectStatus(stillB, 200, "session B should survive session A logout");
+  const sessionsAfterSingle = (await stillB.json()) as {
+    sessions: Array<{ id: string; current?: boolean }>;
+  };
+  assert.equal(
+    sessionsAfterSingle.sessions.some((s) => s.current === true),
+    true,
+    "remaining token should still identify a current session",
+  );
+
+  const afterSingleVault = await storage.getVaultBlob(u.userId);
+  const afterSingleHistory = await storage.getVaultHistory(u.userId);
+  const afterSingleDevices = await storage.getDevicesForUser(u.userId);
+  assert.equal(afterSingleVault?.version, 2);
+  assert.equal(afterSingleVault?.encryptedBlob, secondBlob);
+  assert.equal(afterSingleHistory.some((h) => h.version === 1), true);
+  assert.equal(
+    afterSingleDevices.some((d) => d.fingerprint === fpB && d.trusted === true),
+    true,
+    "single-session logout must not delete trusted device state",
+  );
+
+  const logoutAll = await authedFetch("/api/auth/logout-all", loginB.sessionToken, {
+    method: "POST",
+    ua: uaB,
+    ip: ipB,
+  });
+  await expectStatus(logoutAll, 200, "logout-all should revoke session B");
+  const logoutAllText = await logoutAll.text();
+  const logoutAllBody = JSON.parse(logoutAllText) as { ok: boolean; revoked: number };
+  assert.equal(logoutAllBody.ok, true);
+  assert.ok(logoutAllBody.revoked >= 1, "logout-all should report at least one revoked session");
+  assertHttpPayloadSafe(logoutAllText, [
+    u.authHash,
+    firstBlob,
+    secondBlob,
+    loginA.sessionToken,
+    loginB.sessionToken,
+  ]);
+
+  const logoutAllAudit = await waitForAuditEvent(
+    u.userId,
+    (entry) => entry.action === "logout_all" && entry.ipAddress === ipB,
+    "logout_all audit row",
+  );
+  assertAuditRowSafe(logoutAllAudit, [
+    u.authHash,
+    firstBlob,
+    secondBlob,
+    loginA.sessionToken,
+    loginB.sessionToken,
+  ]);
+
+  const revokedB = await authedFetch("/api/auth/sessions", loginB.sessionToken, {
+    ua: uaB,
+    ip: ipB,
+  });
+  assert.equal(revokedB.status, 401);
+  const revokedBText = await revokedB.text();
+  assert.deepEqual(JSON.parse(revokedBText), { error: "Invalid credentials" });
+  assertHttpPayloadSafe(revokedBText, [
+    u.authHash,
+    firstBlob,
+    secondBlob,
+    loginA.sessionToken,
+    loginB.sessionToken,
+  ]);
+
+  const afterAllVault = await storage.getVaultBlob(u.userId);
+  const afterAllHistory = await storage.getVaultHistory(u.userId);
+  const afterAllDevices = await storage.getDevicesForUser(u.userId);
+  const afterAllAudit = await storage.getAuditLog(u.userId, 100);
+  assert.equal(afterAllVault?.version, 2);
+  assert.equal(afterAllVault?.encryptedBlob, secondBlob);
+  assert.equal(afterAllHistory.some((h) => h.version === 1), true);
+  assert.equal(
+    afterAllDevices.some((d) => d.fingerprint === fpB && d.trusted === true),
+    true,
+    "logout-all must not delete trusted device state",
+  );
+  assert.equal(
+    afterAllAudit.some((entry) => entry.action === "vault_sync"),
+    true,
+    "logout-all must not delete existing audit history",
+  );
+
+  const loginC = await loginUser(u.username, u.authHash, {
+    ua: "T006g-Session-C/1.0",
+    ip: "10.6.0.23",
+  });
+  assert.equal(loginC.status, 200);
+  assert.ok(loginC.sessionToken);
+  const fetchAfterRelogin = await authedFetch(
+    "/api/vault/fetch",
+    loginC.sessionToken,
+    { ua: "T006g-Session-C/1.0", ip: "10.6.0.23" },
+  );
+  await expectStatus(fetchAfterRelogin, 200, "vault should remain fetchable after re-login");
+  const fetched = (await fetchAfterRelogin.json()) as {
+    encryptedBlob: string | null;
+    version: number;
+  };
+  assert.equal(fetched.version, 2);
+  assert.equal(fetched.encryptedBlob, secondBlob);
 });
 
 // ---------------------------------------------------------------------------
