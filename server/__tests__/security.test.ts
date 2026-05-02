@@ -212,6 +212,36 @@ async function legacyVaultFetch(user: Registered): Promise<Response> {
   });
 }
 
+async function expectVersionConflict(
+  res: Response,
+  serverVersion: number,
+  forbiddenValues: readonly string[] = [],
+): Promise<void> {
+  await expectStatus(res, 409, "sync should return a version conflict");
+  const text = await res.text();
+  const payload = JSON.parse(text) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(payload).sort(), ["error", "serverVersion"]);
+  assert.equal(payload.error, "Version conflict");
+  assert.equal(payload.serverVersion, serverVersion);
+
+  for (const field of [
+    "encryptedBlob",
+    "authHash",
+    "credentialId",
+    "credential_id",
+    "publicKey",
+    "public_key",
+    "headers",
+    "body",
+  ]) {
+    assert.ok(!text.includes(field), "conflict response leaked forbidden field");
+  }
+
+  for (const value of forbiddenValues) {
+    assert.ok(!text.includes(value), "conflict response leaked forbidden value");
+  }
+}
+
 type LoginOpts = { ua?: string; ip?: string; platform?: string };
 
 async function loginUser(
@@ -686,9 +716,30 @@ test("T004.k — vault sync rejects a trimmed encryptedBlob shorter than 64 char
   await expectInvalidVaultBlob(`  ${"a".repeat(63)}  `);
 });
 
-test("T004.l — first vault sync with expectedPrevVersion 0 stores version 1", async () => {
+test("T004.l — first vault sync conflict reports serverVersion 0 without writing", async () => {
   const u = await registerUser();
-  const blob = validEncryptedBlob("t004l");
+  const attemptedBlob = validEncryptedBlob("t004l:conflict");
+
+  const conflict = await legacyVaultSync(u, attemptedBlob, 999);
+  await expectVersionConflict(conflict, 0, [
+    attemptedBlob,
+    u.authHash,
+    u.userId,
+  ]);
+
+  const fetchRes = await legacyVaultFetch(u);
+  await expectStatus(fetchRes, 200, "fetch after first-sync conflict should succeed");
+  const fetched = (await fetchRes.json()) as {
+    encryptedBlob: string | null;
+    version: number;
+  };
+  assert.equal(fetched.version, 0);
+  assert.equal(fetched.encryptedBlob, null);
+});
+
+test("T004.m — first vault sync with expectedPrevVersion 0 stores version 1", async () => {
+  const u = await registerUser();
+  const blob = validEncryptedBlob("t004m");
   const res = await legacyVaultSync(u, blob, 0);
   await expectStatus(res, 200, "first sync should succeed");
   const body = (await res.json()) as { version: number; updatedAt: number };
@@ -704,15 +755,15 @@ test("T004.l — first vault sync with expectedPrevVersion 0 stores version 1", 
   assert.equal(fetched.encryptedBlob, blob);
 });
 
-test("T004.m — second vault sync with expectedPrevVersion 1 stores version 2", async () => {
+test("T004.n — second vault sync with expectedPrevVersion 1 stores version 2", async () => {
   const u = await registerUser();
   await expectStatus(
-    await legacyVaultSync(u, validEncryptedBlob("t004m:first"), 0),
+    await legacyVaultSync(u, validEncryptedBlob("t004n:first"), 0),
     200,
     "first sync should succeed",
   );
 
-  const blob = validEncryptedBlob("t004m:second");
+  const blob = validEncryptedBlob("t004n:second");
   const res = await legacyVaultSync(u, blob, 1);
   await expectStatus(res, 200, "second sync should succeed");
   const body = (await res.json()) as { version: number; updatedAt: number };
@@ -728,21 +779,23 @@ test("T004.m — second vault sync with expectedPrevVersion 1 stores version 2",
   assert.equal(fetched.encryptedBlob, blob);
 });
 
-test("T004.n — stale expectedPrevVersion returns conflict without changing vault", async () => {
+test("T004.o — stale expectedPrevVersion returns safe conflict without changing vault", async () => {
   const u = await registerUser();
-  const blob = validEncryptedBlob("t004n:first");
+  const blob = validEncryptedBlob("t004o:first");
   await expectStatus(
     await legacyVaultSync(u, blob, 0),
     200,
     "first sync should succeed",
   );
 
-  const stale = await legacyVaultSync(u, validEncryptedBlob("t004n:stale"), 0);
-  await expectStatus(stale, 409, "stale sync should conflict");
-  assert.deepEqual(await stale.json(), {
-    error: "Version conflict",
-    serverVersion: 1,
-  });
+  const staleBlob = validEncryptedBlob("t004o:stale");
+  const stale = await legacyVaultSync(u, staleBlob, 0);
+  await expectVersionConflict(stale, 1, [
+    blob,
+    staleBlob,
+    u.authHash,
+    u.userId,
+  ]);
 
   const fetchRes = await legacyVaultFetch(u);
   await expectStatus(fetchRes, 200, "fetch after stale conflict should succeed");
@@ -754,25 +807,27 @@ test("T004.n — stale expectedPrevVersion returns conflict without changing vau
   assert.equal(fetched.encryptedBlob, blob);
 });
 
-test("T004.o — huge expectedPrevVersion conflicts and cannot force huge stored version", async () => {
+test("T004.p — huge expectedPrevVersion conflicts and cannot force huge stored version", async () => {
   const u = await registerUser();
-  const blob = validEncryptedBlob("t004o:first");
+  const blob = validEncryptedBlob("t004p:first");
   await expectStatus(
     await legacyVaultSync(u, blob, 0),
     200,
     "first sync should succeed",
   );
 
+  const hugeBlob = validEncryptedBlob("t004p:huge");
   const huge = await legacyVaultSync(
     u,
-    validEncryptedBlob("t004o:huge"),
+    hugeBlob,
     2_147_483_647,
   );
-  await expectStatus(huge, 409, "huge expectedPrevVersion should conflict");
-  assert.deepEqual(await huge.json(), {
-    error: "Version conflict",
-    serverVersion: 1,
-  });
+  await expectVersionConflict(huge, 1, [
+    blob,
+    hugeBlob,
+    u.authHash,
+    u.userId,
+  ]);
 
   const fetchRes = await legacyVaultFetch(u);
   await expectStatus(fetchRes, 200, "fetch after huge conflict should succeed");

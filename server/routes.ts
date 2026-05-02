@@ -2725,6 +2725,15 @@ function captureUserAgent(req: Request): string | null {
     : raw;
 }
 
+type VersionConflictResponse = {
+  error: "Version conflict";
+  serverVersion: number;
+};
+
+function versionConflictResponse(serverVersion: number): VersionConflictResponse {
+  return { error: "Version conflict", serverVersion };
+}
+
 export async function registerRoutes(app: Express, storage: IStorage): Promise<Server> {
 
   app.post("/api/auth/register", jsonBody(AUTH_BODY_LIMIT), async (req: Request, res: Response) => {
@@ -3259,10 +3268,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // Version conflict is NOT a successful sync — do not audit-log
         // it. Per spec we only log AFTER success to avoid noise and to
         // prevent enumeration via repeated failed attempts.
-        return res.status(409).json({
-          error: "Version conflict",
-          serverVersion: result.serverVersion,
-        });
+        return res.status(409).json(versionConflictResponse(result.serverVersion));
       }
 
       // Audit + anomaly hooks AFTER success. blobSize is the actual
@@ -3649,10 +3655,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         if (result.code === "version_conflict") {
           // A concurrent sync/restore raced this restore. The historical
           // entry exists; the client should re-fetch and retry.
-          return res.status(409).json({
-            error: "Version conflict",
-            serverVersion: result.serverVersion,
-          });
+          return res.status(409).json(versionConflictResponse(result.serverVersion));
         }
         return res.status(404).json({ error: "Version not found in history" });
       }
