@@ -478,19 +478,27 @@ export const selectUserSchema = createSelectSchema(users);
 const VAULT_BLOB_MAX_LENGTH = 10 * 1024 * 1024;
 const VAULT_BLOB_MIN_LENGTH = 64;
 const INVALID_VAULT_BLOB_PLACEHOLDERS = new Set(["null", "[]"]);
+const VAULT_EXPECTED_PREV_VERSION_MAX = 2_147_483_646;
+
+function isValidEncryptedVaultBlob(value: string): boolean {
+  const trimmed = value.trim();
+  return (
+    trimmed.length >= VAULT_BLOB_MIN_LENGTH &&
+    !INVALID_VAULT_BLOB_PLACEHOLDERS.has(trimmed.toLowerCase())
+  );
+}
 
 export const insertVaultBlobSchema = createInsertSchema(vaultBlobs, {
   encryptedBlob: (col) =>
-    col.max(VAULT_BLOB_MAX_LENGTH).refine((value) => {
-      const trimmed = value.trim();
-      return (
-        trimmed.length >= VAULT_BLOB_MIN_LENGTH &&
-        !INVALID_VAULT_BLOB_PLACEHOLDERS.has(trimmed.toLowerCase())
-      );
-    }),
+    col.max(VAULT_BLOB_MAX_LENGTH).refine(isValidEncryptedVaultBlob),
   version: (col) => col.min(1),
 });
 export const selectVaultBlobSchema = createSelectSchema(vaultBlobs);
+
+const vaultEncryptedBlobSchema = z
+  .string()
+  .max(VAULT_BLOB_MAX_LENGTH)
+  .refine(isValidEncryptedVaultBlob);
 
 // Request schemas use .strict() so unknown fields are REJECTED (not silently
 // stripped). Clients sending fields the API doesn't recognize get a 400 instead
@@ -511,10 +519,14 @@ export const loginSchema = insertUserSchema
   })
   .strict();
 
-export const vaultSyncSchema = insertVaultBlobSchema
-  .pick({
-    encryptedBlob: true,
-    version: true,
+export const vaultSyncSchema = z
+  .object({
+    encryptedBlob: vaultEncryptedBlobSchema,
+    expectedPrevVersion: z
+      .number()
+      .int()
+      .min(0)
+      .max(VAULT_EXPECTED_PREV_VERSION_MAX),
   })
   .strict();
 

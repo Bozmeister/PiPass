@@ -114,10 +114,21 @@ async function expectInvalidVaultBlob(encryptedBlob: string): Promise<void> {
   const res = await fetch(`${baseUrl}/api/vault/sync`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ encryptedBlob, version: 1 }),
+    body: JSON.stringify({ encryptedBlob, expectedPrevVersion: 0 }),
   });
   assert.equal(res.status, 400);
   assert.deepEqual(await res.json(), { error: "Invalid blob" });
+}
+
+async function expectInvalidVaultSyncBody(body: object): Promise<void> {
+  const res = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  assert.equal(res.status, 400);
+  const payload = (await res.json()) as { error?: unknown };
+  assert.equal(typeof payload.error, "string");
 }
 
 // Random 10.x.y.z address. The route module rate-limits register/login
@@ -574,7 +585,10 @@ test("T004.b — sync from an untrusted device is blocked (step-up required)", a
   // do NOT silently succeed from an unapproved device".
   const sync = await authedFetch("/api/vault/sync", login.sessionToken!, {
     method: "POST",
-    body: JSON.stringify({ encryptedBlob: validEncryptedBlob("t004b"), version: 1 }),
+    body: JSON.stringify({
+      encryptedBlob: validEncryptedBlob("t004b"),
+      expectedPrevVersion: 0,
+    }),
     ua: "T004b-Agent/1.0",
     ip: "10.0.4.10",
   });
@@ -589,31 +603,46 @@ test("T004.b — sync from an untrusted device is blocked (step-up required)", a
   );
 });
 
-test("T004.c — vault sync rejects an empty encryptedBlob", async () => {
+test("T004.c — vault sync rejects legacy client-chosen version", async () => {
+  await expectInvalidVaultSyncBody({
+    encryptedBlob: validEncryptedBlob("legacy-version"),
+    version: 1,
+  });
+});
+
+test("T004.d — vault sync rejects both version and expectedPrevVersion", async () => {
+  await expectInvalidVaultSyncBody({
+    encryptedBlob: validEncryptedBlob("both-version-fields"),
+    version: 1,
+    expectedPrevVersion: 0,
+  });
+});
+
+test("T004.e — vault sync rejects an empty encryptedBlob", async () => {
   await expectInvalidVaultBlob("");
 });
 
-test("T004.d — vault sync rejects a single-space encryptedBlob", async () => {
+test("T004.f — vault sync rejects a single-space encryptedBlob", async () => {
   await expectInvalidVaultBlob(" ");
 });
 
-test("T004.e — vault sync rejects whitespace-only encryptedBlob text", async () => {
+test("T004.g — vault sync rejects whitespace-only encryptedBlob text", async () => {
   await expectInvalidVaultBlob("     ");
 });
 
-test("T004.f — vault sync rejects null placeholder encryptedBlob text", async () => {
+test("T004.h — vault sync rejects null placeholder encryptedBlob text", async () => {
   await expectInvalidVaultBlob("null");
 });
 
-test("T004.g — vault sync rejects empty-array placeholder encryptedBlob text", async () => {
+test("T004.i — vault sync rejects empty-array placeholder encryptedBlob text", async () => {
   await expectInvalidVaultBlob("[]");
 });
 
-test("T004.h — vault sync rejects a trimmed encryptedBlob shorter than 64 characters", async () => {
+test("T004.j — vault sync rejects a trimmed encryptedBlob shorter than 64 characters", async () => {
   await expectInvalidVaultBlob(`  ${"a".repeat(63)}  `);
 });
 
-test("T004.i — vault sync accepts a sufficiently long opaque encryptedBlob", async () => {
+test("T004.k — vault sync accepts expectedPrevVersion with a sufficiently long opaque encryptedBlob", async () => {
   const u = await registerUser();
   const res = await fetch(`${baseUrl}/api/vault/sync`, {
     method: "POST",
@@ -623,7 +652,10 @@ test("T004.i — vault sync accepts a sufficiently long opaque encryptedBlob", a
       "x-auth-hash": u.authHash,
       "x-forwarded-for": randomIp(),
     },
-    body: JSON.stringify({ encryptedBlob: validEncryptedBlob("t004g"), version: 1 }),
+    body: JSON.stringify({
+      encryptedBlob: validEncryptedBlob("t004k"),
+      expectedPrevVersion: 0,
+    }),
   });
   assert.equal(
     res.status,

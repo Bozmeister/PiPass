@@ -3248,16 +3248,27 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(401).json({ error: "Step-up expired" });
       }
 
-      // syncVault is fully transactional: it locks the existing row,
-      // verifies version monotonicity (CAS), archives the previous blob to
-      // vault_blob_history, writes the new blob, and prunes history — all
-      // atomically. We no longer need the read-then-CAS-then-recheck dance
-      // here in the route. Returns either { ok:true, blob } or
-      // { ok:false, code:"version_conflict", serverVersion }.
+      // Prompt 007 contract: clients no longer choose the stored version.
+      // They declare the last version they saw; the server verifies that
+      // expectation and derives the next temporary storage version itself.
+      // Prompt 008 will move this minting fully into storage.
+      const currentBlob = await storage.getVaultBlob(userId);
+      const currentVersion = currentBlob?.version ?? 0;
+      if (parsed.data.expectedPrevVersion !== currentVersion) {
+        return res.status(409).json({
+          error: "Version conflict",
+          serverVersion: currentVersion,
+        });
+      }
+      const nextVersion = currentVersion + 1;
+
+      // syncVault still provides the transactional CAS, history archive,
+      // write, and prune. If a concurrent sync wins after the read above,
+      // this same nextVersion loses cleanly with version_conflict.
       const result = await storage.syncVault(
         userId,
         parsed.data.encryptedBlob,
-        parsed.data.version,
+        nextVersion,
       );
       if (!result.ok) {
         // Version conflict is NOT a successful sync — do not audit-log

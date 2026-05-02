@@ -51,6 +51,7 @@ const FIELD_LABEL: Record<string, string> = {
   iterations: "iterations",
   encryptedBlob: "blob",
   version: "version",
+  expectedPrevVersion: "expectedPrevVersion",
   // TOTP fields. Surfacing the exact name in the 400 error is fine here:
   // both `token` and `tempToken` are public request-shape concerns, not
   // sensitive values (the user already knows what they sent).
