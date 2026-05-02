@@ -8,15 +8,28 @@ import { wipeBuffer } from "./secureMemory";
 // Argon2id is attempted first (if WebAssembly is available), with PBKDF2 as fallback.
 // No custom cryptographic algorithms are used in the security-critical path.
 
-let argon2idFn: ((params: any) => Promise<Uint8Array>) | null = null;
+type Argon2BinaryParams = {
+  password: Uint8Array;
+  salt: Uint8Array;
+  iterations: number;
+  memorySize: number;
+  parallelism: number;
+  hashLength: number;
+};
+
+let argon2idFn: ((params: Argon2BinaryParams) => Promise<Uint8Array>) | null = null;
 let argon2LoadFailed = false;
 
-async function loadArgon2(): Promise<((params: any) => Promise<Uint8Array>) | null> {
+async function loadArgon2(): Promise<((params: Argon2BinaryParams) => Promise<Uint8Array>) | null> {
   if (argon2LoadFailed) return null;
   if (argon2idFn) return argon2idFn;
   try {
     const mod = await import("hash-wasm");
-    argon2idFn = mod.argon2id;
+    argon2idFn = (params) =>
+      mod.argon2id({
+        ...params,
+        outputType: "binary" as const,
+      });
     return argon2idFn;
   } catch {
     argon2LoadFailed = true;
@@ -110,7 +123,6 @@ export async function deriveMasterKey(
         memorySize,
         parallelism: config.parallelism,
         hashLength: 32,
-        outputType: "binary" as const,
       });
       const result = Array.from(keyBytes)
         .map((b: number) => b.toString(16).padStart(2, "0"))
