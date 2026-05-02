@@ -39,3 +39,7 @@ yarn-error.*
 .vercel
 
 .env
+.local/
+.local/
+PiPass.zip
+*.zip
