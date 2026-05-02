@@ -189,6 +189,7 @@ async function legacyVaultSync(
   user: Registered,
   encryptedBlob: string,
   expectedPrevVersion: number,
+  opts: { ip?: string } = {},
 ): Promise<Response> {
   return fetch(`${baseUrl}/api/vault/sync`, {
     method: "POST",
@@ -196,20 +197,53 @@ async function legacyVaultSync(
       "content-type": "application/json",
       "x-user-id": user.userId,
       "x-auth-hash": user.authHash,
-      "x-forwarded-for": randomIp(),
+      "x-forwarded-for": opts.ip ?? randomIp(),
     },
     body: JSON.stringify({ encryptedBlob, expectedPrevVersion }),
   });
 }
 
-async function legacyVaultFetch(user: Registered): Promise<Response> {
+async function legacyVaultFetch(
+  user: Registered,
+  opts: { ip?: string } = {},
+): Promise<Response> {
   return fetch(`${baseUrl}/api/vault/fetch`, {
     headers: {
       "x-user-id": user.userId,
       "x-auth-hash": user.authHash,
-      "x-forwarded-for": randomIp(),
+      "x-forwarded-for": opts.ip ?? randomIp(),
     },
   });
+}
+
+async function expectRateLimitResponse(
+  res: Response,
+  forbiddenValues: readonly string[] = [],
+): Promise<void> {
+  await expectStatus(res, 429, "request should be rate-limited");
+  const text = await res.text();
+  const payload = JSON.parse(text) as Record<string, unknown>;
+  assert.deepEqual(payload, { error: "Too many requests" });
+
+  for (const field of [
+    "encryptedBlob",
+    "authHash",
+    "credentialId",
+    "credential_id",
+    "publicKey",
+    "public_key",
+    "headers",
+    "body",
+  ]) {
+    assert.ok(
+      !text.includes(field),
+      "rate-limit response leaked forbidden field",
+    );
+  }
+
+  for (const value of forbiddenValues) {
+    assert.ok(!text.includes(value), "rate-limit response leaked forbidden value");
+  }
 }
 
 async function expectVersionConflict(
@@ -1195,6 +1229,47 @@ test("T010 — passkey login rate-limit cannot be bypassed by switching to passw
     429,
     "password login from the same exhausted IP must also 429 (shared bucket)",
   );
+});
+
+test("T010.vault_sync — repeated vault sync attempts are rate-limited safely", async () => {
+  const u = await registerUser();
+  const ip = randomIp();
+  const attemptedBlob = validEncryptedBlob("t010:rate-sync");
+  let limited: Response | null = null;
+
+  for (let i = 0; i < 40; i++) {
+    const res = await legacyVaultSync(u, attemptedBlob, 999, { ip });
+    if (res.status === 429) {
+      limited = res;
+      break;
+    }
+    if (res.status !== 409) {
+      assert.fail(`expected pre-limit sync attempts to 409; got ${res.status} ${await res.text()}`);
+    }
+  }
+
+  assert.ok(limited, "expected repeated vault sync attempts to hit 429");
+  await expectRateLimitResponse(limited, [attemptedBlob, u.authHash, u.userId]);
+});
+
+test("T010.vault_fetch — repeated vault fetch requests are rate-limited safely", async () => {
+  const u = await registerUser();
+  const ip = randomIp();
+  let limited: Response | null = null;
+
+  for (let i = 0; i < 70; i++) {
+    const res = await legacyVaultFetch(u, { ip });
+    if (res.status === 429) {
+      limited = res;
+      break;
+    }
+    if (res.status !== 200) {
+      assert.fail(`expected pre-limit fetch requests to 200; got ${res.status} ${await res.text()}`);
+    }
+  }
+
+  assert.ok(limited, "expected repeated vault fetch requests to hit 429");
+  await expectRateLimitResponse(limited, [u.authHash, u.userId]);
 });
 
 // T011 — audit visibility: a failed password login (known user, wrong
