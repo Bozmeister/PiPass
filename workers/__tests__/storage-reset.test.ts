@@ -43,6 +43,11 @@ import {
   executeSetupImportRepairPlan,
   type SetupImportRepairStorageDriver,
 } from "../../lib/setupImportRepairExecutor";
+import {
+  decideStartupRepairState,
+  readSetupImportStateSnapshot,
+  type SetupImportSnapshotReadDriver,
+} from "../../lib/startupRepairDecision";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -119,6 +124,28 @@ class RepairPlanMemoryStorage implements SetupImportRepairStorageDriver {
       throw new Error(`delete failed for ${key}`);
     }
     this.items.delete(key);
+  }
+}
+
+class StartupSnapshotMemoryReader implements SetupImportSnapshotReadDriver {
+  readonly items = new Map<string, string>();
+  readonly keysRead: string[] = [];
+  readonly keysWritten: string[] = [];
+  readonly keysDeleted: string[] = [];
+  readonly failReadKeys = new Set<string>();
+
+  constructor(initialItems: Record<string, string> = {}) {
+    for (const [key, value] of Object.entries(initialItems)) {
+      this.items.set(key, value);
+    }
+  }
+
+  async getItem(key: string): Promise<string | null> {
+    this.keysRead.push(key);
+    if (this.failReadKeys.has(key)) {
+      throw new Error(`read failed for ${key}`);
+    }
+    return this.items.get(key) ?? null;
   }
 }
 
@@ -2384,4 +2411,171 @@ test("setup/import repair executor output contains no stored values", async () =
   assert.equal(serialized.includes(secretValue), false);
   assert.equal(serialized.includes("STORED_SECRET_VALUE"), false);
   assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+});
+
+test("startup repair decision sends clean uninitialized snapshot to setup", () => {
+  const decision = decideStartupRepairState({});
+
+  assert.equal(decision.route, "setup");
+  assert.equal(decision.classification, "clean-uninitialized");
+  assert.equal(decision.repairPlan?.action, "none");
+});
+
+test("startup repair decision sends healthy initialized snapshot to unlock", () => {
+  const decision = decideStartupRepairState({
+    ...setupMetadataSnapshot(),
+    [SETUP_IMPORT_STORAGE_KEYS.vaultInitialized]: "1",
+  });
+
+  assert.equal(decision.route, "unlock");
+  assert.equal(decision.classification, "initialized");
+  assert.equal(decision.repairPlan?.action, "none");
+});
+
+test("startup repair decision sends partial setup snapshot to repair prompt", () => {
+  const decision = decideStartupRepairState(setupMetadataSnapshot());
+
+  assert.equal(decision.route, "repair-prompt");
+  assert.equal(decision.classification, "partial-setup");
+  assert.equal(decision.repairPlan?.action, "clear-local-setup-import-state");
+});
+
+test("startup repair decision sends partial import snapshot to repair prompt", () => {
+  const decision = decideStartupRepairState({
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: JSON.stringify(["entry-a"]),
+    "pipass_vault_entry-a": "entry-record-placeholder",
+  });
+
+  assert.equal(decision.route, "repair-prompt");
+  assert.equal(decision.classification, "partial-import");
+  assert.equal(decision.repairPlan?.action, "clear-local-setup-import-state");
+});
+
+test("startup repair decision sends inconsistent initialized snapshot to manual repair", () => {
+  const decision = decideStartupRepairState({
+    [SETUP_IMPORT_STORAGE_KEYS.vaultInitialized]: "1",
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  });
+
+  assert.equal(decision.route, "manual-repair");
+  assert.equal(decision.classification, "inconsistent-initialized");
+  assert.equal(decision.repairPlan?.action, "manual-repair-required");
+});
+
+test("startup repair decision sends malformed uninitialized index to repair prompt", () => {
+  const decision = decideStartupRepairState({
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: "{not-json",
+  });
+
+  assert.equal(decision.route, "repair-prompt");
+  assert.equal(decision.classification, "unknown-inconsistent");
+  assert.equal(decision.repairPlan?.action, "clear-local-setup-import-state");
+});
+
+test("startup repair decision returns safe-error on snapshot read failure", async () => {
+  const secretValue = "READ_FAILURE_SECRET_VALUE CIPHERTEXT_SECRET";
+  const reader = new StartupSnapshotMemoryReader({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: secretValue,
+  });
+  reader.failReadKeys.add(SETUP_IMPORT_STORAGE_KEYS.masterHash);
+
+  const snapshotResult = await readSetupImportStateSnapshot(reader);
+  const decision = decideStartupRepairState(snapshotResult);
+  const serialized = JSON.stringify(decision);
+
+  assert.equal(snapshotResult.ok, false);
+  assert.equal(decision.route, "safe-error");
+  assert.equal(decision.classification, "read-failed");
+  assert.equal(serialized.includes(secretValue), false);
+  assert.equal(serialized.includes("READ_FAILURE_SECRET_VALUE"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+});
+
+test("startup repair snapshot reader reads entry keys referenced by valid vault index", async () => {
+  const reader = new StartupSnapshotMemoryReader({
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: JSON.stringify(["entry-a", "entry-b"]),
+    "pipass_vault_entry-a": "entry-a-placeholder",
+    "pipass_vault_entry-b": "entry-b-placeholder",
+  });
+
+  const result = await readSetupImportStateSnapshot(reader);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error("expected startup snapshot read success");
+  }
+  assert.equal(result.snapshot["pipass_vault_entry-a"], "entry-a-placeholder");
+  assert.equal(result.snapshot["pipass_vault_entry-b"], "entry-b-placeholder");
+  assert.equal(result.keysRead.includes("pipass_vault_entry-a"), true);
+  assert.equal(result.keysRead.includes("pipass_vault_entry-b"), true);
+});
+
+test("startup repair snapshot reader reads note keys referenced by valid notes index", async () => {
+  const reader = new StartupSnapshotMemoryReader({
+    [SETUP_IMPORT_STORAGE_KEYS.notesIndex]: JSON.stringify(["note-a", "note-b"]),
+    "pipass_note_note-a": "note-a-placeholder",
+    "pipass_note_note-b": "note-b-placeholder",
+  });
+
+  const result = await readSetupImportStateSnapshot(reader);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error("expected startup snapshot read success");
+  }
+  assert.equal(result.snapshot["pipass_note_note-a"], "note-a-placeholder");
+  assert.equal(result.snapshot["pipass_note_note-b"], "note-b-placeholder");
+  assert.equal(result.keysRead.includes("pipass_note_note-a"), true);
+  assert.equal(result.keysRead.includes("pipass_note_note-b"), true);
+});
+
+test("startup repair snapshot reader handles malformed indexes without raw throws", async () => {
+  const reader = new StartupSnapshotMemoryReader({
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: "{not-json",
+    "pipass_vault_entry-a": "entry-a-placeholder",
+  });
+
+  const result = await readSetupImportStateSnapshot(reader);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error("expected startup snapshot read success");
+  }
+  assert.equal(result.snapshot[SETUP_IMPORT_STORAGE_KEYS.vaultIndex], "{not-json");
+  assert.equal(result.keysRead.includes("pipass_vault_entry-a"), false);
+});
+
+test("startup repair snapshot and decision helpers do not write or delete storage", async () => {
+  const reader = new StartupSnapshotMemoryReader({
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: JSON.stringify(["entry-a"]),
+    "pipass_vault_entry-a": "entry-a-placeholder",
+  });
+
+  const result = await readSetupImportStateSnapshot(reader);
+  const decision = decideStartupRepairState(result);
+
+  assert.equal(result.ok, true);
+  assert.equal(decision.route, "repair-prompt");
+  assert.deepEqual(reader.keysWritten, []);
+  assert.deepEqual(reader.keysDeleted, []);
+});
+
+test("startup repair decision output contains no stored values", async () => {
+  const secretValue = "STORED_SECRET_VALUE CIPHERTEXT_SECRET";
+  const reader = new StartupSnapshotMemoryReader({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: secretValue,
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: JSON.stringify(["entry-a"]),
+    "pipass_vault_entry-a": "ENTRY_CIPHERTEXT_SECRET",
+  });
+
+  const result = await readSetupImportStateSnapshot(reader);
+  const decision = decideStartupRepairState(result);
+  const serialized = JSON.stringify(decision);
+
+  assert.equal(result.ok, true);
+  assert.equal(decision.route, "repair-prompt");
+  assert.equal(serialized.includes(secretValue), false);
+  assert.equal(serialized.includes("STORED_SECRET_VALUE"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+  assert.equal(serialized.includes("ENTRY_CIPHERTEXT_SECRET"), false);
 });
