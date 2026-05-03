@@ -7,6 +7,7 @@ import {
   clearVault,
   destroyAllData,
   getKdfMetadata,
+  getKdfMetadataState,
   hasLocalEncryptedVaultData,
   saveKdfMetadata,
 } from "../storageWorker";
@@ -228,6 +229,7 @@ test("KDF metadata helpers save and read valid Argon2id metadata", async (t) => 
   await saveKdfMetadata(metadata);
 
   assert.deepEqual(await getKdfMetadata(), metadata);
+  assert.deepEqual(await getKdfMetadataState(), { status: "valid", metadata });
 });
 
 test("KDF metadata helpers save and read valid PBKDF2 metadata", async (t) => {
@@ -244,6 +246,14 @@ test("KDF metadata helpers save and read valid PBKDF2 metadata", async (t) => {
   await saveKdfMetadata(metadata);
 
   assert.deepEqual(await getKdfMetadata(), metadata);
+  assert.deepEqual(await getKdfMetadataState(), { status: "valid", metadata });
+});
+
+test("KDF metadata state distinguishes missing metadata", async (t) => {
+  installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  assert.deepEqual(await getKdfMetadataState(), { status: "missing", metadata: null });
 });
 
 test("KDF metadata read returns null for invalid JSON without throwing", async (t) => {
@@ -253,6 +263,7 @@ test("KDF metadata read returns null for invalid JSON without throwing", async (
   storage.items.set("pipass_kdf_metadata", "{not-json");
 
   assert.equal(await getKdfMetadata(), null);
+  assert.deepEqual(await getKdfMetadataState(), { status: "invalid", metadata: null });
 });
 
 test("KDF metadata read returns null for unsupported algorithms", async (t) => {
@@ -275,6 +286,7 @@ test("KDF metadata read returns null for unsupported algorithms", async (t) => {
   );
 
   assert.equal(await getKdfMetadata(), null);
+  assert.deepEqual(await getKdfMetadataState(), { status: "invalid", metadata: null });
 });
 
 test("KDF metadata read returns null for missing required fields", async (t) => {
@@ -296,6 +308,7 @@ test("KDF metadata read returns null for missing required fields", async (t) => 
   );
 
   assert.equal(await getKdfMetadata(), null);
+  assert.deepEqual(await getKdfMetadataState(), { status: "invalid", metadata: null });
 });
 
 test("KDF metadata read returns null for invalid parameter shape", async (t) => {
@@ -318,6 +331,7 @@ test("KDF metadata read returns null for invalid parameter shape", async (t) => 
   );
 
   assert.equal(await getKdfMetadata(), null);
+  assert.deepEqual(await getKdfMetadataState(), { status: "invalid", metadata: null });
 });
 
 test("clearKdfMetadata removes stored KDF metadata", async (t) => {
@@ -337,4 +351,5 @@ test("clearKdfMetadata removes stored KDF metadata", async (t) => {
 
   assert.equal(storage.items.has("pipass_kdf_metadata"), false);
   assert.equal(await getKdfMetadata(), null);
+  assert.deepEqual(await getKdfMetadataState(), { status: "missing", metadata: null });
 });

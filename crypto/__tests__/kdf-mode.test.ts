@@ -550,20 +550,42 @@ test("current unlock verification succeeds when the derived hash matches the sto
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
       deriveMasterKeyShares: async () => {
-        events.push("derive");
-        return shares;
+        throw new Error("legacy derivation should not run");
       },
       combineShares: () => {
-        events.push("combine");
-        return "a".repeat(64);
+        throw new Error("legacy combine should not run");
       },
       hashMasterKey: () => {
-        events.push("hash");
-        return "stored-hash";
+        throw new Error("legacy hash should not run");
       },
       getMasterKeyHash: async () => {
         events.push("get-stored-hash");
         return "stored-hash";
+      },
+      getKdfMetadataState: async () => {
+        events.push("get-kdf-metadata");
+        return {
+          status: "valid",
+          metadata: buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "legacy-detected", {
+            createdAt: 1234567890,
+          }),
+        };
+      },
+      saveKdfMetadata: async () => {
+        events.push("save-kdf-metadata");
+      },
+      planUnlockKdfDerivation: async (input) => {
+        events.push(`plan-${input.metadataStatus}`);
+        return {
+          ok: true,
+          source: "metadata",
+          masterKeyHex: "a".repeat(64),
+          metadata: input.existingMetadata!,
+        };
+      },
+      splitKeyIntoShares: (masterKeyHex) => {
+        events.push(`split-${masterKeyHex}`);
+        return shares;
       },
       storeMasterKeySecurely: async () => {
         events.push("cache");
@@ -575,7 +597,105 @@ test("current unlock verification succeeds when the derived hash matches the sto
   );
 
   assert.deepEqual(result, { ok: true, shares });
-  assert.deepEqual(events, ["derive", "combine", "hash", "get-stored-hash", "cache"]);
+  assert.deepEqual(events, [
+    "get-stored-hash",
+    "get-kdf-metadata",
+    "plan-valid",
+    `split-${"a".repeat(64)}`,
+    "cache",
+  ]);
+});
+
+test("current unlock verification uses valid Argon2id metadata without persisting metadata", async () => {
+  const shares = fakeShares();
+  const metadata = buildArgon2idKdfMetadata(1000, ARGON2ID_PARAMS, "setup", {
+    createdAt: 1234567890,
+  });
+  const events: string[] = [];
+
+  const result = await performCurrentUnlockVerification(
+    { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+    {
+      deriveMasterKeyShares: async () => {
+        throw new Error("legacy derivation should not run");
+      },
+      combineShares: () => {
+        throw new Error("legacy combine should not run");
+      },
+      hashMasterKey: () => {
+        throw new Error("legacy hash should not run");
+      },
+      getMasterKeyHash: async () => "stored-hash",
+      getKdfMetadataState: async () => ({ status: "valid", metadata }),
+      saveKdfMetadata: async () => {
+        events.push("save-kdf-metadata");
+      },
+      planUnlockKdfDerivation: async (input) => {
+        assert.equal(input.metadataStatus, "valid");
+        assert.deepEqual(input.existingMetadata, metadata);
+        events.push("plan");
+        return {
+          ok: true,
+          source: "metadata",
+          masterKeyHex: "9".repeat(64),
+          metadata,
+        };
+      },
+      splitKeyIntoShares: () => {
+        events.push("split");
+        return shares;
+      },
+      storeMasterKeySecurely: async () => {
+        events.push("cache");
+      },
+      wipeShares: () => {},
+    },
+  );
+
+  assert.deepEqual(result, { ok: true, shares });
+  assert.deepEqual(events, ["plan", "split", "cache"]);
+});
+
+test("current unlock verification fails missing-metadata no-match without writing metadata", async () => {
+  const events: string[] = [];
+
+  const result = await performCurrentUnlockVerification(
+    { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+    {
+      deriveMasterKeyShares: async () => {
+        throw new Error("legacy derivation should not run");
+      },
+      combineShares: () => {
+        throw new Error("legacy combine should not run");
+      },
+      hashMasterKey: () => {
+        throw new Error("legacy hash should not run");
+      },
+      getMasterKeyHash: async () => "stored-hash",
+      getKdfMetadataState: async () => ({ status: "missing", metadata: null }),
+      saveKdfMetadata: async () => {
+        events.push("save-kdf-metadata");
+      },
+      planUnlockKdfDerivation: async (input) => {
+        assert.equal(input.metadataStatus, "missing");
+        events.push("plan");
+        return { ok: false, reason: "legacy-no-match" };
+      },
+      splitKeyIntoShares: () => {
+        events.push("split");
+        return fakeShares();
+      },
+      storeMasterKeySecurely: async () => {
+        events.push("cache");
+      },
+      wipeShares: () => {
+        events.push("wipe");
+      },
+    },
+  );
+
+  assert.deepEqual(result, { ok: false, reason: "hash-mismatch" });
+  assert.deepEqual(events, ["plan"]);
 });
 
 test("current unlock verification fails and wipes newly derived shares when the hash mismatches", async () => {
@@ -586,33 +706,49 @@ test("current unlock verification fails and wipes newly derived shares when the 
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
       deriveMasterKeyShares: async () => {
-        events.push("derive");
-        return shares;
+        throw new Error("legacy derivation should not run");
       },
       combineShares: () => {
-        events.push("combine");
-        return "b".repeat(64);
+        throw new Error("legacy combine should not run");
       },
       hashMasterKey: () => {
-        events.push("hash");
-        return "candidate-hash";
+        throw new Error("legacy hash should not run");
       },
       getMasterKeyHash: async () => {
         events.push("get-stored-hash");
         return "stored-hash";
       },
+      getKdfMetadataState: async () => {
+        events.push("get-kdf-metadata");
+        return {
+          status: "valid",
+          metadata: buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "legacy-detected", {
+            createdAt: 1234567890,
+          }),
+        };
+      },
+      saveKdfMetadata: async () => {
+        events.push("save-kdf-metadata");
+      },
+      planUnlockKdfDerivation: async () => {
+        events.push("plan");
+        return { ok: false, reason: "metadata-hash-mismatch" };
+      },
+      splitKeyIntoShares: () => {
+        events.push("split");
+        return shares;
+      },
       storeMasterKeySecurely: async () => {
         events.push("cache");
       },
-      wipeShares: (sharesToWipe) => {
-        assert.equal(sharesToWipe, shares);
+      wipeShares: () => {
         events.push("wipe");
       },
     },
   );
 
   assert.deepEqual(result, { ok: false, reason: "hash-mismatch" });
-  assert.deepEqual(events, ["derive", "combine", "hash", "get-stored-hash", "wipe"]);
+  assert.deepEqual(events, ["get-stored-hash", "get-kdf-metadata", "plan"]);
 });
 
 test("current unlock verification preserves legacy tolerance when stored master hash is missing", async () => {
@@ -638,6 +774,21 @@ test("current unlock verification preserves legacy tolerance when stored master 
         events.push("get-stored-hash");
         return null;
       },
+      getKdfMetadataState: async () => {
+        events.push("get-kdf-metadata");
+        return { status: "missing", metadata: null };
+      },
+      saveKdfMetadata: async () => {
+        events.push("save-kdf-metadata");
+      },
+      planUnlockKdfDerivation: async () => {
+        events.push("plan");
+        return { ok: false, reason: "legacy-no-match" };
+      },
+      splitKeyIntoShares: () => {
+        events.push("split");
+        return fakeShares();
+      },
       storeMasterKeySecurely: async () => {
         events.push("cache");
       },
@@ -648,7 +799,7 @@ test("current unlock verification preserves legacy tolerance when stored master 
   );
 
   assert.deepEqual(result, { ok: true, shares });
-  assert.deepEqual(events, ["derive", "combine", "hash", "get-stored-hash", "cache"]);
+  assert.deepEqual(events, ["get-stored-hash", "derive", "combine", "hash", "cache"]);
 });
 
 test("current unlock verification propagates cached-key failures before publishing shares", async () => {
@@ -660,26 +811,46 @@ test("current unlock verification propagates cached-key failures before publishi
       { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
       {
         deriveMasterKeyShares: async () => {
-          events.push("derive");
-          return shares;
+          throw new Error("legacy derivation should not run");
         },
         combineShares: () => {
-          events.push("combine");
-          return "d".repeat(64);
+          throw new Error("legacy combine should not run");
         },
         hashMasterKey: () => {
-          events.push("hash");
-          return "stored-hash";
+          throw new Error("legacy hash should not run");
         },
         getMasterKeyHash: async () => {
           events.push("get-stored-hash");
           return "stored-hash";
         },
+        getKdfMetadataState: async () => {
+          events.push("get-kdf-metadata");
+          return { status: "missing", metadata: null };
+        },
+        saveKdfMetadata: async () => {
+          events.push("save-kdf-metadata");
+        },
+        planUnlockKdfDerivation: async () => {
+          events.push("plan");
+          return {
+            ok: true,
+            source: "legacy-detected",
+            masterKeyHex: "d".repeat(64),
+            metadata: buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "legacy-detected", {
+              createdAt: 1234567890,
+            }),
+          };
+        },
+        splitKeyIntoShares: (masterKeyHex) => {
+          events.push(`split-${masterKeyHex}`);
+          return shares;
+        },
         storeMasterKeySecurely: async () => {
           events.push("cache");
           throw new Error("cache failed");
         },
-        wipeShares: () => {
+        wipeShares: (sharesToWipe) => {
+          assert.equal(sharesToWipe, shares);
           events.push("wipe");
         },
       },
@@ -687,10 +858,17 @@ test("current unlock verification propagates cached-key failures before publishi
     /cache failed/,
   );
 
-  assert.deepEqual(events, ["derive", "combine", "hash", "get-stored-hash", "cache"]);
+  assert.deepEqual(events, [
+    "get-stored-hash",
+    "get-kdf-metadata",
+    "plan",
+    `split-${"d".repeat(64)}`,
+    "cache",
+    "wipe",
+  ]);
 });
 
-test("current unlock verification does not read or write KDF metadata", async () => {
+test("current unlock verification does not read or write KDF metadata when stored master hash is missing", async () => {
   const storage = new MemoryStorage();
   setPlatformStorageDriverForTests(storage.driver);
   try {
@@ -700,7 +878,19 @@ test("current unlock verification does not read or write KDF metadata", async ()
         deriveMasterKeyShares: async () => fakeShares(),
         combineShares: () => "e".repeat(64),
         hashMasterKey: () => "stored-hash",
-        getMasterKeyHash: async () => "stored-hash",
+        getMasterKeyHash: async () => null,
+        getKdfMetadataState: async () => {
+          throw new Error("KDF metadata should not be read without a stored master hash");
+        },
+        saveKdfMetadata: async () => {
+          throw new Error("KDF metadata should not be written without a stored master hash");
+        },
+        planUnlockKdfDerivation: async () => {
+          throw new Error("unlock KDF planner should not run without a stored master hash");
+        },
+        splitKeyIntoShares: () => {
+          throw new Error("planner split path should not run without a stored master hash");
+        },
         storeMasterKeySecurely: async () => {},
         wipeShares: () => {},
       },
@@ -711,4 +901,205 @@ test("current unlock verification does not read or write KDF metadata", async ()
   } finally {
     setPlatformStorageDriverForTests(null);
   }
+});
+
+test("current unlock verification saves metadataToPersist after verified missing-metadata Argon2id detection", async () => {
+  const shares = fakeShares();
+  const metadata = buildArgon2idKdfMetadata(1000, ARGON2ID_PARAMS, "unlock-migration", {
+    createdAt: 1234567890,
+  });
+  const events: string[] = [];
+
+  const result = await performCurrentUnlockVerification(
+    { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+    {
+      deriveMasterKeyShares: async () => {
+        throw new Error("legacy derivation should not run");
+      },
+      combineShares: () => {
+        throw new Error("legacy combine should not run");
+      },
+      hashMasterKey: () => {
+        throw new Error("legacy hash should not run");
+      },
+      getMasterKeyHash: async () => {
+        events.push("get-stored-hash");
+        return "stored-hash";
+      },
+      getKdfMetadataState: async () => {
+        events.push("get-kdf-metadata");
+        return { status: "missing", metadata: null };
+      },
+      saveKdfMetadata: async (metadataToSave) => {
+        assert.deepEqual(metadataToSave, metadata);
+        events.push("save-kdf-metadata");
+      },
+      planUnlockKdfDerivation: async (input) => {
+        events.push(`plan-${input.metadataStatus}`);
+        return {
+          ok: true,
+          source: "legacy-detected",
+          masterKeyHex: "f".repeat(64),
+          metadata,
+          metadataToPersist: metadata,
+        };
+      },
+      splitKeyIntoShares: (masterKeyHex) => {
+        events.push(`split-${masterKeyHex}`);
+        return shares;
+      },
+      storeMasterKeySecurely: async () => {
+        events.push("cache");
+      },
+      wipeShares: () => {
+        events.push("wipe");
+      },
+    },
+  );
+
+  assert.deepEqual(result, { ok: true, shares });
+  assert.deepEqual(events, [
+    "get-stored-hash",
+    "get-kdf-metadata",
+    "plan-missing",
+    "save-kdf-metadata",
+    `split-${"f".repeat(64)}`,
+    "cache",
+  ]);
+});
+
+test("current unlock verification saves metadataToPersist after verified missing-metadata PBKDF2 detection", async () => {
+  const shares = fakeShares();
+  const metadata = buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "legacy-detected", {
+    createdAt: 1234567890,
+  });
+  const events: string[] = [];
+
+  const result = await performCurrentUnlockVerification(
+    { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+    {
+      deriveMasterKeyShares: async () => {
+        throw new Error("legacy derivation should not run");
+      },
+      combineShares: () => {
+        throw new Error("legacy combine should not run");
+      },
+      hashMasterKey: () => {
+        throw new Error("legacy hash should not run");
+      },
+      getMasterKeyHash: async () => "stored-hash",
+      getKdfMetadataState: async () => ({ status: "missing", metadata: null }),
+      saveKdfMetadata: async (metadataToSave) => {
+        assert.deepEqual(metadataToSave, metadata);
+        events.push("save-kdf-metadata");
+      },
+      planUnlockKdfDerivation: async () => ({
+        ok: true,
+        source: "legacy-detected",
+        masterKeyHex: "1".repeat(64),
+        metadata,
+        metadataToPersist: metadata,
+      }),
+      splitKeyIntoShares: () => shares,
+      storeMasterKeySecurely: async () => {
+        events.push("cache");
+      },
+      wipeShares: () => {},
+    },
+  );
+
+  assert.deepEqual(result, { ok: true, shares });
+  assert.deepEqual(events, ["save-kdf-metadata", "cache"]);
+});
+
+test("current unlock verification fails invalid KDF metadata closed without writing metadata", async () => {
+  const events: string[] = [];
+
+  const result = await performCurrentUnlockVerification(
+    { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+    {
+      deriveMasterKeyShares: async () => {
+        throw new Error("legacy derivation should not run");
+      },
+      combineShares: () => {
+        throw new Error("legacy combine should not run");
+      },
+      hashMasterKey: () => {
+        throw new Error("legacy hash should not run");
+      },
+      getMasterKeyHash: async () => "stored-hash",
+      getKdfMetadataState: async () => ({ status: "invalid", metadata: null }),
+      saveKdfMetadata: async () => {
+        events.push("save-kdf-metadata");
+      },
+      planUnlockKdfDerivation: async (input) => {
+        events.push(`plan-${input.metadataStatus}`);
+        return { ok: false, reason: "invalid-metadata" };
+      },
+      splitKeyIntoShares: () => {
+        events.push("split");
+        return fakeShares();
+      },
+      storeMasterKeySecurely: async () => {
+        events.push("cache");
+      },
+      wipeShares: () => {
+        events.push("wipe");
+      },
+    },
+  );
+
+  assert.deepEqual(result, { ok: false, reason: "invalid-kdf-metadata" });
+  assert.deepEqual(events, ["plan-invalid"]);
+});
+
+test("current unlock verification allows unlock with warning when KDF metadata persistence fails after verification", async () => {
+  const shares = fakeShares();
+  const metadata = buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "legacy-detected", {
+    createdAt: 1234567890,
+  });
+  const events: string[] = [];
+
+  const result = await performCurrentUnlockVerification(
+    { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+    {
+      deriveMasterKeyShares: async () => {
+        throw new Error("legacy derivation should not run");
+      },
+      combineShares: () => {
+        throw new Error("legacy combine should not run");
+      },
+      hashMasterKey: () => {
+        throw new Error("legacy hash should not run");
+      },
+      getMasterKeyHash: async () => "stored-hash",
+      getKdfMetadataState: async () => ({ status: "missing", metadata: null }),
+      saveKdfMetadata: async () => {
+        events.push("save-kdf-metadata");
+        throw new Error("storage write failed");
+      },
+      planUnlockKdfDerivation: async () => ({
+        ok: true,
+        source: "legacy-detected",
+        masterKeyHex: "2".repeat(64),
+        metadata,
+        metadataToPersist: metadata,
+      }),
+      splitKeyIntoShares: () => {
+        events.push("split");
+        return shares;
+      },
+      storeMasterKeySecurely: async () => {
+        events.push("cache");
+      },
+      wipeShares: () => {},
+    },
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    shares,
+    warning: "kdf-metadata-persist-failed",
+  });
+  assert.deepEqual(events, ["save-kdf-metadata", "split", "cache"]);
 });

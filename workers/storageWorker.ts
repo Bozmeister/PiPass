@@ -65,6 +65,25 @@ export async function getKdfMetadata(): Promise<KdfMetadata | null> {
   }
 }
 
+export type KdfMetadataState =
+  | { status: "valid"; metadata: KdfMetadata }
+  | { status: "missing"; metadata: null }
+  | { status: "invalid"; metadata: null };
+
+export async function getKdfMetadataState(): Promise<KdfMetadataState> {
+  const raw = await getItem(KDF_METADATA_KEY);
+  if (raw === null) return { status: "missing", metadata: null };
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (isValidStoredKdfMetadata(parsed)) {
+      return { status: "valid", metadata: parsed };
+    }
+  } catch {}
+
+  return { status: "invalid", metadata: null };
+}
+
 export async function saveKdfMetadata(metadata: KdfMetadata): Promise<void> {
   if (!isValidStoredKdfMetadata(metadata)) {
     throw new Error("Invalid KDF metadata");

@@ -13,16 +13,18 @@ import {
   getMasterSalt,
   saveMasterSalt,
   getMasterKeyHash,
+  getKdfMetadataState,
   saveMasterKeyHash,
+  saveKdfMetadata,
   getSecurityProfile,
   saveSecurityProfile,
   destroyAllData,
   saveRecoveryKeyHash,
   storeMasterKeySecurely,
 } from "../../workers/storageWorker";
-import { generateMasterSalt, hashMasterKey } from "../../crypto/keyDerivation";
+import { generateMasterSalt, hashMasterKey, planUnlockKdfDerivation } from "../../crypto/keyDerivation";
 import { deriveMasterKeyShares } from "../../workers/vaultWorker";
-import { KeyShares, wipeShares, combineShares } from "../../crypto/secureMemory";
+import { KeyShares, wipeShares, combineShares, splitKeyIntoShares } from "../../crypto/secureMemory";
 import { performCurrentUnlockVerification } from "../../lib/currentUnlock";
 import {
   runIntegrityCheck,
@@ -303,13 +305,25 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
           combineShares,
           hashMasterKey,
           getMasterKeyHash,
+          getKdfMetadataState,
+          saveKdfMetadata,
+          planUnlockKdfDerivation,
+          splitKeyIntoShares,
           storeMasterKeySecurely,
           wipeShares,
         },
       );
 
       if (!result.ok) {
-        setError("Incorrect password. Please try again.");
+        if (result.reason === "invalid-kdf-metadata") {
+          setError("This vault's local unlock settings look inconsistent. PiPass cannot unlock it safely.");
+        } else if (result.reason === "argon2id-unavailable") {
+          setError("This device cannot run the required unlock protection right now. Update or restart the app and try again.");
+        } else if (result.reason === "kdf-derivation-failed") {
+          setError("Failed to derive key. Please try again.");
+        } else {
+          setError("Incorrect password. Please try again.");
+        }
         setUnlocking(false);
         return;
       }

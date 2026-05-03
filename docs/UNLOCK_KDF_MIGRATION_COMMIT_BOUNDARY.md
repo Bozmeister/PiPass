@@ -8,7 +8,7 @@ This is a design-only document. It does not change runtime code, tests, storage 
 
 ## 2. Current State
 
-Current runtime unlock still:
+Pre-Prompt-038 runtime unlock:
 
 1. Reads `pipass_master_salt`, numeric `pipass_security_profile`, and `pipass_master_hash`.
 2. Calls `deriveMasterKeyShares()`.
@@ -17,7 +17,9 @@ Current runtime unlock still:
 5. Saves the cached native master key after a hash match.
 6. Sets active key shares and lets `VaultScreen` load/decrypt the vault.
 
-New helpers now exist but are not wired into real unlock:
+Prompt 038 wires the unlock decision path through `performCurrentUnlockVerification()` and `planUnlockKdfDerivation()`. New vault setup, password rotation, profile changes, fractal fingerprint metadata, vault formats, and server behavior remain unchanged.
+
+KDF helpers now used or available for unlock migration:
 
 - `getKdfMetadata()`, `saveKdfMetadata()`, and `clearKdfMetadata()`
 - `deriveMasterKeyWithArgon2id()`
