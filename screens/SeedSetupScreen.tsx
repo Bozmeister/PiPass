@@ -14,6 +14,8 @@ const PROFILES = [
 ];
 
 const MIN_PASSWORD_LENGTH = 8;
+const STAGED_BACKUP_BRIDGE_MESSAGE =
+  "Backup records are staged in memory only and will not be added to this vault in this setup step.";
 
 export interface StagedBackupSummary {
   entries: number;
@@ -85,7 +87,7 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
       if (!staged.ok) {
         setStagedBackupSummary(null);
         onStagedBackupChange?.(null);
-        const msg = "This file is not a supported PiPass backup. Nothing was imported.";
+        const msg = "This file is not a supported PiPass backup. No vault records were changed.";
         setBackupStageError(msg);
         if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Backup Not Supported", msg); }
         return;
@@ -99,8 +101,8 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
       setStagedBackupSummary(summary);
       onStagedBackupChange?.({ backup: staged.backup, summary });
 
-      const msg = `Backup validated: ${summary.entries} entries, ${summary.secureNotes} secure notes. Import commit will be enabled in a future step.`;
-      if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Backup Validated", msg); }
+      const msg = `Backup checked: ${summary.entries} entries, ${summary.secureNotes} secure notes. ${STAGED_BACKUP_BRIDGE_MESSAGE}`;
+      if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Backup Checked", msg); }
     } catch {
       const msg = "Could not read the backup file. Make sure it's a valid .vault file.";
       setStagedBackupSummary(null);
@@ -317,7 +319,7 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
 
           <View style={{ marginTop: 32, borderTopWidth: 1, borderTopColor: "#222", paddingTop: 24 }}>
             <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 10 }}>
-              Restore From Backup
+              Backup File Check
             </Text>
             <Pressable
               onPress={handleImport}
@@ -342,7 +344,7 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
                 <>
                   <Ionicons name="cloud-upload-outline" size={18} color="#4CAF50" style={{ marginRight: 8 }} />
                   <Text style={{ color: "#4CAF50", fontSize: 15, fontWeight: "600" as const }}>
-                    {stagedBackupSummary ? "Backup Validated" : "Validate .vault Backup"}
+                    {stagedBackupSummary ? "Backup Checked" : "Check .vault Backup"}
                   </Text>
                 </>
               )}
@@ -354,7 +356,7 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
                 accessibilityLabel="Backup validation summary"
               >
                 <Text style={{ color: "#4CAF50", fontSize: 13, fontWeight: "700" as const, marginBottom: 4 }}>
-                  Backup validated
+                  Backup checked only
                 </Text>
                 <Text style={{ color: "#aaa", fontSize: 12, lineHeight: 18 }}>
                   <Text
@@ -370,7 +372,7 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
                   >
                     {stagedBackupSummary.secureNotes} secure notes
                   </Text>
-                  {" were staged in memory only. Import commit will be enabled in a future step."}
+                  {` were found. ${STAGED_BACKUP_BRIDGE_MESSAGE}`}
                 </Text>
                 {stagedBackupSummary.warnings.length > 0 && (
                   <Text
@@ -378,7 +380,7 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
                     testID="setup-backup-warning"
                     accessibilityLabel="Backup validation warning"
                   >
-                    This encrypted backup still requires future compatibility verification before it can be imported.
+                    This encrypted backup still requires future compatibility verification before records can be committed.
                   </Text>
                 )}
                 <Pressable

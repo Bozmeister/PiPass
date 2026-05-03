@@ -20,6 +20,8 @@ Current behavior after Prompts 059, 060, 062, 063, 064, and 065:
 - staged backup records are not committed
 - UI copy says import commit will be enabled in a future step
 
+Prompt 067 implementation note: the first-time setup backup surface now uses "Backup File Check" / "Backup checked only" language and explicitly says staged records are held in memory only and will not be added to the vault in this setup step.
+
 This bridge exists only to remove the old immediate-write import risk before the final staged import commit flow is ready.
 
 ## 3. User Trust Risk
@@ -36,10 +38,11 @@ The temporary bridge must therefore avoid these claims:
 
 The bridge may say:
 
-- the backup was validated
+- the backup was checked or validated
 - counts were staged in memory
 - no records have been imported yet
 - import commit will be enabled in a future step
+- records will not be added to the vault in this setup step
 
 The product should favor a slightly awkward but honest message over smoother copy that over-promises. This is one of those places where boring is brave.
 
@@ -84,9 +87,9 @@ Temporary bridge copy must not include:
 
 Suggested acceptable copy:
 
-"Backup validated: X entries, Y secure notes. Import commit will be enabled in a future step."
+"Backup checked: X entries, Y secure notes. Backup records are staged in memory only and will not be added to this vault in this setup step."
 
-"X entries and Y secure notes were staged in memory only. Import commit will be enabled in a future step."
+"X entries and Y secure notes were found. Backup records are staged in memory only and will not be added to this vault in this setup step."
 
 ## 6. State Clearing Rules
 
@@ -117,8 +120,8 @@ Once staged backup commit is enabled, these memory-clearing rules should be revi
 Use fake, non-secret backup fixtures only.
 
 - [ ] Fresh first-time setup shows the backup select action.
-- [ ] Selecting a valid fake backup shows "validated" or "staged" copy, not "restored" or "imported".
-- [ ] The staged summary says import commit is not enabled yet.
+- [ ] Selecting a valid fake backup shows "checked" or "staged in memory" copy, not "restored" or "imported".
+- [ ] The staged summary says records will not be added to the vault in this setup step.
 - [ ] The staged summary shows counts only.
 - [ ] The staged summary does not expose record contents, salts, hashes, metadata JSON, `deviceUUID`, ciphertext, or record ids.
 - [ ] Creating a vault with a staged backup still reaches recovery confirmation.
