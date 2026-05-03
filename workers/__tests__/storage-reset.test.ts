@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   buildArgon2idKdfMetadata,
@@ -22,6 +23,7 @@ import {
   getBackupVerifierFromMetadata,
   isBackupVerifier,
   parseBackupVerifier,
+  verifyBackupSentinel,
 } from "../../lib/backupVerifier";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
@@ -152,6 +154,10 @@ function validBackupVerifierFixture(overrides: Record<string, unknown> = {}): Re
     expectedPlaintextHash: "b".repeat(64),
     ...overrides,
   };
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function testArgon2idMetadata(): KdfMetadata {
@@ -861,4 +867,200 @@ test("backup verifier parser does not write platform storage", async (t) => {
 
   assert.equal(result.ok, true);
   assert.equal(storage.items.size, 0);
+});
+
+test("backup sentinel verifier accepts entry-v1 when decrypted plaintext hash matches", async () => {
+  const plaintext = "pipass-backup-sentinel-v1";
+  const parsed = parseBackupVerifier(
+    validBackupVerifierFixture({ expectedPlaintextHash: sha256Hex(plaintext) }),
+  );
+  assert.equal(parsed.ok, true);
+
+  const result = await verifyBackupSentinel({
+    verifier: parsed.verifier,
+    masterKeyHex: "c".repeat(64),
+    deriveAndDecryptEntrySentinel: ({ masterKeyHex, recordId, salt, ciphertext }) => {
+      assert.equal(masterKeyHex, "c".repeat(64));
+      assert.equal(recordId, parsed.verifier.recordId);
+      assert.equal(salt, parsed.verifier.salt);
+      assert.equal(ciphertext, parsed.verifier.ciphertext);
+      return plaintext;
+    },
+  });
+
+  assert.deepEqual(result, { ok: true });
+});
+
+test("backup sentinel verifier accepts note-v1 when decrypted plaintext hash matches", async () => {
+  const plaintext = "pipass-backup-note-sentinel-v1";
+  const parsed = parseBackupVerifier(
+    validBackupVerifierFixture({
+      derivation: "note-v1",
+      expectedPlaintextHash: sha256Hex(plaintext),
+    }),
+  );
+  assert.equal(parsed.ok, true);
+
+  const result = await verifyBackupSentinel({
+    verifier: parsed.verifier,
+    masterKeyHex: "d".repeat(64),
+    deriveAndDecryptNoteSentinel: () => plaintext,
+  });
+
+  assert.deepEqual(result, { ok: true });
+});
+
+test("backup sentinel verifier fails on hash mismatch", async () => {
+  const parsed = parseBackupVerifier(
+    validBackupVerifierFixture({ expectedPlaintextHash: sha256Hex("expected") }),
+  );
+  assert.equal(parsed.ok, true);
+
+  const result = await verifyBackupSentinel({
+    verifier: parsed.verifier,
+    masterKeyHex: "e".repeat(64),
+    deriveAndDecryptEntrySentinel: () => "actual",
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup sentinel verification failure");
+  }
+  assert.equal(result.reason, "hash-mismatch");
+});
+
+test("backup sentinel verifier fails on injected decrypt error", async () => {
+  const parsed = parseBackupVerifier(
+    validBackupVerifierFixture({ expectedPlaintextHash: sha256Hex("sentinel") }),
+  );
+  assert.equal(parsed.ok, true);
+
+  const result = await verifyBackupSentinel({
+    verifier: parsed.verifier,
+    masterKeyHex: "f".repeat(64),
+    deriveAndDecryptEntrySentinel: () => {
+      throw new Error("SECRET_DECRYPT_DETAILS");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup sentinel verification failure");
+  }
+  assert.equal(result.reason, "decrypt-failed");
+  assert.equal(result.message.includes("SECRET_DECRYPT_DETAILS"), false);
+});
+
+test("backup sentinel verifier fails on unsupported derivation if reached", async () => {
+  const parsed = parseBackupVerifier(
+    validBackupVerifierFixture({ expectedPlaintextHash: sha256Hex("sentinel") }),
+  );
+  assert.equal(parsed.ok, true);
+  const verifier = { ...parsed.verifier, derivation: "root-key-v1" as "entry-v1" };
+
+  const result = await verifyBackupSentinel({
+    verifier,
+    masterKeyHex: "a".repeat(64),
+    deriveAndDecryptEntrySentinel: () => "sentinel",
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup sentinel verification failure");
+  }
+  assert.equal(result.reason, "unsupported-derivation");
+});
+
+test("backup sentinel verifier does not call note decryptor for entry-v1", async () => {
+  const plaintext = "entry-only";
+  const parsed = parseBackupVerifier(
+    validBackupVerifierFixture({ expectedPlaintextHash: sha256Hex(plaintext) }),
+  );
+  assert.equal(parsed.ok, true);
+  let noteCalled = false;
+
+  const result = await verifyBackupSentinel({
+    verifier: parsed.verifier,
+    masterKeyHex: "b".repeat(64),
+    deriveAndDecryptEntrySentinel: () => plaintext,
+    deriveAndDecryptNoteSentinel: () => {
+      noteCalled = true;
+      return plaintext;
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(noteCalled, false);
+});
+
+test("backup sentinel verifier does not call entry decryptor for note-v1", async () => {
+  const plaintext = "note-only";
+  const parsed = parseBackupVerifier(
+    validBackupVerifierFixture({
+      derivation: "note-v1",
+      expectedPlaintextHash: sha256Hex(plaintext),
+    }),
+  );
+  assert.equal(parsed.ok, true);
+  let entryCalled = false;
+
+  const result = await verifyBackupSentinel({
+    verifier: parsed.verifier,
+    masterKeyHex: "c".repeat(64),
+    deriveAndDecryptEntrySentinel: () => {
+      entryCalled = true;
+      return plaintext;
+    },
+    deriveAndDecryptNoteSentinel: () => plaintext,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(entryCalled, false);
+});
+
+test("backup sentinel verifier does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+  const plaintext = "no-storage";
+  const parsed = parseBackupVerifier(
+    validBackupVerifierFixture({ expectedPlaintextHash: sha256Hex(plaintext) }),
+  );
+  assert.equal(parsed.ok, true);
+
+  const result = await verifyBackupSentinel({
+    verifier: parsed.verifier,
+    masterKeyHex: "d".repeat(64),
+    deriveAndDecryptEntrySentinel: () => plaintext,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(storage.items.size, 0);
+});
+
+test("backup sentinel verifier keeps secret values out of controlled error messages", async () => {
+  const plaintext = "PLAINTEXT_SENTINEL_SECRET";
+  const parsed = parseBackupVerifier(
+    validBackupVerifierFixture({
+      ciphertext: "CIPHERTEXT_SENTINEL_SECRET",
+      expectedPlaintextHash: sha256Hex("different"),
+    }),
+  );
+  assert.equal(parsed.ok, true);
+
+  const result = await verifyBackupSentinel({
+    verifier: parsed.verifier,
+    masterKeyHex: "e".repeat(64),
+    deriveAndDecryptEntrySentinel: () => plaintext,
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup sentinel verification failure");
+  }
+  assert.equal(result.message.includes(plaintext), false);
+  assert.equal(result.message.includes(parsed.verifier.ciphertext), false);
+  assert.equal(result.message.includes("e".repeat(64)), false);
+  assert.equal(result.message.includes(parsed.verifier.salt), false);
+  assert.equal(result.message.includes(parsed.verifier.recordId), false);
+  assert.equal(result.message.includes(parsed.verifier.expectedPlaintextHash), false);
 });

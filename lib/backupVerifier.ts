@@ -1,3 +1,5 @@
+import CryptoJS from "crypto-js";
+
 export type BackupVerifierDerivation = "entry-v1" | "note-v1";
 
 export interface BackupVerifier {
@@ -30,6 +32,33 @@ export interface BackupVerifierParseError {
 export type BackupVerifierParseResult =
   | { ok: true; verifier: BackupVerifier }
   | { ok: false; error: BackupVerifierParseError };
+
+export interface BackupSentinelDecryptInput {
+  masterKeyHex: string;
+  recordId: string;
+  salt: string;
+  ciphertext: string;
+}
+
+export interface VerifyBackupSentinelInput {
+  verifier: BackupVerifier;
+  masterKeyHex: string;
+  deriveAndDecryptEntrySentinel?: (input: BackupSentinelDecryptInput) => string | Promise<string>;
+  deriveAndDecryptNoteSentinel?: (input: BackupSentinelDecryptInput) => string | Promise<string>;
+}
+
+export type BackupSentinelVerificationResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason:
+        | "invalid-input"
+        | "unsupported-derivation"
+        | "missing-decryptor"
+        | "decrypt-failed"
+        | "hash-mismatch";
+      message: string;
+    };
 
 const MAX_RECORD_ID_LENGTH = 128;
 const MAX_SALT_HEX_LENGTH = 256;
@@ -111,6 +140,63 @@ export function getBackupVerifierFromMetadata(metadata: unknown): BackupVerifier
   return parseBackupVerifier(metadata.verifier);
 }
 
+export async function verifyBackupSentinel(
+  input: VerifyBackupSentinelInput,
+): Promise<BackupSentinelVerificationResult> {
+  const parsedVerifier = parseBackupVerifier(input.verifier);
+  if (!parsedVerifier.ok && parsedVerifier.error.code === "unsupported-derivation") {
+    return sentinelError("unsupported-derivation", "Backup verifier derivation is unsupported.");
+  }
+
+  if (
+    !parsedVerifier.ok ||
+    typeof input.masterKeyHex !== "string" ||
+    !/^[0-9a-f]{64}$/.test(input.masterKeyHex)
+  ) {
+    return sentinelError("invalid-input", "Backup verifier input is invalid.");
+  }
+
+  const verifier = parsedVerifier.verifier;
+
+  const decryptInput: BackupSentinelDecryptInput = {
+    masterKeyHex: input.masterKeyHex,
+    recordId: verifier.recordId,
+    salt: verifier.salt,
+    ciphertext: verifier.ciphertext,
+  };
+
+  let decryptor: ((input: BackupSentinelDecryptInput) => string | Promise<string>) | undefined;
+  if (verifier.derivation === "entry-v1") {
+    decryptor = input.deriveAndDecryptEntrySentinel;
+  } else if (verifier.derivation === "note-v1") {
+    decryptor = input.deriveAndDecryptNoteSentinel;
+  } else {
+    return sentinelError("unsupported-derivation", "Backup verifier derivation is unsupported.");
+  }
+
+  if (!decryptor) {
+    return sentinelError("missing-decryptor", "Backup verifier decryptor is unavailable.");
+  }
+
+  let plaintext: string;
+  try {
+    plaintext = await decryptor(decryptInput);
+  } catch {
+    return sentinelError("decrypt-failed", "Backup verifier could not be decrypted.");
+  }
+
+  if (typeof plaintext !== "string") {
+    return sentinelError("decrypt-failed", "Backup verifier could not be decrypted.");
+  }
+
+  const plaintextHash = CryptoJS.SHA256(plaintext).toString(CryptoJS.enc.Hex);
+  if (plaintextHash !== verifier.expectedPlaintextHash) {
+    return sentinelError("hash-mismatch", "Backup verifier hash did not match.");
+  }
+
+  return { ok: true };
+}
+
 function verifierError(
   code: BackupVerifierParseErrorCode,
   message: string,
@@ -124,6 +210,13 @@ function verifierError(
       path,
     },
   };
+}
+
+function sentinelError(
+  reason: Exclude<BackupSentinelVerificationResult, { ok: true }>["reason"],
+  message: string,
+): BackupSentinelVerificationResult {
+  return { ok: false, reason, message };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
