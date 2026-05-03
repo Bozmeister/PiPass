@@ -1,10 +1,10 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef } from "react";
 import { View, Text, TextInput, Pressable, Platform, ScrollView, Keyboard, KeyboardAvoidingView, Alert, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
-import { saveEntry, saveSecureNote } from "../workers/storageWorker";
+import { parsePipassBackup } from "../lib/backupSchema";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_ERROR, INPUT_BORDER_FOCUS, INPUT_BORDER_SUCCESS, LABEL_COLOR } from "../styles/inputTheme";
 
 const PROFILES = [
@@ -14,6 +14,12 @@ const PROFILES = [
 ];
 
 const MIN_PASSWORD_LENGTH = 8;
+
+interface StagedBackupSummary {
+  entries: number;
+  secureNotes: number;
+  warnings: string[];
+}
 
 interface SeedSetupScreenProps {
   onSetup: (password: string, iterations: number) => Promise<void> | void;
@@ -25,7 +31,8 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [selectedProfile, setSelectedProfile] = useState(1);
   const [importing, setImporting] = useState(false);
-  const [importedCount, setImportedCount] = useState<number | null>(null);
+  const [stagedBackupSummary, setStagedBackupSummary] = useState<StagedBackupSummary | null>(null);
+  const [backupStageError, setBackupStageError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [settingUp, setSettingUp] = useState(false);
@@ -65,38 +72,34 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
 
       if (!json) return;
 
-      const backup = JSON.parse(json);
-      if (!backup.version || !Array.isArray(backup.entries)) {
-        const msg = "This file doesn't appear to be a valid PiPass backup.";
-        if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Invalid File", msg); }
+      setImporting(true);
+      setBackupStageError(null);
+
+      const staged = parsePipassBackup(json);
+      if (!staged.ok) {
+        setStagedBackupSummary(null);
+        const msg = "This file is not a supported PiPass backup. Nothing was imported.";
+        setBackupStageError(msg);
+        if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Backup Not Supported", msg); }
         return;
       }
 
-      setImporting(true);
-      let count = 0;
-      for (const entry of backup.entries) {
-        if (entry.id && entry.title) {
-          await saveEntry(entry);
-          count++;
-        }
-      }
-      if (Array.isArray(backup.secureNotes)) {
-        for (const note of backup.secureNotes) {
-          if (note.id && note.encryptedContent) {
-            await saveSecureNote(note);
-            count++;
-          }
-        }
-      }
-      setImportedCount(count);
-      setImporting(false);
+      const summary = {
+        entries: staged.backup.counts.entries,
+        secureNotes: staged.backup.counts.secureNotes,
+        warnings: staged.backup.warnings,
+      };
+      setStagedBackupSummary(summary);
 
-      const msg = `Successfully imported ${count} items. Set your master password and security profile to unlock the vault.`;
-      if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Import Complete", msg); }
-    } catch (err) {
-      setImporting(false);
+      const msg = `Backup validated: ${summary.entries} entries, ${summary.secureNotes} secure notes. Import commit will be enabled in a future step.`;
+      if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Backup Validated", msg); }
+    } catch {
       const msg = "Could not read the backup file. Make sure it's a valid .vault file.";
+      setStagedBackupSummary(null);
+      setBackupStageError(msg);
       if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Import Failed", msg); }
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -293,7 +296,7 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
               <ActivityIndicator size="small" color="#fff" />
             ) : (
               <Text style={{ color: "#fff", fontSize: 16, fontWeight: "700" as const }}>
-                {importedCount !== null ? `Create Vault & Restore ${importedCount} Entries` : "Create Vault"}
+                Create Vault
               </Text>
             )}
           </Pressable>
@@ -323,11 +326,43 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
                 <>
                   <Ionicons name="cloud-upload-outline" size={18} color="#4CAF50" style={{ marginRight: 8 }} />
                   <Text style={{ color: "#4CAF50", fontSize: 15, fontWeight: "600" as const }}>
-                    {importedCount !== null ? `${importedCount} Entries Loaded` : "Import .vault Backup"}
+                    {stagedBackupSummary ? "Backup Validated" : "Validate .vault Backup"}
                   </Text>
                 </>
               )}
             </Pressable>
+            {stagedBackupSummary && (
+              <View style={{ backgroundColor: "#0f1a0f", borderWidth: 1, borderColor: "#214d21", borderRadius: 8, padding: 12, marginTop: 12 }}>
+                <Text style={{ color: "#4CAF50", fontSize: 13, fontWeight: "700" as const, marginBottom: 4 }}>
+                  Backup validated
+                </Text>
+                <Text style={{ color: "#aaa", fontSize: 12, lineHeight: 18 }}>
+                  {stagedBackupSummary.entries} entries and {stagedBackupSummary.secureNotes} secure notes were staged in memory only. Import commit will be enabled in a future step.
+                </Text>
+                {stagedBackupSummary.warnings.length > 0 && (
+                  <Text style={{ color: "#fbbf24", fontSize: 12, lineHeight: 18, marginTop: 8 }}>
+                    This encrypted backup still requires future compatibility verification before it can be imported.
+                  </Text>
+                )}
+                <Pressable
+                  onPress={() => {
+                    setStagedBackupSummary(null);
+                    setBackupStageError(null);
+                  }}
+                  style={{ marginTop: 10, alignSelf: "flex-start", paddingVertical: 6, paddingHorizontal: 8 }}
+                  testID="clear-staged-backup-button"
+                >
+                  <Text style={{ color: "#aaa", fontSize: 12, fontWeight: "600" as const }}>
+                    Clear selected backup
+                  </Text>
+                </Pressable>
+              </View>
+            )}
+            {backupStageError && (
+              <Text style={{ color: "#ef4444", fontSize: 12, lineHeight: 18, marginTop: 10 }}>
+                {backupStageError}
+              </Text>
+            )}
           </View>
         </ScrollView>
       </Pressable>
