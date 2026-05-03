@@ -12,6 +12,7 @@ import {
   saveKdfMetadata,
 } from "../storageWorker";
 import { logoutCurrentSession } from "../../lib/logout";
+import { parsePipassBackup } from "../../lib/backupSchema";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
 
@@ -88,6 +89,45 @@ function seedBaseState(storage: MemoryStorage): void {
   storage.items.set("pipass.auth.authHash", "a".repeat(64));
   storage.items.set("pipass.installId", "22222222-2222-4222-8222-222222222222");
   storage.items.set("deviceUUID", "33333333-3333-4333-8333-333333333333");
+}
+
+function validBackupFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: "pipass-backup",
+    version: 1,
+    format: "encrypted-local-records",
+    createdAt: 1234567890,
+    entries: [
+      {
+        id: "entry-a",
+        title: "encrypted-title-placeholder",
+        username: "encrypted-username-placeholder",
+        encryptedPassword: "encrypted-password-placeholder",
+        encryptedTitle: "encrypted-title-ciphertext",
+        encryptedUsername: "encrypted-username-ciphertext",
+        encryptedUrl: "encrypted-url-ciphertext",
+        url: "encrypted-url-display-placeholder",
+        notes: "encrypted-notes-ciphertext",
+        salt: "entry-salt-placeholder",
+        createdAt: 1,
+        updatedAt: 2,
+        encryptedAux: "encrypted-aux-placeholder",
+      },
+    ],
+    secureNotes: [
+      {
+        id: "note-a",
+        label: "encrypted-label-placeholder",
+        encryptedLabel: "encrypted-label-ciphertext",
+        encryptedContent: "encrypted-content-ciphertext",
+        salt: "note-salt-placeholder",
+        createdAt: 3,
+        updatedAt: 4,
+      },
+    ],
+    metadata: { app: "PiPass" },
+    ...overrides,
+  };
 }
 
 test("clearVault clears local vault data but preserves auth and install identity state", async (t) => {
@@ -352,4 +392,132 @@ test("clearKdfMetadata removes stored KDF metadata", async (t) => {
   assert.equal(storage.items.has("pipass_kdf_metadata"), false);
   assert.equal(await getKdfMetadata(), null);
   assert.deepEqual(await getKdfMetadataState(), { status: "missing", metadata: null });
+});
+
+test("backup parser stages valid v1 encrypted-local-records backup with entries and notes", () => {
+  const result = parsePipassBackup(JSON.stringify(validBackupFixture()));
+
+  assert.equal(result.ok, true);
+
+  assert.equal(result.backup.kind, "encrypted-local-records");
+  assert.equal(result.backup.counts.entries, 1);
+  assert.equal(result.backup.counts.secureNotes, 1);
+  assert.equal(result.backup.entries[0].id, "entry-a");
+  assert.equal(result.backup.secureNotes[0].id, "note-a");
+  assert.equal(result.backup.warnings.length, 1);
+});
+
+test("backup parser stages valid backup with missing secureNotes as an empty array", () => {
+  const backup = validBackupFixture();
+  delete backup.secureNotes;
+
+  const result = parsePipassBackup(backup);
+
+  assert.equal(result.ok, true);
+
+  assert.deepEqual(result.backup.secureNotes, []);
+  assert.equal(result.backup.counts.secureNotes, 0);
+});
+
+test("backup parser rejects missing schema", () => {
+  const backup = validBackupFixture();
+  delete backup.schema;
+
+  const result = parsePipassBackup(backup);
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup parser failure");
+  }
+  assert.equal(result.error.code, "missing-schema");
+});
+
+test("backup parser rejects unsupported version", () => {
+  const result = parsePipassBackup(validBackupFixture({ version: 2 }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup parser failure");
+  }
+  assert.equal(result.error.code, "unsupported-version");
+});
+
+test("backup parser rejects unsupported format", () => {
+  const result = parsePipassBackup(validBackupFixture({ format: "plaintext" }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup parser failure");
+  }
+  assert.equal(result.error.code, "unsupported-format");
+});
+
+test("backup parser rejects entries that are not an array", () => {
+  const result = parsePipassBackup(validBackupFixture({ entries: {} }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup parser failure");
+  }
+  assert.equal(result.error.code, "entries-not-array");
+});
+
+test("backup parser rejects secureNotes that are present but not an array", () => {
+  const result = parsePipassBackup(validBackupFixture({ secureNotes: {} }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup parser failure");
+  }
+  assert.equal(result.error.code, "secure-notes-not-array");
+});
+
+test("backup parser rejects entries missing required encrypted-record fields", () => {
+  const backup = validBackupFixture();
+  const entries = backup.entries as Array<Record<string, unknown>>;
+  delete entries[0].encryptedPassword;
+
+  const result = parsePipassBackup(backup);
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup parser failure");
+  }
+  assert.equal(result.error.code, "invalid-entry");
+  assert.equal(result.error.path, "entries[0].encryptedPassword");
+});
+
+test("backup parser rejects secure notes missing encrypted content", () => {
+  const backup = validBackupFixture();
+  const secureNotes = backup.secureNotes as Array<Record<string, unknown>>;
+  delete secureNotes[0].encryptedContent;
+
+  const result = parsePipassBackup(backup);
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup parser failure");
+  }
+  assert.equal(result.error.code, "invalid-secure-note");
+  assert.equal(result.error.path, "secureNotes[0].encryptedContent");
+});
+
+test("backup parser returns a controlled error for invalid JSON", () => {
+  const result = parsePipassBackup("{not-json");
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup parser failure");
+  }
+  assert.equal(result.error.code, "invalid-json");
+});
+
+test("backup parser does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const result = parsePipassBackup(validBackupFixture());
+
+  assert.equal(result.ok, true);
+  assert.equal(storage.items.size, 0);
 });

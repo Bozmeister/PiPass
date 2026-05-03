@@ -194,6 +194,8 @@ Preferred future UX:
 - "Create vault" should perform the real commit.
 - The user should not see "entries loaded" if records have already been committed but setup can still fail.
 
+Prompt 041 adds pure versioned backup parsing/staging helpers for `schema: "pipass-backup"`, `version: 1`, and `format: "encrypted-local-records"`. These helpers validate and classify backup content in memory only; they are not wired into runtime import and do not prove ciphertext compatibility.
+
 ## 10. Test Plan
 
 Before changing runtime behavior, add tests for:
