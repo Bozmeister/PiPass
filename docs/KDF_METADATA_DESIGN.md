@@ -156,13 +156,14 @@ Migration should not change entry ciphertext, note ciphertext, server vault blob
 
 ## 7. New-Vault Setup Behaviour
 
-New vault setup should require Argon2id by default.
+New vault setup requires Argon2id by default as of Prompt 039.
 
-Recommended policy:
+Current policy:
 
 - do not silently create a new vault under PBKDF2 fallback
-- if Argon2id is unavailable, setup should stop with a clear local error
-- no local master hash, profile metadata, initialized marker, recovery hash, cached key, or entries should be committed for that failed setup
+- write `pipass_kdf_metadata` with `algorithm: "argon2id"`, `source: "setup"`, and the actual Argon2id parameters used
+- if Argon2id is unavailable, setup stops with a clear local error
+- no local master hash, salt, profile metadata, KDF metadata, initialized marker, recovery hash, cached key, or active shares are committed for that failed setup
 - PBKDF2 should remain available only for unlocking legacy vaults that are proven by `pipass_master_hash` to have used PBKDF2
 
 An explicit user-visible "compatibility mode" for PBKDF2 could be designed later, but it should not be the default. If it is ever added, metadata must record it at setup time and the UI must communicate the weaker local KDF posture honestly.

@@ -51,23 +51,31 @@ Security profiles are UI labels for iteration counts:
 
 ### Setup Commit In App Root
 
-The setup callback in `app/(tabs)/index.tsx` currently performs this sequence:
+The setup callback in `app/(tabs)/index.tsx` now delegates the commit-sensitive setup work to `performFirstTimeVaultSetup()`.
+
+Current sequence:
 
 1. Clamp iterations with `Math.max(iters || 100000, 3)`.
 2. Generate a 32-byte hex master salt with `generateMasterSalt()`.
-3. Derive key shares with `deriveMasterKeyShares(password, salt, validIters)`.
-4. Combine shares into `keyHex` for verifier/cache setup.
-5. Store `hashMasterKey(keyHex)` under `pipass_master_hash`.
-6. Generate a 32-byte recovery key.
-7. Store `hashRecoveryKey(rawKey)` under `pipass_recovery_key_hash`.
-8. Store `pipass_master_salt`.
-9. Store `pipass_security_profile`.
-10. Store cached master key with `storeMasterKeySecurely(keyHex)` on native only.
-11. Hold the newly derived shares in `pendingSetupShares`.
-12. Show `RecoveryKeyModal`.
-13. Only after the user confirms the recovery key, call `setVaultInitialized(true)` and move `pendingSetupShares` into active `keyShares`.
+3. Compute the Argon2id parameters for the selected profile.
+4. Derive the initial master key with `deriveMasterKeyWithArgon2id()` only.
+5. If Argon2id is unavailable or fails, stop setup before writing setup metadata or publishing shares.
+6. Build `pipass_kdf_metadata` with `algorithm: "argon2id"` and `source: "setup"` from the same parameters used for derivation.
+7. Split the derived master key into shares.
+8. Store `hashMasterKey(keyHex)` under `pipass_master_hash`.
+9. Generate a 32-byte recovery key.
+10. Store `hashRecoveryKey(rawKey)` under `pipass_recovery_key_hash`.
+11. Store `pipass_master_salt`.
+12. Store `pipass_security_profile`.
+13. Store `pipass_kdf_metadata`.
+14. Store cached master key with `storeMasterKeySecurely(keyHex)` on native only.
+15. Hold the newly derived shares in `pendingSetupShares`.
+16. Show `RecoveryKeyModal`.
+17. Only after the user confirms the recovery key, call `setVaultInitialized(true)` and move `pendingSetupShares` into active `keyShares`.
 
 Important boundary: `pipass_vault_initialized` is not set until the recovery-key modal is confirmed. Local metadata and cached key are written before that confirmation.
+
+New vault setup does not use the legacy PBKDF2 fallback path. PBKDF2 remains available only for existing legacy unlock compatibility.
 
 ### Backup Import During Setup
 

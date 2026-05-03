@@ -22,10 +22,16 @@ import {
   saveRecoveryKeyHash,
   storeMasterKeySecurely,
 } from "../../workers/storageWorker";
-import { generateMasterSalt, hashMasterKey, planUnlockKdfDerivation } from "../../crypto/keyDerivation";
+import {
+  deriveMasterKeyWithArgon2id,
+  generateMasterSalt,
+  hashMasterKey,
+  planUnlockKdfDerivation,
+} from "../../crypto/keyDerivation";
 import { deriveMasterKeyShares } from "../../workers/vaultWorker";
 import { KeyShares, wipeShares, combineShares, splitKeyIntoShares } from "../../crypto/secureMemory";
 import { performCurrentUnlockVerification } from "../../lib/currentUnlock";
+import { performFirstTimeVaultSetup } from "../../lib/firstTimeSetup";
 import {
   runIntegrityCheck,
   setTamperCallback,
@@ -141,27 +147,30 @@ export default function HomeScreen() {
   if (!vaultExists) {
     return (
       <SeedSetupScreen onSetup={async (password, iters) => {
-        const validIters = Math.max(iters || 100000, 3);
-        const salt = generateMasterSalt();
+        const setup = await performFirstTimeVaultSetup(
+          { password, iterations: iters },
+          {
+            generateMasterSalt,
+            deriveMasterKeyWithArgon2id,
+            splitKeyIntoShares,
+            hashMasterKey,
+            generateRecoveryKey,
+            hashRecoveryKey,
+            saveMasterSalt,
+            saveMasterKeyHash,
+            saveSecurityProfile,
+            saveKdfMetadata,
+            saveRecoveryKeyHash,
+            storeMasterKeySecurely,
+            wipeShares,
+          },
+        );
 
-        const shares = await deriveMasterKeyShares(password, salt, validIters);
-        const keyHex = combineShares(shares);
-        const keyHash = hashMasterKey(keyHex);
-
-        const rawKey = generateRecoveryKey();
-        const keyHashRecovery = hashRecoveryKey(rawKey);
-
-        await saveMasterSalt(salt);
-        await saveMasterKeyHash(keyHash);
-        await saveSecurityProfile(validIters);
-        await saveRecoveryKeyHash(keyHashRecovery);
-        await storeMasterKeySecurely(keyHex);
-
-        setMasterSaltState(salt);
-        setIterations(validIters);
-        setPendingSetupShares(shares);
-        setPendingRecoveryRawHex(rawKey);
-        setPendingRecoveryKey(formatRecoveryKey(rawKey));
+        setMasterSaltState(setup.salt);
+        setIterations(setup.iterations);
+        setPendingSetupShares(setup.shares);
+        setPendingRecoveryRawHex(setup.rawRecoveryKeyHex);
+        setPendingRecoveryKey(formatRecoveryKey(setup.rawRecoveryKeyHex));
       }} />
     );
   }

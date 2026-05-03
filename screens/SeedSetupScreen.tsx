@@ -16,7 +16,7 @@ const PROFILES = [
 const MIN_PASSWORD_LENGTH = 8;
 
 interface SeedSetupScreenProps {
-  onSetup: (password: string, iterations: number) => void;
+  onSetup: (password: string, iterations: number) => Promise<void> | void;
 }
 
 export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
@@ -27,6 +27,8 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
   const [importing, setImporting] = useState(false);
   const [importedCount, setImportedCount] = useState<number | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [settingUp, setSettingUp] = useState(false);
   const passwordRef = useRef<TextInput>(null);
   const webTopInset = Platform.OS === "web" ? 67 : 0;
   const [focusedField, setFocusedField] = useState<string | null>(null);
@@ -98,10 +100,18 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
     }
   }
 
-  function handleConfirm() {
-    if (!isValid) return;
+  async function handleConfirm() {
+    if (!isValid || settingUp) return;
     Keyboard.dismiss();
-    onSetup(password, PROFILES[selectedProfile].iterations);
+    setSetupError(null);
+    setSettingUp(true);
+    try {
+      await onSetup(password, PROFILES[selectedProfile].iterations);
+    } catch {
+      setSetupError("PiPass could not start its secure key-derivation engine on this device. Your vault has not been created or changed. Please restart the app, update the app, or try again later.");
+    } finally {
+      setSettingUp(false);
+    }
   }
 
   return (
@@ -272,17 +282,26 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
 
           <Pressable
             onPress={handleConfirm}
-            disabled={!isValid}
+            disabled={!isValid || settingUp}
             style={{
-              backgroundColor: isValid ? "#4CAF50" : "#333",
+              backgroundColor: isValid && !settingUp ? "#4CAF50" : "#333",
               paddingVertical: 16, borderRadius: 8, alignItems: "center",
             }}
             testID="confirm-setup-button"
           >
-            <Text style={{ color: "#fff", fontSize: 16, fontWeight: "700" as const }}>
-              {importedCount !== null ? `Create Vault & Restore ${importedCount} Entries` : "Create Vault"}
-            </Text>
+            {settingUp ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={{ color: "#fff", fontSize: 16, fontWeight: "700" as const }}>
+                {importedCount !== null ? `Create Vault & Restore ${importedCount} Entries` : "Create Vault"}
+              </Text>
+            )}
           </Pressable>
+          {setupError && (
+            <Text style={{ color: "#ef4444", fontSize: 13, lineHeight: 18, marginTop: 12, textAlign: "center" }}>
+              {setupError}
+            </Text>
+          )}
 
           <View style={{ marginTop: 32, borderTopWidth: 1, borderTopColor: "#222", paddingTop: 24 }}>
             <Text style={{ color: "#888", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 10 }}>

@@ -15,6 +15,10 @@ import {
 } from "../keyDerivation";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import { performCurrentUnlockVerification } from "../../lib/currentUnlock";
+import {
+  FirstTimeVaultSetupError,
+  performFirstTimeVaultSetup,
+} from "../../lib/firstTimeSetup";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../kdfMetadata";
 import type { KeyShares } from "../secureMemory";
@@ -1102,4 +1106,195 @@ test("current unlock verification allows unlock with warning when KDF metadata p
     warning: "kdf-metadata-persist-failed",
   });
   assert.deepEqual(events, ["save-kdf-metadata", "split", "cache"]);
+});
+
+test("first-time vault setup derives with explicit Argon2id and writes setup metadata", async () => {
+  const shares = fakeShares();
+  const events: string[] = [];
+  let savedMetadata: KdfMetadata | null = null;
+
+  const result = await performFirstTimeVaultSetup(
+    { password: TEST_PASSWORD, iterations: 1000 },
+    {
+      generateMasterSalt: () => {
+        events.push("salt");
+        return TEST_SALT;
+      },
+      deriveMasterKeyWithArgon2id: async (_password, _salt, parameters) => {
+        events.push(`argon2id-${parameters.memoryKiB}-${parameters.timeCost}-${parameters.parallelism}`);
+        return "3".repeat(64);
+      },
+      splitKeyIntoShares: (masterKeyHex) => {
+        events.push(`split-${masterKeyHex}`);
+        return shares;
+      },
+      hashMasterKey: (masterKeyHex) => {
+        events.push(`hash-${masterKeyHex}`);
+        return "master-hash";
+      },
+      generateRecoveryKey: () => {
+        events.push("recovery-key");
+        return "4".repeat(64);
+      },
+      hashRecoveryKey: (rawKeyHex) => {
+        events.push(`recovery-hash-${rawKeyHex}`);
+        return "recovery-hash";
+      },
+      saveMasterSalt: async (salt) => {
+        events.push(`save-salt-${salt}`);
+      },
+      saveMasterKeyHash: async (hash) => {
+        events.push(`save-master-hash-${hash}`);
+      },
+      saveSecurityProfile: async (iterations) => {
+        events.push(`save-profile-${iterations}`);
+      },
+      saveKdfMetadata: async (metadata) => {
+        savedMetadata = metadata;
+        events.push(`save-kdf-${metadata.algorithm}-${metadata.source}`);
+      },
+      saveRecoveryKeyHash: async (hash) => {
+        events.push(`save-recovery-hash-${hash}`);
+      },
+      storeMasterKeySecurely: async (masterKeyHex) => {
+        events.push(`cache-${masterKeyHex}`);
+      },
+      wipeShares: () => {
+        events.push("wipe");
+      },
+    },
+  );
+
+  assert.equal(result.salt, TEST_SALT);
+  assert.equal(result.iterations, 1000);
+  assert.equal(result.shares, shares);
+  assert.equal(result.rawRecoveryKeyHex, "4".repeat(64));
+  assert.equal(result.kdfMetadata.algorithm, "argon2id");
+  assert.equal(result.kdfMetadata.source, "setup");
+  assert.equal(result.kdfMetadata.profileIterations, 1000);
+  assert.deepEqual(result.kdfMetadata.parameters, {
+    memoryKiB: 65536,
+    timeCost: 3,
+    parallelism: 4,
+    outputBytes: 32,
+  });
+  assert.deepEqual(savedMetadata, result.kdfMetadata);
+  assert.deepEqual(events, [
+    "salt",
+    "argon2id-65536-3-4",
+    `split-${"3".repeat(64)}`,
+    `hash-${"3".repeat(64)}`,
+    "recovery-key",
+    `recovery-hash-${"4".repeat(64)}`,
+    `save-salt-${TEST_SALT}`,
+    "save-master-hash-master-hash",
+    "save-profile-1000",
+    "save-kdf-argon2id-setup",
+    "save-recovery-hash-recovery-hash",
+    `cache-${"3".repeat(64)}`,
+  ]);
+});
+
+test("first-time vault setup failure does not fall back or write partial setup state", async () => {
+  const events: string[] = [];
+
+  await assert.rejects(
+    performFirstTimeVaultSetup(
+      { password: TEST_PASSWORD, iterations: 1000 },
+      {
+        generateMasterSalt: () => {
+          events.push("salt");
+          return TEST_SALT;
+        },
+        deriveMasterKeyWithArgon2id: async () => {
+          events.push("argon2id");
+          throw new Error("Argon2id unavailable");
+        },
+        splitKeyIntoShares: () => {
+          events.push("split");
+          return fakeShares();
+        },
+        hashMasterKey: () => {
+          events.push("hash");
+          return "master-hash";
+        },
+        generateRecoveryKey: () => {
+          events.push("recovery-key");
+          return "4".repeat(64);
+        },
+        hashRecoveryKey: () => {
+          events.push("recovery-hash");
+          return "recovery-hash";
+        },
+        saveMasterSalt: async () => {
+          events.push("save-salt");
+        },
+        saveMasterKeyHash: async () => {
+          events.push("save-master-hash");
+        },
+        saveSecurityProfile: async () => {
+          events.push("save-profile");
+        },
+        saveKdfMetadata: async () => {
+          events.push("save-kdf");
+        },
+        saveRecoveryKeyHash: async () => {
+          events.push("save-recovery-hash");
+        },
+        storeMasterKeySecurely: async () => {
+          events.push("cache");
+        },
+        wipeShares: () => {
+          events.push("wipe");
+        },
+      },
+    ),
+    (err: unknown) =>
+      err instanceof FirstTimeVaultSetupError &&
+      err.message === "Argon2id setup derivation failed",
+  );
+
+  assert.deepEqual(events, ["salt", "argon2id"]);
+});
+
+test("first-time vault setup wipes derived shares if setup commit fails", async () => {
+  const shares = fakeShares();
+  const events: string[] = [];
+
+  await assert.rejects(
+    performFirstTimeVaultSetup(
+      { password: TEST_PASSWORD, iterations: 1000 },
+      {
+        generateMasterSalt: () => TEST_SALT,
+        deriveMasterKeyWithArgon2id: async () => "5".repeat(64),
+        splitKeyIntoShares: () => {
+          events.push("split");
+          return shares;
+        },
+        hashMasterKey: () => "master-hash",
+        generateRecoveryKey: () => "6".repeat(64),
+        hashRecoveryKey: () => "recovery-hash",
+        saveMasterSalt: async () => {},
+        saveMasterKeyHash: async () => {},
+        saveSecurityProfile: async () => {},
+        saveKdfMetadata: async () => {
+          events.push("save-kdf");
+          throw new Error("write failed");
+        },
+        saveRecoveryKeyHash: async () => {
+          events.push("save-recovery-hash");
+        },
+        storeMasterKeySecurely: async () => {
+          events.push("cache");
+        },
+        wipeShares: (sharesToWipe) => {
+          assert.equal(sharesToWipe, shares);
+          events.push("wipe");
+        },
+      },
+    ),
+    /write failed/,
+  );
+
+  assert.deepEqual(events, ["split", "save-kdf", "wipe"]);
 });

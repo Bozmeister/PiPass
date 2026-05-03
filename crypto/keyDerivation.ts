@@ -162,7 +162,10 @@ function safeProfileIterations(iterations: number): number {
   return Math.max(iterations || 100000, 3);
 }
 
-function getArgon2idParameters(profileIterations: number, kdfVersion: KdfVersion): Argon2idKdfParameters {
+export function getArgon2idKdfParameters(
+  profileIterations: number,
+  kdfVersion: KdfVersion = "v1",
+): Argon2idKdfParameters {
   const safeIterations = safeProfileIterations(profileIterations);
   const config = KDF_CONFIGS[kdfVersion];
   return {
@@ -276,7 +279,7 @@ export async function detectLegacyKdfFromMasterHash(
   const derivationOptions: KdfDerivationOptions = options.deviceUUID
     ? { deviceUUID: options.deviceUUID }
     : {};
-  const argon2idParameters = getArgon2idParameters(profileIterations, kdfVersion);
+  const argon2idParameters = getArgon2idKdfParameters(profileIterations, kdfVersion);
   const pbkdf2Parameters = getPbkdf2Parameters(profileIterations);
   const deriveArgon2id = options.deriveArgon2id ?? deriveMasterKeyWithArgon2id;
   const derivePbkdf2 = options.derivePbkdf2 ?? deriveMasterKeyWithPbkdf2;
