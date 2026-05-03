@@ -23,6 +23,7 @@ import {
 import { generateMasterSalt, hashMasterKey } from "../../crypto/keyDerivation";
 import { deriveMasterKeyShares } from "../../workers/vaultWorker";
 import { KeyShares, wipeShares, combineShares } from "../../crypto/secureMemory";
+import { performCurrentUnlockVerification } from "../../lib/currentUnlock";
 import {
   runIntegrityCheck,
   setTamperCallback,
@@ -295,20 +296,25 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
     setError(null);
 
     try {
-      const shares = await deriveMasterKeyShares(password, salt, iterations);
-      const keyHex = combineShares(shares);
-      const keyHash = hashMasterKey(keyHex);
-      const storedHash = await getMasterKeyHash();
+      const result = await performCurrentUnlockVerification(
+        { password, salt, iterations },
+        {
+          deriveMasterKeyShares,
+          combineShares,
+          hashMasterKey,
+          getMasterKeyHash,
+          storeMasterKeySecurely,
+          wipeShares,
+        },
+      );
 
-      if (storedHash && keyHash !== storedHash) {
-        wipeShares(shares);
+      if (!result.ok) {
         setError("Incorrect password. Please try again.");
         setUnlocking(false);
         return;
       }
 
-      await storeMasterKeySecurely(keyHex);
-      onUnlocked(shares);
+      onUnlocked(result.shares);
     } catch {
       setError("Failed to derive key. Please try again.");
     }

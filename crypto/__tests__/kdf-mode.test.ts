@@ -14,8 +14,10 @@ import {
   planUnlockKdfDerivation,
 } from "../keyDerivation";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
+import { performCurrentUnlockVerification } from "../../lib/currentUnlock";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../kdfMetadata";
+import type { KeyShares } from "../secureMemory";
 
 const TEST_PASSWORD = "test password only";
 const TEST_SALT = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -53,6 +55,13 @@ class MemoryStorage {
 
 function assertHexKey(value: string): void {
   assert.match(value, /^[0-9a-f]{64}$/);
+}
+
+function fakeShares(): KeyShares {
+  return {
+    shareA: new Uint8Array([1, 2, 3, 4]),
+    shareB: new Uint8Array([5, 6, 7, 8]),
+  };
 }
 
 test("explicit PBKDF2 helper is deterministic", async () => {
@@ -525,6 +534,177 @@ test("unlock KDF planner does not write KDF metadata to storage", async () => {
         }),
       }),
     });
+
+    assert.equal(result.ok, true);
+    assert.equal(storage.items.has("pipass_kdf_metadata"), false);
+  } finally {
+    setPlatformStorageDriverForTests(null);
+  }
+});
+
+test("current unlock verification succeeds when the derived hash matches the stored master hash", async () => {
+  const shares = fakeShares();
+  const events: string[] = [];
+
+  const result = await performCurrentUnlockVerification(
+    { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+    {
+      deriveMasterKeyShares: async () => {
+        events.push("derive");
+        return shares;
+      },
+      combineShares: () => {
+        events.push("combine");
+        return "a".repeat(64);
+      },
+      hashMasterKey: () => {
+        events.push("hash");
+        return "stored-hash";
+      },
+      getMasterKeyHash: async () => {
+        events.push("get-stored-hash");
+        return "stored-hash";
+      },
+      storeMasterKeySecurely: async () => {
+        events.push("cache");
+      },
+      wipeShares: () => {
+        events.push("wipe");
+      },
+    },
+  );
+
+  assert.deepEqual(result, { ok: true, shares });
+  assert.deepEqual(events, ["derive", "combine", "hash", "get-stored-hash", "cache"]);
+});
+
+test("current unlock verification fails and wipes newly derived shares when the hash mismatches", async () => {
+  const shares = fakeShares();
+  const events: string[] = [];
+
+  const result = await performCurrentUnlockVerification(
+    { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+    {
+      deriveMasterKeyShares: async () => {
+        events.push("derive");
+        return shares;
+      },
+      combineShares: () => {
+        events.push("combine");
+        return "b".repeat(64);
+      },
+      hashMasterKey: () => {
+        events.push("hash");
+        return "candidate-hash";
+      },
+      getMasterKeyHash: async () => {
+        events.push("get-stored-hash");
+        return "stored-hash";
+      },
+      storeMasterKeySecurely: async () => {
+        events.push("cache");
+      },
+      wipeShares: (sharesToWipe) => {
+        assert.equal(sharesToWipe, shares);
+        events.push("wipe");
+      },
+    },
+  );
+
+  assert.deepEqual(result, { ok: false, reason: "hash-mismatch" });
+  assert.deepEqual(events, ["derive", "combine", "hash", "get-stored-hash", "wipe"]);
+});
+
+test("current unlock verification preserves legacy tolerance when stored master hash is missing", async () => {
+  const shares = fakeShares();
+  const events: string[] = [];
+
+  const result = await performCurrentUnlockVerification(
+    { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+    {
+      deriveMasterKeyShares: async () => {
+        events.push("derive");
+        return shares;
+      },
+      combineShares: () => {
+        events.push("combine");
+        return "c".repeat(64);
+      },
+      hashMasterKey: () => {
+        events.push("hash");
+        return "candidate-hash";
+      },
+      getMasterKeyHash: async () => {
+        events.push("get-stored-hash");
+        return null;
+      },
+      storeMasterKeySecurely: async () => {
+        events.push("cache");
+      },
+      wipeShares: () => {
+        events.push("wipe");
+      },
+    },
+  );
+
+  assert.deepEqual(result, { ok: true, shares });
+  assert.deepEqual(events, ["derive", "combine", "hash", "get-stored-hash", "cache"]);
+});
+
+test("current unlock verification propagates cached-key failures before publishing shares", async () => {
+  const shares = fakeShares();
+  const events: string[] = [];
+
+  await assert.rejects(
+    performCurrentUnlockVerification(
+      { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+      {
+        deriveMasterKeyShares: async () => {
+          events.push("derive");
+          return shares;
+        },
+        combineShares: () => {
+          events.push("combine");
+          return "d".repeat(64);
+        },
+        hashMasterKey: () => {
+          events.push("hash");
+          return "stored-hash";
+        },
+        getMasterKeyHash: async () => {
+          events.push("get-stored-hash");
+          return "stored-hash";
+        },
+        storeMasterKeySecurely: async () => {
+          events.push("cache");
+          throw new Error("cache failed");
+        },
+        wipeShares: () => {
+          events.push("wipe");
+        },
+      },
+    ),
+    /cache failed/,
+  );
+
+  assert.deepEqual(events, ["derive", "combine", "hash", "get-stored-hash", "cache"]);
+});
+
+test("current unlock verification does not read or write KDF metadata", async () => {
+  const storage = new MemoryStorage();
+  setPlatformStorageDriverForTests(storage.driver);
+  try {
+    const result = await performCurrentUnlockVerification(
+      { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
+      {
+        deriveMasterKeyShares: async () => fakeShares(),
+        combineShares: () => "e".repeat(64),
+        hashMasterKey: () => "stored-hash",
+        getMasterKeyHash: async () => "stored-hash",
+        storeMasterKeySecurely: async () => {},
+        wipeShares: () => {},
+      },
+    );
 
     assert.equal(result.ok, true);
     assert.equal(storage.items.has("pipass_kdf_metadata"), false);
