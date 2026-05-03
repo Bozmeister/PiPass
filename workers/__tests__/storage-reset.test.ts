@@ -20,7 +20,10 @@ import {
   type BackupCompatibilityContext,
   type BackupStageResult,
 } from "../../lib/backupSchema";
-import { verifyStagedBackupDecryptability } from "../../lib/backupDecryptVerification";
+import {
+  verifyStagedBackupDecryptability,
+  type BackupDecryptVerificationResult,
+} from "../../lib/backupDecryptVerification";
 import {
   getBackupVerifierFromMetadata,
   isBackupVerifier,
@@ -56,6 +59,7 @@ import {
   readSetupImportStateSnapshot,
   type SetupImportSnapshotReadDriver,
 } from "../../lib/startupRepairDecision";
+import { decideStagedBackupCommitGate } from "../../lib/stagedBackupCommitGate";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -334,6 +338,63 @@ function localCompatibilityContext(overrides: Record<string, unknown> = {}) {
     ...context,
     ...overrides,
   } as BackupCompatibilityContext;
+}
+
+function compatibleBackupGateResult(warnings: string[] = []) {
+  return {
+    status: "compatible" as const,
+    reason: "same-install-metadata-match",
+    warnings,
+  };
+}
+
+function incompatibleBackupGateResult(warnings: string[] = []) {
+  return {
+    status: "incompatible" as const,
+    reason: "kdf-metadata-mismatch",
+    warnings,
+  };
+}
+
+function unknownBackupGateResult(warnings: string[] = []) {
+  return {
+    status: "unknown" as const,
+    reason: "missing-compatibility-metadata",
+    warnings,
+  };
+}
+
+function decryptabilityGateResult(ok: boolean = true): BackupDecryptVerificationResult {
+  if (ok) {
+    return {
+      ok: true as const,
+      counts: {
+        entriesChecked: 1,
+        notesChecked: 1,
+        entriesFailed: 0,
+        notesFailed: 0,
+      },
+      failures: [],
+    };
+  }
+
+  return {
+    ok: false as const,
+    counts: {
+      entriesChecked: 1,
+      notesChecked: 1,
+      entriesFailed: 1,
+      notesFailed: 0,
+    },
+    failures: [
+      {
+        kind: "entry" as const,
+        id: "entry-a",
+        index: 0,
+        reason: "decrypt-failed" as const,
+      },
+    ],
+  };
 }
 
 function commitSetupMetadataFixture(overrides: Record<string, unknown> = {}) {
@@ -1520,6 +1581,251 @@ test("staged backup decrypt verification handles missing decryptors as controlle
     { kind: "entry", id: "entry-a", index: 0, reason: "missing-decryptor" },
     { kind: "secure-note", id: "note-a", index: 0, reason: "missing-decryptor" },
   ]);
+});
+
+test("staged backup commit gate allows setup-only when no backup is staged", () => {
+  const decision = decideStagedBackupCommitGate({ stagedBackupPresent: false });
+
+  assert.deepEqual(decision, {
+    allowed: true,
+    mode: "setup-only",
+    reason: "no-backup",
+    warnings: [],
+    safeMessage: "No staged backup is attached. Setup can continue without importing backup records.",
+  });
+});
+
+test("staged backup commit gate blocks unsupported format", () => {
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "portable-encrypted-records",
+    compatibility: compatibleBackupGateResult(),
+    decryptability: decryptabilityGateResult(),
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.mode, "setup-only");
+  assert.equal(decision.reason, "unsupported-format");
+});
+
+test("staged backup commit gate blocks incompatible compatibility", () => {
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: incompatibleBackupGateResult(),
+    decryptability: decryptabilityGateResult(),
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, "incompatible");
+});
+
+test("staged backup commit gate blocks unknown compatibility by default", () => {
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: unknownBackupGateResult(),
+    decryptability: decryptabilityGateResult(),
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, "unknown-compatibility");
+});
+
+test("staged backup commit gate allowUnknownCompatibility still requires decryptability", () => {
+  const missingDecryptability = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: unknownBackupGateResult(),
+    options: { allowUnknownCompatibility: true },
+  });
+  const passingDecryptability = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: unknownBackupGateResult(),
+    decryptability: decryptabilityGateResult(),
+    options: { allowUnknownCompatibility: true },
+  });
+
+  assert.equal(missingDecryptability.allowed, false);
+  assert.equal(missingDecryptability.reason, "decryptability-not-run");
+  assert.equal(passingDecryptability.allowed, true);
+  assert.equal(passingDecryptability.mode, "commit-staged-backup");
+});
+
+test("staged backup commit gate blocks invalid verifier", () => {
+  const verifier = parseBackupVerifier(validBackupVerifierFixture({ version: 2 }));
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult(),
+    verifier,
+    decryptability: decryptabilityGateResult(),
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, "invalid-verifier");
+});
+
+test("staged backup commit gate allows missing verifier by default when decryptability passes", () => {
+  const verifier = getBackupVerifierFromMetadata({});
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult(),
+    verifier,
+    decryptability: decryptabilityGateResult(),
+  });
+
+  assert.equal(decision.allowed, true);
+  assert.equal(decision.mode, "commit-staged-backup");
+  assert.equal(decision.reason, "allowed");
+});
+
+test("staged backup commit gate blocks missing verifier when required", () => {
+  const verifier = getBackupVerifierFromMetadata({});
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult(),
+    verifier,
+    decryptability: decryptabilityGateResult(),
+    options: { requireVerifier: true },
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, "missing-verifier");
+});
+
+test("staged backup commit gate blocks verifier present but sentinel not run", () => {
+  const verifier = parseBackupVerifier(validBackupVerifierFixture());
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult(),
+    verifier,
+    decryptability: decryptabilityGateResult(),
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, "sentinel-failed");
+});
+
+test("staged backup commit gate blocks sentinel failure", () => {
+  const verifier = parseBackupVerifier(validBackupVerifierFixture());
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult(),
+    verifier,
+    sentinelVerification: {
+      ok: false,
+      reason: "hash-mismatch",
+      message: "Backup verifier hash did not match.",
+    },
+    decryptability: decryptabilityGateResult(),
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, "sentinel-failed");
+});
+
+test("staged backup commit gate blocks missing decryptability", () => {
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult(),
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, "decryptability-not-run");
+});
+
+test("staged backup commit gate blocks decryptability failure", () => {
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult(),
+    decryptability: decryptabilityGateResult(false),
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, "decryptability-failed");
+});
+
+test("staged backup commit gate allows compatible backup with decryptability success", () => {
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult(),
+    decryptability: decryptabilityGateResult(),
+  });
+
+  assert.deepEqual(decision, {
+    allowed: true,
+    mode: "commit-staged-backup",
+    reason: "allowed",
+    warnings: [],
+    safeMessage: "This staged backup passed the required import gates.",
+  });
+});
+
+test("staged backup commit gate blocks honeytoken warnings unless allowed", () => {
+  const warning = "backup contains encrypted honeytoken aux metadata with SECRET_RECORD_ID";
+  const blocked = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult([warning]),
+    decryptability: decryptabilityGateResult(),
+  });
+  const allowed = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult([warning]),
+    decryptability: decryptabilityGateResult(),
+    options: { allowHoneytokenWarnings: true },
+  });
+
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.reason, "warnings-blocked");
+  assert.deepEqual(blocked.warnings, [
+    "Backup contains decoy trigger metadata that may need review after import.",
+  ]);
+  assert.equal(allowed.allowed, true);
+  assert.equal(allowed.reason, "allowed");
+});
+
+test("staged backup commit gate output contains no secret raw backup values", () => {
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult([
+      "CIPHERTEXT_SECRET SALT_SECRET HASH_SECRET deviceUUID SECRET_RECORD_ID",
+    ]),
+    decryptability: decryptabilityGateResult(false),
+  });
+  const serialized = JSON.stringify(decision);
+
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+  assert.equal(serialized.includes("SALT_SECRET"), false);
+  assert.equal(serialized.includes("HASH_SECRET"), false);
+  assert.equal(serialized.includes("deviceUUID"), false);
+  assert.equal(serialized.includes("SECRET_RECORD_ID"), false);
+});
+
+test("staged backup commit gate does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const decision = decideStagedBackupCommitGate({
+    stagedBackupPresent: true,
+    format: "encrypted-local-records",
+    compatibility: compatibleBackupGateResult(),
+    decryptability: decryptabilityGateResult(),
+  });
+
+  assert.equal(decision.allowed, true);
+  assert.equal(storage.items.size, 0);
 });
 
 test("SeedSetupScreen backup selection remains staged-only without immediate writes", () => {

@@ -19,6 +19,8 @@ Current first-time setup backup behavior is intentionally temporary:
 
 This bridge should remain until the runtime gates below are implemented and tested.
 
+Prompt 069 implementation note: `decideStagedBackupCommitGate()` now combines already-supplied compatibility, verifier, sentinel, decryptability, and warning results into a safe pure commit decision. It does not derive keys, decrypt records, write storage, or wire runtime commit.
+
 ## 3. Eligible Backup Formats
 
 First runtime commit implementation should accept only:
