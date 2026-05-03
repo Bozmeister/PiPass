@@ -39,6 +39,10 @@ import {
   buildSetupImportRepairPlan,
   classifySetupImportLocalState,
 } from "../../lib/setupImportRepairPlan";
+import {
+  executeSetupImportRepairPlan,
+  type SetupImportRepairStorageDriver,
+} from "../../lib/setupImportRepairExecutor";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -92,6 +96,26 @@ class CommitPlanMemoryStorage implements SetupImportStorageDriver {
     this.deleteAttempts.set(key, attempt);
     this.calls.push(`delete:${key}`);
     if (this.failDeleteAttempts.has(`${key}#${attempt}`)) {
+      throw new Error(`delete failed for ${key}`);
+    }
+    this.items.delete(key);
+  }
+}
+
+class RepairPlanMemoryStorage implements SetupImportRepairStorageDriver {
+  readonly items = new Map<string, string>();
+  readonly deletedKeys: string[] = [];
+  readonly failDeleteKeys = new Set<string>();
+
+  constructor(initialItems: Record<string, string> = {}) {
+    for (const [key, value] of Object.entries(initialItems)) {
+      this.items.set(key, value);
+    }
+  }
+
+  async deleteItem(key: string): Promise<void> {
+    this.deletedKeys.push(key);
+    if (this.failDeleteKeys.has(key)) {
       throw new Error(`delete failed for ${key}`);
     }
     this.items.delete(key);
@@ -2072,4 +2096,292 @@ test("setup/import repair planner does not write platform storage", async (t) =>
 
   assert.equal(plan.action, "clear-local-setup-import-state");
   assert.equal(storage.items.size, 0);
+});
+
+test("setup/import repair executor action none performs no deletes", async () => {
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  });
+
+  const result = await executeSetupImportRepairPlan(
+    {
+      action: "none",
+      classification: "clean-uninitialized",
+      keysToDelete: [],
+      reason: "clean-uninitialized",
+      userMessage: "No action",
+    },
+    storage,
+  );
+
+  assert.deepEqual(result, {
+    success: true,
+    action: "none",
+    deletedKeys: [],
+    failedKeys: [],
+    message: "No setup/import repair action was needed",
+  });
+  assert.deepEqual(storage.deletedKeys, []);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.masterSalt), true);
+});
+
+test("setup/import repair executor refuses manual repair plans without deleting", async () => {
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  });
+
+  const result = await executeSetupImportRepairPlan(
+    {
+      action: "manual-repair-required",
+      classification: "inconsistent-initialized",
+      keysToDelete: [SETUP_IMPORT_STORAGE_KEYS.masterSalt],
+      reason: "manual",
+      userMessage: "Manual repair required",
+    },
+    storage,
+  );
+
+  assert.equal(result.success, false);
+  if (result.success) {
+    throw new Error("expected repair executor refusal");
+  }
+  assert.equal(result.reason, "manual-repair-required");
+  assert.deepEqual(storage.deletedKeys, []);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.masterSalt), true);
+});
+
+test("setup/import repair executor deletes exactly listed keys", async () => {
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.kdfMetadata]: "kdf-placeholder",
+    "pipass_vault_entry-a": "entry-placeholder",
+    "pipass.auth.authHash": "auth-hash-should-remain",
+    "deviceUUID": "device-uuid-should-remain",
+  });
+
+  const result = await executeSetupImportRepairPlan(
+    {
+      action: "clear-local-setup-import-state",
+      classification: "partial-import",
+      keysToDelete: [
+        SETUP_IMPORT_STORAGE_KEYS.masterSalt,
+        SETUP_IMPORT_STORAGE_KEYS.kdfMetadata,
+        "pipass_vault_entry-a",
+      ],
+      reason: "partial-import",
+      userMessage: "Clear partial import",
+    },
+    storage,
+  );
+
+  assert.equal(result.success, true);
+  assert.deepEqual(storage.deletedKeys, [
+    SETUP_IMPORT_STORAGE_KEYS.masterSalt,
+    SETUP_IMPORT_STORAGE_KEYS.kdfMetadata,
+    "pipass_vault_entry-a",
+  ]);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.masterSalt), false);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.kdfMetadata), false);
+  assert.equal(storage.items.has("pipass_vault_entry-a"), false);
+  assert.equal(storage.items.get("pipass.auth.authHash"), "auth-hash-should-remain");
+  assert.equal(storage.items.get("deviceUUID"), "device-uuid-should-remain");
+});
+
+test("setup/import repair executor de-duplicates duplicate keys safely", async () => {
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterHash]: "master-hash-placeholder",
+  });
+
+  const result = await executeSetupImportRepairPlan(
+    {
+      action: "clear-local-setup-import-state",
+      classification: "partial-setup",
+      keysToDelete: [
+        SETUP_IMPORT_STORAGE_KEYS.masterHash,
+        SETUP_IMPORT_STORAGE_KEYS.masterHash,
+      ],
+      reason: "partial-setup",
+      userMessage: "Clear partial setup",
+    },
+    storage,
+  );
+
+  assert.equal(result.success, true);
+  assert.deepEqual(storage.deletedKeys, [SETUP_IMPORT_STORAGE_KEYS.masterHash]);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.masterHash), false);
+});
+
+test("setup/import repair executor reports delete failures with failed keys only", async () => {
+  const secretValue = "PLAINTEXT_SECRET CIPHERTEXT_SECRET KEY_SECRET";
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: secretValue,
+    [SETUP_IMPORT_STORAGE_KEYS.masterHash]: "master-hash-placeholder",
+  });
+  storage.failDeleteKeys.add(SETUP_IMPORT_STORAGE_KEYS.masterSalt);
+
+  const result = await executeSetupImportRepairPlan(
+    {
+      action: "clear-local-setup-import-state",
+      classification: "partial-setup",
+      keysToDelete: [
+        SETUP_IMPORT_STORAGE_KEYS.masterSalt,
+        SETUP_IMPORT_STORAGE_KEYS.masterHash,
+      ],
+      reason: "partial-setup",
+      userMessage: "Clear partial setup",
+    },
+    storage,
+  );
+
+  assert.equal(result.success, false);
+  if (result.success) {
+    throw new Error("expected repair executor partial failure");
+  }
+  assert.equal(result.reason, "delete-failed");
+  assert.deepEqual(result.failedKeys, [SETUP_IMPORT_STORAGE_KEYS.masterSalt]);
+  assert.equal(JSON.stringify(result).includes(secretValue), false);
+  assert.equal(JSON.stringify(result).includes("PLAINTEXT_SECRET"), false);
+  assert.equal(JSON.stringify(result).includes("CIPHERTEXT_SECRET"), false);
+  assert.equal(JSON.stringify(result).includes("KEY_SECRET"), false);
+});
+
+test("setup/import repair executor attempts remaining keys after delete failure", async () => {
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.masterHash]: "master-hash-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash]: "recovery-hash-placeholder",
+  });
+  storage.failDeleteKeys.add(SETUP_IMPORT_STORAGE_KEYS.masterHash);
+
+  const result = await executeSetupImportRepairPlan(
+    {
+      action: "clear-local-setup-import-state",
+      classification: "partial-setup",
+      keysToDelete: [
+        SETUP_IMPORT_STORAGE_KEYS.masterSalt,
+        SETUP_IMPORT_STORAGE_KEYS.masterHash,
+        SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash,
+      ],
+      reason: "partial-setup",
+      userMessage: "Clear partial setup",
+    },
+    storage,
+  );
+
+  assert.equal(result.success, false);
+  assert.deepEqual(storage.deletedKeys, [
+    SETUP_IMPORT_STORAGE_KEYS.masterSalt,
+    SETUP_IMPORT_STORAGE_KEYS.masterHash,
+    SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash,
+  ]);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.masterSalt), false);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash), false);
+});
+
+test("setup/import repair executor rejects unsafe malformed keys before deletion", async () => {
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  });
+
+  for (const unsafeKey of [
+    "",
+    " ../pipass_master_salt",
+    "pipass.auth.authHash",
+    "pipass.installId",
+    "deviceUUID",
+    "pipass_vault_entry-a/other",
+  ]) {
+    const result = await executeSetupImportRepairPlan(
+      {
+        action: "clear-local-setup-import-state",
+        classification: "partial-setup",
+        keysToDelete: [unsafeKey, SETUP_IMPORT_STORAGE_KEYS.masterSalt],
+        reason: "partial-setup",
+        userMessage: "Clear partial setup",
+      },
+      storage,
+    );
+
+    assert.equal(result.success, false, `${unsafeKey} should be rejected`);
+    if (result.success) {
+      throw new Error("expected unsafe repair key rejection");
+    }
+    assert.equal(result.reason, "unsafe-key");
+  }
+
+  assert.deepEqual(storage.deletedKeys, []);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.masterSalt), true);
+});
+
+test("setup/import repair executor rejects unknown actions before deletion", async () => {
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  });
+
+  const result = await executeSetupImportRepairPlan(
+    {
+      action: "delete-everything",
+      classification: "partial-setup",
+      keysToDelete: [SETUP_IMPORT_STORAGE_KEYS.masterSalt],
+      reason: "unknown",
+      userMessage: "Unknown",
+    } as any,
+    storage,
+  );
+
+  assert.equal(result.success, false);
+  if (result.success) {
+    throw new Error("expected unknown action rejection");
+  }
+  assert.equal(result.reason, "invalid-action");
+  assert.deepEqual(storage.deletedKeys, []);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.masterSalt), true);
+});
+
+test("setup/import repair executor does not delete unlisted keys", async () => {
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.masterHash]: "master-hash-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: "vault-index-placeholder",
+  });
+
+  const result = await executeSetupImportRepairPlan(
+    {
+      action: "clear-local-setup-import-state",
+      classification: "partial-setup",
+      keysToDelete: [SETUP_IMPORT_STORAGE_KEYS.masterSalt],
+      reason: "partial-setup",
+      userMessage: "Clear partial setup",
+    },
+    storage,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.masterSalt), false);
+  assert.equal(storage.items.get(SETUP_IMPORT_STORAGE_KEYS.masterHash), "master-hash-placeholder");
+  assert.equal(storage.items.get(SETUP_IMPORT_STORAGE_KEYS.vaultIndex), "vault-index-placeholder");
+});
+
+test("setup/import repair executor output contains no stored values", async () => {
+  const secretValue = "STORED_SECRET_VALUE CIPHERTEXT_SECRET";
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: secretValue,
+  });
+
+  const result = await executeSetupImportRepairPlan(
+    {
+      action: "clear-local-setup-import-state",
+      classification: "partial-setup",
+      keysToDelete: [SETUP_IMPORT_STORAGE_KEYS.masterSalt],
+      reason: "partial-setup",
+      userMessage: "Clear partial setup",
+    },
+    storage,
+  );
+
+  const serialized = JSON.stringify(result);
+  assert.equal(result.success, true);
+  assert.equal(serialized.includes(secretValue), false);
+  assert.equal(serialized.includes("STORED_SECRET_VALUE"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
 });
