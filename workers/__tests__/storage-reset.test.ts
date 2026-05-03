@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clearVault, destroyAllData, hasLocalEncryptedVaultData } from "../storageWorker";
+import {
+  buildArgon2idKdfMetadata,
+  buildPbkdf2KdfMetadata,
+  clearKdfMetadata,
+  clearVault,
+  destroyAllData,
+  getKdfMetadata,
+  hasLocalEncryptedVaultData,
+  saveKdfMetadata,
+} from "../storageWorker";
 import { logoutCurrentSession } from "../../lib/logout";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -56,6 +65,17 @@ function seedBaseState(storage: MemoryStorage): void {
   storage.items.set("pipass_master_hash", "TEST_MASTER_HASH");
   storage.items.set("pipass_master_salt", "TEST_MASTER_SALT");
   storage.items.set("pipass_security_profile", "100000");
+  storage.items.set(
+    "pipass_kdf_metadata",
+    JSON.stringify(
+      buildArgon2idKdfMetadata(
+        100000,
+        { memoryKiB: 131072, timeCost: 4, parallelism: 4, outputBytes: 32 },
+        "setup",
+        { createdAt: 1 },
+      ),
+    ),
+  );
   storage.items.set("pipass_show_keyprints", "1");
   storage.items.set("pipass_vault_initialized", "1");
   storage.items.set("pipass_fractal_fingerprint", "TEST_FINGERPRINT");
@@ -81,6 +101,7 @@ test("clearVault clears local vault data but preserves auth and install identity
   assert.equal(storage.items.has("pipass_master_hash"), false);
   assert.equal(storage.items.has("pipass_shared_vault"), false);
 
+  assert.equal(storage.items.has("pipass_kdf_metadata"), true);
   assert.equal(storage.items.get("pipass.auth.userId"), "11111111-1111-4111-8111-111111111111");
   assert.equal(storage.items.get("pipass.auth.authHash"), "a".repeat(64));
   assert.equal(storage.items.get("pipass.installId"), "22222222-2222-4222-8222-222222222222");
@@ -102,6 +123,7 @@ test("destroyAllData clears vault, notes, unlock metadata, credentials, installI
     "pipass_master_hash",
     "pipass_master_salt",
     "pipass_security_profile",
+    "pipass_kdf_metadata",
     "pipass_show_keyprints",
     "pipass_vault_initialized",
     "pipass_fractal_fingerprint",
@@ -190,4 +212,129 @@ test("hasLocalEncryptedVaultData detects indexed vault entries and secure notes"
 
   storage.items.set("pipass_notes_index", JSON.stringify(["note-a"]));
   assert.equal(await hasLocalEncryptedVaultData(), true);
+});
+
+test("KDF metadata helpers save and read valid Argon2id metadata", async (t) => {
+  installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const metadata = buildArgon2idKdfMetadata(
+    100000,
+    { memoryKiB: 131072, timeCost: 4, parallelism: 4, outputBytes: 32 },
+    "setup",
+    { createdAt: 1234567890 },
+  );
+
+  await saveKdfMetadata(metadata);
+
+  assert.deepEqual(await getKdfMetadata(), metadata);
+});
+
+test("KDF metadata helpers save and read valid PBKDF2 metadata", async (t) => {
+  installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const metadata = buildPbkdf2KdfMetadata(
+    100000,
+    { iterations: 100000, outputBytes: 32 },
+    "legacy-detected",
+    { createdAt: 1234567890 },
+  );
+
+  await saveKdfMetadata(metadata);
+
+  assert.deepEqual(await getKdfMetadata(), metadata);
+});
+
+test("KDF metadata read returns null for invalid JSON without throwing", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  storage.items.set("pipass_kdf_metadata", "{not-json");
+
+  assert.equal(await getKdfMetadata(), null);
+});
+
+test("KDF metadata read returns null for unsupported algorithms", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  storage.items.set(
+    "pipass_kdf_metadata",
+    JSON.stringify({
+      version: 1,
+      algorithm: "scrypt",
+      profileIterations: 100000,
+      kdfVersion: "v1",
+      parameters: { memoryKiB: 131072, timeCost: 4, parallelism: 4, outputBytes: 32 },
+      saltKey: "pipass_master_salt",
+      deviceBinding: "deviceUUID:v1",
+      createdAt: 1234567890,
+      source: "setup",
+    }),
+  );
+
+  assert.equal(await getKdfMetadata(), null);
+});
+
+test("KDF metadata read returns null for missing required fields", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  storage.items.set(
+    "pipass_kdf_metadata",
+    JSON.stringify({
+      version: 1,
+      algorithm: "argon2id",
+      profileIterations: 100000,
+      kdfVersion: "v1",
+      parameters: { memoryKiB: 131072, timeCost: 4, parallelism: 4, outputBytes: 32 },
+      saltKey: "pipass_master_salt",
+      createdAt: 1234567890,
+      source: "setup",
+    }),
+  );
+
+  assert.equal(await getKdfMetadata(), null);
+});
+
+test("KDF metadata read returns null for invalid parameter shape", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  storage.items.set(
+    "pipass_kdf_metadata",
+    JSON.stringify({
+      version: 1,
+      algorithm: "argon2id",
+      profileIterations: 100000,
+      kdfVersion: "v1",
+      parameters: { memoryKiB: 131072, timeCost: 4, parallelism: 4, outputBytes: 64 },
+      saltKey: "pipass_master_salt",
+      deviceBinding: "deviceUUID:v1",
+      createdAt: 1234567890,
+      source: "setup",
+    }),
+  );
+
+  assert.equal(await getKdfMetadata(), null);
+});
+
+test("clearKdfMetadata removes stored KDF metadata", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  await saveKdfMetadata(
+    buildArgon2idKdfMetadata(
+      100000,
+      { memoryKiB: 131072, timeCost: 4, parallelism: 4, outputBytes: 32 },
+      "setup",
+      { createdAt: 1234567890 },
+    ),
+  );
+
+  await clearKdfMetadata();
+
+  assert.equal(storage.items.has("pipass_kdf_metadata"), false);
+  assert.equal(await getKdfMetadata(), null);
 });
