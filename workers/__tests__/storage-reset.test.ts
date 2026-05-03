@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   buildArgon2idKdfMetadata,
@@ -1519,6 +1520,29 @@ test("staged backup decrypt verification handles missing decryptors as controlle
     { kind: "entry", id: "entry-a", index: 0, reason: "missing-decryptor" },
     { kind: "secure-note", id: "note-a", index: 0, reason: "missing-decryptor" },
   ]);
+});
+
+test("SeedSetupScreen backup selection remains staged-only without immediate writes", () => {
+  const source = readFileSync("screens/SeedSetupScreen.tsx", "utf8");
+  const forbiddenImmediateWriteHelpers = [
+    "saveEntry",
+    "saveSecureNote",
+    "syncSharedVaultBlob",
+    "buildSetupImportCommitPlan",
+    "executeSetupImportCommitPlan",
+    "prepareAndExecuteSetupImportCommit",
+  ];
+
+  // This source-level guard is intentionally narrow: it protects the
+  // first-time setup backup picker from reintroducing pre-confirmation
+  // writes while staged-import UI automation is still lightweight.
+  for (const helper of forbiddenImmediateWriteHelpers) {
+    assert.equal(
+      source.includes(helper),
+      false,
+      `SeedSetupScreen must not import or call ${helper} from backup selection`,
+    );
+  }
 });
 
 test("setup/import commit orchestrator builds and executes setup-only plan", async () => {

@@ -35,6 +35,8 @@ Prompt 060 implementation note: staged backup state is now lifted from `SeedSetu
 
 Prompt 062 implementation note: first-time setup now prepares Argon2id setup data in memory before showing the recovery key, and durable setup-only writes are committed through the injected setup/import commit path only after recovery confirmation. Staged backup records remain in memory only and are not committed.
 
+Prompt 063 implementation note: a focused regression guard now checks that `SeedSetupScreen` does not import or call the old immediate-write backup helpers or setup/import commit helpers from backup selection. Staged backup record commit remains future work.
+
 ## 3. Existing Helper Layers
 
 Prepared helper layers are available but not fully wired into import:
@@ -232,7 +234,7 @@ Recommended staged rollout:
 2. Prompt 060: pass staged backup summary/result to app root/setup flow, still with no commit. Completed as in-memory app-root state only.
 3. Prompt 061: add a setup/import commit orchestration helper using existing plan/executor, with injected dependencies. Completed as a pure helper with no recovery confirmation or runtime setup wiring.
 4. Prompt 062: wire setup-only commit helper behind recovery confirmation. Completed without staged backup record commit.
-5. Prompt 063: remove or block old immediate import writes.
+5. Prompt 063: remove or block old immediate import writes. Completed with a targeted regression guard for `SeedSetupScreen`.
 6. Prompt 064: add manual/UI verification for staged import.
 
 Keep each prompt narrow. Do not combine staged import wiring with password rotation, profile changes, vault-root-key migration, KDF changes, server auth changes, session-token changes, or encryption algorithm changes.
