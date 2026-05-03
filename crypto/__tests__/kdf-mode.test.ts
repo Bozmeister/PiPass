@@ -18,6 +18,7 @@ import { performCurrentUnlockVerification } from "../../lib/currentUnlock";
 import {
   FirstTimeVaultSetupError,
   performFirstTimeVaultSetup,
+  prepareFirstTimeVaultSetup,
 } from "../../lib/firstTimeSetup";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../kdfMetadata";
@@ -1106,6 +1107,59 @@ test("current unlock verification allows unlock with warning when KDF metadata p
     warning: "kdf-metadata-persist-failed",
   });
   assert.deepEqual(events, ["save-kdf-metadata", "split", "cache"]);
+});
+
+test("first-time vault setup preparation derives setup data without storage writes", async () => {
+  const shares = fakeShares();
+  const events: string[] = [];
+
+  const result = await prepareFirstTimeVaultSetup(
+    { password: TEST_PASSWORD, iterations: 1000 },
+    {
+      generateMasterSalt: () => {
+        events.push("salt");
+        return TEST_SALT;
+      },
+      deriveMasterKeyWithArgon2id: async (_password, _salt, parameters) => {
+        events.push(`argon2id-${parameters.memoryKiB}-${parameters.timeCost}-${parameters.parallelism}`);
+        return "3".repeat(64);
+      },
+      splitKeyIntoShares: (masterKeyHex) => {
+        events.push(`split-${masterKeyHex}`);
+        return shares;
+      },
+      hashMasterKey: (masterKeyHex) => {
+        events.push(`hash-${masterKeyHex}`);
+        return "master-hash";
+      },
+      generateRecoveryKey: () => {
+        events.push("recovery-key");
+        return "4".repeat(64);
+      },
+      hashRecoveryKey: (rawKeyHex) => {
+        events.push(`recovery-hash-${rawKeyHex}`);
+        return "recovery-hash";
+      },
+    },
+  );
+
+  assert.equal(result.salt, TEST_SALT);
+  assert.equal(result.iterations, 1000);
+  assert.equal(result.shares, shares);
+  assert.equal(result.masterKeyHex, "3".repeat(64));
+  assert.equal(result.masterHash, "master-hash");
+  assert.equal(result.recoveryKeyHash, "recovery-hash");
+  assert.equal(result.rawRecoveryKeyHex, "4".repeat(64));
+  assert.equal(result.kdfMetadata.algorithm, "argon2id");
+  assert.equal(result.kdfMetadata.source, "setup");
+  assert.deepEqual(events, [
+    "salt",
+    "argon2id-65536-3-4",
+    `split-${"3".repeat(64)}`,
+    `hash-${"3".repeat(64)}`,
+    "recovery-key",
+    `recovery-hash-${"4".repeat(64)}`,
+  ]);
 });
 
 test("first-time vault setup derives with explicit Argon2id and writes setup metadata", async () => {

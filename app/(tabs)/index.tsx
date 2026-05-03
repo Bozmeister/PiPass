@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { View, Text, TextInput, Pressable, Platform, ActivityIndicator, ScrollView } from "react-native";
+import { View, Text, TextInput, Pressable, Platform, ActivityIndicator, ScrollView, Alert } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -8,21 +8,17 @@ import AuthScreen from "../../screens/AuthScreen";
 import SeedSetupScreen, { type StagedBackupSelection } from "../../screens/SeedSetupScreen";
 import VaultScreen from "../../screens/VaultScreen";
 import {
-  setVaultInitialized,
   getMasterSalt,
-  saveMasterSalt,
   getMasterKeyHash,
   getKdfMetadataState,
-  saveMasterKeyHash,
   saveKdfMetadata,
   getSecurityProfile,
   saveSecurityProfile,
   destroyAllData,
   clearMasterKeySecurely,
-  saveRecoveryKeyHash,
   storeMasterKeySecurely,
 } from "../../workers/storageWorker";
-import { readPlatformItem, deletePlatformItem } from "../../lib/platformStorage";
+import { readPlatformItem, writePlatformItem, deletePlatformItem } from "../../lib/platformStorage";
 import {
   deriveMasterKeyWithArgon2id,
   generateMasterSalt,
@@ -32,7 +28,10 @@ import {
 import { deriveMasterKeyShares } from "../../workers/vaultWorker";
 import { KeyShares, wipeShares, combineShares, splitKeyIntoShares } from "../../crypto/secureMemory";
 import { performCurrentUnlockVerification } from "../../lib/currentUnlock";
-import { performFirstTimeVaultSetup } from "../../lib/firstTimeSetup";
+import {
+  prepareFirstTimeVaultSetup,
+  type PreparedFirstTimeVaultSetupResult,
+} from "../../lib/firstTimeSetup";
 import {
   runIntegrityCheck,
   setTamperCallback,
@@ -52,13 +51,41 @@ import {
   readAndDecideStartupRepairState,
   type StartupRepairDecision,
 } from "../../lib/startupRepairDecision";
-import { SETUP_IMPORT_STORAGE_KEYS } from "../../lib/setupImportCommitPlan";
+import {
+  buildSetupImportCommitPlan,
+  SETUP_IMPORT_STORAGE_KEYS,
+} from "../../lib/setupImportCommitPlan";
+import { executeSetupImportCommitPlan } from "../../lib/setupImportCommitExecutor";
+import { prepareAndExecuteSetupImportCommit } from "../../lib/setupImportCommitOrchestrator";
 
 const startupSnapshotDriver = {
   getItem: readPlatformItem,
 };
 
 const startupRepairStorageDriver = {
+  deleteItem: async (key: string) => {
+    if (key === SETUP_IMPORT_STORAGE_KEYS.cachedMasterKey) {
+      await clearMasterKeySecurely();
+      return;
+    }
+    await deletePlatformItem(key);
+  },
+};
+
+const setupCommitStorageDriver = {
+  getItem: async (key: string) => {
+    if (key === SETUP_IMPORT_STORAGE_KEYS.cachedMasterKey) {
+      return null;
+    }
+    return await readPlatformItem(key);
+  },
+  setItem: async (key: string, value: string) => {
+    if (key === SETUP_IMPORT_STORAGE_KEYS.cachedMasterKey) {
+      await storeMasterKeySecurely(value);
+      return;
+    }
+    await writePlatformItem(key, value);
+  },
   deleteItem: async (key: string) => {
     if (key === SETUP_IMPORT_STORAGE_KEYS.cachedMasterKey) {
       await clearMasterKeySecurely();
@@ -83,21 +110,51 @@ export default function HomeScreen() {
   const [pendingRecoveryRawHex, setPendingRecoveryRawHex] = useState<string>("");
   const [pendingSetupShares, setPendingSetupShares] = useState<KeyShares | null>(null);
   const [, setStagedSetupBackup] = useState<StagedBackupSelection | null>(null);
+  const [committingSetup, setCommittingSetup] = useState(false);
   const [vaultLocked, setVaultLocked] = useState(false);
   const [showUnlockNuclearReset, setShowUnlockNuclearReset] = useState(false);
   const lockedSharesRef = useRef<KeyShares | null>(null);
   const keySharesRef = useRef<KeyShares | null>(null);
+  const pendingSetupSharesRef = useRef<KeyShares | null>(null);
+  const pendingSetupCommitRef = useRef<PreparedFirstTimeVaultSetupResult | null>(null);
+  const committingSetupRef = useRef(false);
 
   useEffect(() => {
     keySharesRef.current = keyShares;
   }, [keyShares]);
 
   useEffect(() => {
+    pendingSetupSharesRef.current = pendingSetupShares;
+  }, [pendingSetupShares]);
+
+  const clearPendingSetupState = useCallback((shouldWipeShares: boolean) => {
+    if (shouldWipeShares && pendingSetupSharesRef.current) {
+      wipeShares(pendingSetupSharesRef.current);
+    }
+    pendingSetupSharesRef.current = null;
+    pendingSetupCommitRef.current = null;
+    committingSetupRef.current = false;
+    setPendingSetupShares(null);
+    setPendingRecoveryKey(null);
+    setPendingRecoveryRawHex("");
+    setCommittingSetup(false);
+  }, []);
+
+  useEffect(() => {
     setTamperCallback(() => {
       if (keySharesRef.current) {
         wipeShares(keySharesRef.current);
       }
+      if (pendingSetupSharesRef.current) {
+        wipeShares(pendingSetupSharesRef.current);
+      }
+      pendingSetupSharesRef.current = null;
+      pendingSetupCommitRef.current = null;
+      committingSetupRef.current = false;
       setKeyShares(null);
+      setPendingSetupShares(null);
+      setPendingRecoveryKey(null);
+      setPendingRecoveryRawHex("");
       setAuthenticated(false);
       setStagedSetupBackup(null);
       setTamperLocked(true);
@@ -157,11 +214,12 @@ export default function HomeScreen() {
       setStartupDecision(null);
       setStartupRepairError(null);
       setStagedSetupBackup(null);
+      clearPendingSetupState(true);
       return;
     }
 
     void runStartupRepairDecision();
-  }, [authenticated, runStartupRepairDecision]);
+  }, [authenticated, clearPendingSetupState, runStartupRepairDecision]);
 
   if (tamperLocked) {
     return (
@@ -262,15 +320,69 @@ export default function HomeScreen() {
         formattedKey={pendingRecoveryKey}
         rawKeyHex={pendingRecoveryRawHex}
         onConfirm={async () => {
-          await setVaultInitialized(true);
+          if (committingSetupRef.current || committingSetup) return;
+          const pendingSetup = pendingSetupCommitRef.current;
+          if (!pendingSetup || !pendingSetupShares) {
+            const message = "PiPass could not complete setup safely. Please restart setup and try again.";
+            if (Platform.OS === "web") { alert(message); } else { Alert.alert("Setup Failed", message); }
+            clearPendingSetupState(true);
+            setVaultExists(false);
+            return;
+          }
+
+          committingSetupRef.current = true;
+          setCommittingSetup(true);
+          const result = await prepareAndExecuteSetupImportCommit({
+            setupMetadata: {
+              masterSalt: pendingSetup.salt,
+              masterHash: pendingSetup.masterHash,
+              securityProfile: pendingSetup.iterations,
+              kdfMetadata: pendingSetup.kdfMetadata,
+              recoveryKeyHash: pendingSetup.recoveryKeyHash,
+            },
+            includeCachedMasterKey: true,
+            cachedMasterKeyReference: pendingSetup.masterKeyHex,
+            dependencies: {
+              classifyCompatibility: async () => ({
+                status: "incompatible",
+                reason: "backup-commit-not-enabled",
+                warnings: [],
+              }),
+              verifyDecryptability: async (stagedBackup) => ({
+                ok: false,
+                counts: {
+                  entriesChecked: stagedBackup.entries.length,
+                  notesChecked: stagedBackup.secureNotes.length,
+                  entriesFailed: 0,
+                  notesFailed: 0,
+                },
+                failures: [],
+              }),
+              buildPlan: buildSetupImportCommitPlan,
+              executePlan: async (plan) => executeSetupImportCommitPlan(plan, setupCommitStorageDriver),
+            },
+          });
+          committingSetupRef.current = false;
+          setCommittingSetup(false);
+
+          if (!result.ok) {
+            const message = "PiPass could not finish creating your vault safely. No vault was initialized. Please try setup again.";
+            if (Platform.OS === "web") { alert(message); } else { Alert.alert("Setup Failed", message); }
+            clearPendingSetupState(true);
+            setVaultExists(false);
+            return;
+          }
+
+          setMasterSaltState(pendingSetup.salt);
+          setIterations(pendingSetup.iterations);
           setStagedSetupBackup(null);
+          pendingSetupCommitRef.current = null;
+          pendingSetupSharesRef.current = null;
+          setPendingSetupShares(null);
           setPendingRecoveryKey(null);
           setPendingRecoveryRawHex("");
           setVaultExists(true);
-          if (pendingSetupShares) {
-            setKeyShares(pendingSetupShares);
-            setPendingSetupShares(null);
-          }
+          setKeyShares(pendingSetupShares);
         }}
       />
     );
@@ -281,7 +393,8 @@ export default function HomeScreen() {
       <SeedSetupScreen
         onStagedBackupChange={setStagedSetupBackup}
         onSetup={async (password, iters) => {
-          const setup = await performFirstTimeVaultSetup(
+          clearPendingSetupState(true);
+          const setup = await prepareFirstTimeVaultSetup(
             { password, iterations: iters },
             {
               generateMasterSalt,
@@ -290,18 +403,10 @@ export default function HomeScreen() {
               hashMasterKey,
               generateRecoveryKey,
               hashRecoveryKey,
-              saveMasterSalt,
-              saveMasterKeyHash,
-              saveSecurityProfile,
-              saveKdfMetadata,
-              saveRecoveryKeyHash,
-              storeMasterKeySecurely,
-              wipeShares,
             },
           );
 
-          setMasterSaltState(setup.salt);
-          setIterations(setup.iterations);
+          pendingSetupCommitRef.current = setup;
           setPendingSetupShares(setup.shares);
           setPendingRecoveryRawHex(setup.rawRecoveryKeyHex);
           setPendingRecoveryKey(formatRecoveryKey(setup.rawRecoveryKeyHex));
@@ -326,6 +431,7 @@ export default function HomeScreen() {
             await destroyAllData();
             setShowUnlockNuclearReset(false);
             setStagedSetupBackup(null);
+            clearPendingSetupState(true);
             setVaultExists(false);
             setKeyShares(null);
           }}
@@ -371,6 +477,7 @@ export default function HomeScreen() {
             setVaultLocked(false);
             setVaultExists(false);
             setStagedSetupBackup(null);
+            clearPendingSetupState(true);
             setAuthenticated(false);
           }}
         />
@@ -404,6 +511,7 @@ export default function HomeScreen() {
               setVaultLocked(false);
               setVaultExists(false);
               setStagedSetupBackup(null);
+              clearPendingSetupState(true);
               setAuthenticated(false);
             }}
             verifyPassword={async (pw) => {

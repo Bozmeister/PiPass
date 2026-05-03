@@ -21,7 +21,7 @@ export interface FirstTimeVaultSetupInput {
   kdfVersion?: KdfVersion;
 }
 
-export interface FirstTimeVaultSetupDependencies {
+export interface FirstTimeVaultSetupPrepareDependencies {
   generateMasterSalt: () => string;
   deriveMasterKeyWithArgon2id: (
     password: string,
@@ -32,6 +32,9 @@ export interface FirstTimeVaultSetupDependencies {
   hashMasterKey: (masterKeyHex: string) => string;
   generateRecoveryKey: () => string;
   hashRecoveryKey: (rawKeyHex: string) => string;
+}
+
+export interface FirstTimeVaultSetupDependencies extends FirstTimeVaultSetupPrepareDependencies {
   saveMasterSalt: (saltHex: string) => Promise<void>;
   saveMasterKeyHash: (hashHex: string) => Promise<void>;
   saveSecurityProfile: (iterations: number) => Promise<void>;
@@ -49,10 +52,16 @@ export interface FirstTimeVaultSetupResult {
   kdfMetadata: KdfMetadata;
 }
 
-export async function performFirstTimeVaultSetup(
+export interface PreparedFirstTimeVaultSetupResult extends FirstTimeVaultSetupResult {
+  masterKeyHex: string;
+  masterHash: string;
+  recoveryKeyHash: string;
+}
+
+export async function prepareFirstTimeVaultSetup(
   input: FirstTimeVaultSetupInput,
-  dependencies: FirstTimeVaultSetupDependencies,
-): Promise<FirstTimeVaultSetupResult> {
+  dependencies: FirstTimeVaultSetupPrepareDependencies,
+): Promise<PreparedFirstTimeVaultSetupResult> {
   const validIterations = Math.max(input.iterations || 100000, 3);
   const kdfVersion = input.kdfVersion ?? "v1";
   const salt = dependencies.generateMasterSalt();
@@ -76,21 +85,9 @@ export async function performFirstTimeVaultSetup(
     { kdfVersion },
   );
   const shares = dependencies.splitKeyIntoShares(masterKeyHex);
-  const keyHash = dependencies.hashMasterKey(masterKeyHex);
+  const masterHash = dependencies.hashMasterKey(masterKeyHex);
   const rawRecoveryKeyHex = dependencies.generateRecoveryKey();
   const recoveryKeyHash = dependencies.hashRecoveryKey(rawRecoveryKeyHex);
-
-  try {
-    await dependencies.saveMasterSalt(salt);
-    await dependencies.saveMasterKeyHash(keyHash);
-    await dependencies.saveSecurityProfile(validIterations);
-    await dependencies.saveKdfMetadata(kdfMetadata);
-    await dependencies.saveRecoveryKeyHash(recoveryKeyHash);
-    await dependencies.storeMasterKeySecurely(masterKeyHex);
-  } catch (err) {
-    dependencies.wipeShares(shares);
-    throw err;
-  }
 
   return {
     salt,
@@ -98,5 +95,35 @@ export async function performFirstTimeVaultSetup(
     shares,
     rawRecoveryKeyHex,
     kdfMetadata,
+    masterKeyHex,
+    masterHash,
+    recoveryKeyHash,
+  };
+}
+
+export async function performFirstTimeVaultSetup(
+  input: FirstTimeVaultSetupInput,
+  dependencies: FirstTimeVaultSetupDependencies,
+): Promise<FirstTimeVaultSetupResult> {
+  const prepared = await prepareFirstTimeVaultSetup(input, dependencies);
+
+  try {
+    await dependencies.saveMasterSalt(prepared.salt);
+    await dependencies.saveMasterKeyHash(prepared.masterHash);
+    await dependencies.saveSecurityProfile(prepared.iterations);
+    await dependencies.saveKdfMetadata(prepared.kdfMetadata);
+    await dependencies.saveRecoveryKeyHash(prepared.recoveryKeyHash);
+    await dependencies.storeMasterKeySecurely(prepared.masterKeyHex);
+  } catch (err) {
+    dependencies.wipeShares(prepared.shares);
+    throw err;
+  }
+
+  return {
+    salt: prepared.salt,
+    iterations: prepared.iterations,
+    shares: prepared.shares,
+    rawRecoveryKeyHex: prepared.rawRecoveryKeyHex,
+    kdfMetadata: prepared.kdfMetadata,
   };
 }
