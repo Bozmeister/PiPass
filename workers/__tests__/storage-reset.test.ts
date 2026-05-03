@@ -31,6 +31,11 @@ import {
   type SetupImportStorageDriver,
 } from "../../lib/setupImportCommitExecutor";
 import {
+  prepareAndExecuteSetupImportCommit,
+  type SetupImportCommitOrchestrationDependencies,
+  type SetupImportCommitOrchestrationResult,
+} from "../../lib/setupImportCommitOrchestrator";
+import {
   buildSetupImportCommitPlan,
   SETUP_IMPORT_STORAGE_KEYS,
   type SetupImportCommitPlan,
@@ -367,6 +372,76 @@ function commitPlanFixture(options: {
 
   assert.equal(result.ok, true);
   return result.plan;
+}
+
+function backupVerifierFixture() {
+  const result = parseBackupVerifier(validBackupVerifierFixture());
+
+  assert.equal(result.ok, true);
+  return result.verifier;
+}
+
+function commitOrchestrationDependencies(
+  calls: string[] = [],
+  overrides: Partial<SetupImportCommitOrchestrationDependencies> = {},
+): SetupImportCommitOrchestrationDependencies {
+  return {
+    classifyCompatibility: () => {
+      calls.push("compatibility");
+      return {
+        status: "compatible",
+        reason: "same-install-metadata-match",
+        warnings: ["safe compatibility warning"],
+      };
+    },
+    verifySentinel: () => {
+      calls.push("sentinel");
+      return { ok: true };
+    },
+    verifyDecryptability: (stagedBackup) => {
+      calls.push("decryptability");
+      return {
+        ok: true,
+        counts: {
+          entriesChecked: stagedBackup.entries.length,
+          notesChecked: stagedBackup.secureNotes.length,
+          entriesFailed: 0,
+          notesFailed: 0,
+        },
+        failures: [],
+      };
+    },
+    buildSharedVaultBlob: () => {
+      calls.push("shared-vault");
+      return {
+        encryptedBlob: "shared-vault-blob-placeholder",
+        version: 1,
+        updatedAt: 1234567890,
+      };
+    },
+    buildPlan: (input) => {
+      calls.push("plan");
+      return buildSetupImportCommitPlan(input);
+    },
+    executePlan: (plan) => {
+      calls.push("commit");
+      return {
+        success: true,
+        operationsApplied: plan.operations.length,
+        rollbackStatus: "not-needed",
+      };
+    },
+    ...overrides,
+  };
+}
+
+function assertOrchestrationFailure(
+  result: SetupImportCommitOrchestrationResult,
+): asserts result is Extract<SetupImportCommitOrchestrationResult, { ok: false }> {
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected setup/import commit orchestration failure");
+  }
 }
 
 function setupMetadataSnapshot() {
@@ -1444,6 +1519,320 @@ test("staged backup decrypt verification handles missing decryptors as controlle
     { kind: "entry", id: "entry-a", index: 0, reason: "missing-decryptor" },
     { kind: "secure-note", id: "note-a", index: 0, reason: "missing-decryptor" },
   ]);
+});
+
+test("setup/import commit orchestrator builds and executes setup-only plan", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    dependencies: commitOrchestrationDependencies(calls),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stage, "setup-only");
+  assert.deepEqual(calls, ["plan", "commit"]);
+});
+
+test("setup/import commit orchestrator runs staged gates before commit", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    backupVerifier: backupVerifierFixture(),
+    dependencies: commitOrchestrationDependencies(calls),
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [
+    "compatibility",
+    "sentinel",
+    "decryptability",
+    "shared-vault",
+    "plan",
+    "commit",
+  ]);
+});
+
+test("setup/import commit orchestrator rejects incompatible backup before commit", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      classifyCompatibility: () => {
+        calls.push("compatibility");
+        return { status: "incompatible", reason: "kdf-metadata-mismatch", warnings: [] };
+      },
+    }),
+  });
+
+  assertOrchestrationFailure(result);
+  assert.equal(result.stage, "compatibility");
+  assert.equal(result.reason, "kdf-metadata-mismatch");
+  assert.deepEqual(calls, ["compatibility"]);
+});
+
+test("setup/import commit orchestrator rejects unknown compatibility by default", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupFixture(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      classifyCompatibility: () => {
+        calls.push("compatibility");
+        return {
+          status: "unknown",
+          reason: "missing-compatibility-metadata",
+          warnings: ["safe unknown compatibility warning"],
+        };
+      },
+    }),
+  });
+
+  assertOrchestrationFailure(result);
+  assert.equal(result.stage, "compatibility");
+  assert.equal(result.reason, "missing-compatibility-metadata");
+  assert.deepEqual(calls, ["compatibility"]);
+});
+
+test("setup/import commit orchestrator can allow unknown compatibility but still requires decryptability", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupFixture(),
+    allowUnknownCompatibility: true,
+    dependencies: commitOrchestrationDependencies(calls, {
+      classifyCompatibility: () => {
+        calls.push("compatibility");
+        return {
+          status: "unknown",
+          reason: "missing-compatibility-metadata",
+          warnings: [],
+        };
+      },
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, ["compatibility", "decryptability", "shared-vault", "plan", "commit"]);
+});
+
+test("setup/import commit orchestrator rejects sentinel failure before decryptability and commit", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    backupVerifier: backupVerifierFixture(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      verifySentinel: () => {
+        calls.push("sentinel");
+        return { ok: false, reason: "hash-mismatch", message: "Backup verifier hash did not match." };
+      },
+    }),
+  });
+
+  assertOrchestrationFailure(result);
+  assert.equal(result.stage, "sentinel");
+  assert.equal(result.reason, "hash-mismatch");
+  assert.deepEqual(calls, ["compatibility", "sentinel"]);
+});
+
+test("setup/import commit orchestrator rejects decryptability failure before commit", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      verifyDecryptability: () => {
+        calls.push("decryptability");
+        return {
+          ok: false,
+          counts: {
+            entriesChecked: 1,
+            notesChecked: 1,
+            entriesFailed: 1,
+            notesFailed: 0,
+          },
+          failures: [{ kind: "entry", id: "entry-a", index: 0, reason: "decrypt-failed" }],
+        };
+      },
+    }),
+  });
+
+  assertOrchestrationFailure(result);
+  assert.equal(result.stage, "decryptability");
+  assert.equal(result.reason, "staged-backup-decryptability-failed");
+  assert.deepEqual(calls, ["compatibility", "decryptability"]);
+});
+
+test("setup/import commit orchestrator rejects shared vault builder failure before plan", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      buildSharedVaultBlob: () => {
+        calls.push("shared-vault");
+        throw new Error("SECRET_SHARED_VAULT_CONTENT");
+      },
+    }),
+  });
+
+  assertOrchestrationFailure(result);
+  assert.equal(result.stage, "shared-vault");
+  assert.equal(result.reason, "shared-vault-build-failed");
+  assert.deepEqual(calls, ["compatibility", "decryptability", "shared-vault"]);
+});
+
+test("setup/import commit orchestrator rejects commit plan failure before executor", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      buildPlan: () => {
+        calls.push("plan");
+        return {
+          ok: false,
+          error: {
+            code: "invalid-entry-id",
+            path: "entries[0].id",
+            message: "Setup/import commit plan input is invalid",
+          },
+        };
+      },
+    }),
+  });
+
+  assertOrchestrationFailure(result);
+  assert.equal(result.stage, "plan");
+  assert.equal(result.reason, "invalid-entry-id");
+  assert.deepEqual(calls, ["compatibility", "decryptability", "shared-vault", "plan"]);
+});
+
+test("setup/import commit orchestrator returns commit-stage executor failure", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      executePlan: () => {
+        calls.push("commit");
+        return {
+          success: false,
+          reason: "write-failed",
+          message: "Setup/import commit write failed",
+          operationsApplied: 2,
+          rollbackStatus: "completed",
+          failedOperation: {
+            key: SETUP_IMPORT_STORAGE_KEYS.masterHash,
+            type: "write",
+            category: "setup-metadata",
+          },
+          rollbackFailures: [],
+        };
+      },
+    }),
+  });
+
+  assertOrchestrationFailure(result);
+  assert.equal(result.stage, "commit");
+  assert.equal(result.reason, "write-failed");
+  assert.deepEqual(calls, ["compatibility", "decryptability", "shared-vault", "plan", "commit"]);
+  assert.equal(result.commitResult?.success, false);
+});
+
+test("setup/import commit orchestrator executes successful staged backup commit", async () => {
+  const calls: string[] = [];
+  let operationCategories: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      executePlan: (plan) => {
+        calls.push("commit");
+        operationCategories = plan.operations.map((operation) => operation.category);
+        return {
+          success: true,
+          operationsApplied: plan.operations.length,
+          rollbackStatus: "not-needed",
+        };
+      },
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stage, "commit");
+  assert.equal(operationCategories.includes("vault-entry"), true);
+  assert.equal(operationCategories.includes("secure-note"), true);
+  assert.equal(operationCategories.includes("shared-vault"), true);
+});
+
+test("setup/import commit orchestrator preserves safe warnings", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    dependencies: commitOrchestrationDependencies(calls),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(
+    result.warnings.includes(
+      "encrypted-local-records backups are staged only and require a future compatibility or rekey flow before commit",
+    ),
+    true,
+  );
+  assert.equal(result.warnings.includes("safe compatibility warning"), true);
+});
+
+test("setup/import commit orchestrator omits plaintext ciphertext and key material from failures", async () => {
+  const secret = "PLAINTEXT_SECRET CIPHERTEXT_SECRET KEY_SECRET";
+  const calls: string[] = [];
+  const backup = validBackupFixture();
+  const [entry] = backup.entries as Record<string, unknown>[];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture({
+      masterSalt: secret,
+      masterHash: secret,
+      recoveryKeyHash: secret,
+    }),
+    stagedBackup: stagedBackupFixture({
+      entries: [
+        {
+          ...entry,
+          id: "entry-secret",
+          encryptedPassword: secret,
+        },
+      ],
+    }),
+    dependencies: commitOrchestrationDependencies(calls, {
+      buildSharedVaultBlob: () => {
+        calls.push("shared-vault");
+        throw new Error(secret);
+      },
+    }),
+  });
+  const serialized = JSON.stringify(result);
+
+  assertOrchestrationFailure(result);
+  assert.equal(serialized.includes("PLAINTEXT_SECRET"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+  assert.equal(serialized.includes("KEY_SECRET"), false);
+  assert.equal(serialized.includes(secret), false);
+});
+
+test("setup/import commit orchestrator does not write platform storage directly", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    dependencies: commitOrchestrationDependencies(),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(storage.items.size, 0);
 });
 
 test("setup/import commit plan builds setup-only operations with initialized marker last", () => {

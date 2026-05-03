@@ -44,6 +44,7 @@ Prepared helper layers are available but not fully wired into import:
 - `verifyStagedBackupDecryptability()` for injected entry/note decryptability checks
 - `buildSetupImportCommitPlan()` for deterministic storage operation planning
 - `executeSetupImportCommitPlan()` for storage-injected commit and rollback
+- `prepareAndExecuteSetupImportCommit()` for pure injected setup/import commit orchestration
 - `classifySetupImportLocalState()` / `buildSetupImportRepairPlan()` for partial-state detection
 - `executeSetupImportRepairPlan()` and the startup repair surface for scoped cleanup
 
@@ -227,7 +228,7 @@ Recommended staged rollout:
 
 1. Prompt 059: change `SeedSetupScreen` import button to parse/stage only, with no storage writes. Completed as local screen state only; app-root staged ownership remains future work.
 2. Prompt 060: pass staged backup summary/result to app root/setup flow, still with no commit. Completed as in-memory app-root state only.
-3. Prompt 061: add a setup/import commit orchestration helper using existing plan/executor, with injected dependencies.
+3. Prompt 061: add a setup/import commit orchestration helper using existing plan/executor, with injected dependencies. Completed as a pure helper with no recovery confirmation or runtime setup wiring.
 4. Prompt 062: wire commit helper behind recovery confirmation.
 5. Prompt 063: remove or block old immediate import writes.
 6. Prompt 064: add manual/UI verification for staged import.
