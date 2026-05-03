@@ -7,6 +7,11 @@ import {
   type SetupImportRepairPlan,
 } from "./setupImportRepairPlan";
 import { SETUP_IMPORT_STORAGE_KEYS } from "./setupImportCommitPlan";
+import {
+  executeSetupImportRepairPlan,
+  type SetupImportRepairExecutionResult,
+  type SetupImportRepairStorageDriver,
+} from "./setupImportRepairExecutor";
 
 const VAULT_ENTRY_PREFIX = "pipass_vault_";
 const SECURE_NOTE_PREFIX = "pipass_note_";
@@ -66,6 +71,19 @@ export type StartupRepairDecision =
       failedKey: string;
     };
 
+export type StartupRepairConfirmationResult =
+  | {
+      success: true;
+      repairResult: SetupImportRepairExecutionResult;
+      message: string;
+    }
+  | {
+      success: false;
+      repairResult: SetupImportRepairExecutionResult | null;
+      reason: "not-repairable" | "repair-failed";
+      message: string;
+    };
+
 export async function readSetupImportStateSnapshot(
   driver: SetupImportSnapshotReadDriver,
 ): Promise<SetupImportSnapshotReadResult> {
@@ -104,6 +122,13 @@ export async function readSetupImportStateSnapshot(
   }
 
   return { ok: true, snapshot, keysRead };
+}
+
+export async function readAndDecideStartupRepairState(
+  driver: SetupImportSnapshotReadDriver,
+): Promise<StartupRepairDecision> {
+  const snapshotResult = await readSetupImportStateSnapshot(driver);
+  return decideStartupRepairState(snapshotResult);
 }
 
 export function decideStartupRepairState(
@@ -163,6 +188,36 @@ export function decideStartupRepairState(
     repairPlan,
     state,
     message: "PiPass found inconsistent local vault state.",
+  };
+}
+
+export async function confirmStartupRepairDecision(
+  decision: StartupRepairDecision,
+  storage: SetupImportRepairStorageDriver,
+): Promise<StartupRepairConfirmationResult> {
+  if (decision.route !== "repair-prompt") {
+    return {
+      success: false,
+      repairResult: null,
+      reason: "not-repairable",
+      message: "Startup repair is not available for this local state",
+    };
+  }
+
+  const repairResult = await executeSetupImportRepairPlan(decision.repairPlan, storage);
+  if (!repairResult.success) {
+    return {
+      success: false,
+      repairResult,
+      reason: "repair-failed",
+      message: "Startup repair could not clear every planned key",
+    };
+  }
+
+  return {
+    success: true,
+    repairResult,
+    message: "Startup repair cleared incomplete setup state",
   };
 }
 

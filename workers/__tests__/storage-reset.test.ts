@@ -44,7 +44,9 @@ import {
   type SetupImportRepairStorageDriver,
 } from "../../lib/setupImportRepairExecutor";
 import {
+  confirmStartupRepairDecision,
   decideStartupRepairState,
+  readAndDecideStartupRepairState,
   readSetupImportStateSnapshot,
   type SetupImportSnapshotReadDriver,
 } from "../../lib/startupRepairDecision";
@@ -2578,4 +2580,83 @@ test("startup repair decision output contains no stored values", async () => {
   assert.equal(serialized.includes("STORED_SECRET_VALUE"), false);
   assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
   assert.equal(serialized.includes("ENTRY_CIPHERTEXT_SECRET"), false);
+});
+
+test("startup repair orchestration reads snapshot and decides setup route", async () => {
+  const reader = new StartupSnapshotMemoryReader();
+
+  const decision = await readAndDecideStartupRepairState(reader);
+
+  assert.equal(decision.route, "setup");
+  assert.deepEqual(reader.keysWritten, []);
+  assert.deepEqual(reader.keysDeleted, []);
+});
+
+test("startup repair confirmation deletes only after repair-prompt decision", async () => {
+  const reader = new StartupSnapshotMemoryReader({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  });
+  const decision = await readAndDecideStartupRepairState(reader);
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  });
+
+  assert.equal(decision.route, "repair-prompt");
+  assert.deepEqual(storage.deletedKeys, []);
+
+  const result = await confirmStartupRepairDecision(decision, storage);
+
+  assert.equal(result.success, true);
+  assert.deepEqual(storage.deletedKeys, [SETUP_IMPORT_STORAGE_KEYS.masterSalt]);
+});
+
+test("startup repair confirmation refuses manual repair without deleting", async () => {
+  const decision = decideStartupRepairState({
+    [SETUP_IMPORT_STORAGE_KEYS.vaultInitialized]: "1",
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  });
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  });
+
+  const result = await confirmStartupRepairDecision(decision, storage);
+
+  assert.equal(decision.route, "manual-repair");
+  assert.equal(result.success, false);
+  assert.equal(result.reason, "not-repairable");
+  assert.deepEqual(storage.deletedKeys, []);
+});
+
+test("startup repair confirmation refuses safe-error without deleting", async () => {
+  const reader = new StartupSnapshotMemoryReader();
+  reader.failReadKeys.add(SETUP_IMPORT_STORAGE_KEYS.vaultInitialized);
+  const decision = await readAndDecideStartupRepairState(reader);
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  });
+
+  const result = await confirmStartupRepairDecision(decision, storage);
+
+  assert.equal(decision.route, "safe-error");
+  assert.equal(result.success, false);
+  assert.equal(result.reason, "not-repairable");
+  assert.deepEqual(storage.deletedKeys, []);
+});
+
+test("startup repair confirmation output contains no stored values", async () => {
+  const secretValue = "STORED_SECRET_VALUE CIPHERTEXT_SECRET";
+  const decision = decideStartupRepairState({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: secretValue,
+  });
+  const storage = new RepairPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: secretValue,
+  });
+
+  const result = await confirmStartupRepairDecision(decision, storage);
+  const serialized = JSON.stringify(result);
+
+  assert.equal(result.success, true);
+  assert.equal(serialized.includes(secretValue), false);
+  assert.equal(serialized.includes("STORED_SECRET_VALUE"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
 });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { View, Text, TextInput, Pressable, Platform, ActivityIndicator, ScrollView } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
@@ -8,7 +8,6 @@ import AuthScreen from "../../screens/AuthScreen";
 import SeedSetupScreen from "../../screens/SeedSetupScreen";
 import VaultScreen from "../../screens/VaultScreen";
 import {
-  isVaultInitialized,
   setVaultInitialized,
   getMasterSalt,
   saveMasterSalt,
@@ -19,9 +18,11 @@ import {
   getSecurityProfile,
   saveSecurityProfile,
   destroyAllData,
+  clearMasterKeySecurely,
   saveRecoveryKeyHash,
   storeMasterKeySecurely,
 } from "../../workers/storageWorker";
+import { readPlatformItem, deletePlatformItem } from "../../lib/platformStorage";
 import {
   deriveMasterKeyWithArgon2id,
   generateMasterSalt,
@@ -46,10 +47,34 @@ import {
 } from "../../crypto/recoveryKey";
 import RecoveryKeyModal from "../../components/RecoveryKeyModal";
 import NuclearResetModal from "../../components/NuclearResetModal";
+import {
+  confirmStartupRepairDecision,
+  readAndDecideStartupRepairState,
+  type StartupRepairDecision,
+} from "../../lib/startupRepairDecision";
+import { SETUP_IMPORT_STORAGE_KEYS } from "../../lib/setupImportCommitPlan";
+
+const startupSnapshotDriver = {
+  getItem: readPlatformItem,
+};
+
+const startupRepairStorageDriver = {
+  deleteItem: async (key: string) => {
+    if (key === SETUP_IMPORT_STORAGE_KEYS.cachedMasterKey) {
+      await clearMasterKeySecurely();
+      return;
+    }
+    await deletePlatformItem(key);
+  },
+};
 
 export default function HomeScreen() {
   const [authenticated, setAuthenticated] = useState(false);
   const [vaultExists, setVaultExists] = useState<boolean | null>(null);
+  const [startupDecision, setStartupDecision] = useState<StartupRepairDecision | null>(null);
+  const [checkingStartupState, setCheckingStartupState] = useState(false);
+  const [repairingStartupState, setRepairingStartupState] = useState(false);
+  const [startupRepairError, setStartupRepairError] = useState<string | null>(null);
   const [iterations, setIterations] = useState<number>(100000);
   const [keyShares, setKeyShares] = useState<KeyShares | null>(null);
   const [masterSalt, setMasterSaltState] = useState<string | null>(null);
@@ -89,20 +114,50 @@ export default function HomeScreen() {
     };
   }, []);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const exists = await isVaultInitialized();
-        setVaultExists(exists);
-        if (exists) {
-          const savedProfile = await getSecurityProfile();
-          setIterations(Math.max(savedProfile || 100000, 3));
-          const salt = await getMasterSalt();
-          setMasterSaltState(salt);
-        }
-      } catch {}
-    })();
+  const runStartupRepairDecision = useCallback(async () => {
+    setCheckingStartupState(true);
+    setStartupRepairError(null);
+    setVaultExists(null);
+
+    try {
+      const decision = await readAndDecideStartupRepairState(startupSnapshotDriver);
+      setStartupDecision(decision);
+
+      if (decision.route === "setup") {
+        setMasterSaltState(null);
+        setVaultExists(false);
+      } else if (decision.route === "unlock") {
+        const savedProfile = await getSecurityProfile();
+        setIterations(Math.max(savedProfile || 100000, 3));
+        const salt = await getMasterSalt();
+        setMasterSaltState(salt);
+        setVaultExists(true);
+      }
+    } catch {
+      setStartupDecision({
+        route: "safe-error",
+        classification: "read-failed",
+        repairPlan: null,
+        state: null,
+        message: "PiPass could not inspect local setup state safely.",
+        reason: "snapshot-read-failed",
+        failedKey: "startup-state",
+      });
+    } finally {
+      setCheckingStartupState(false);
+    }
   }, []);
+
+  useEffect(() => {
+    if (!authenticated) {
+      setVaultExists(null);
+      setStartupDecision(null);
+      setStartupRepairError(null);
+      return;
+    }
+
+    void runStartupRepairDecision();
+  }, [authenticated, runStartupRepairDecision]);
 
   if (tamperLocked) {
     return (
@@ -120,6 +175,64 @@ export default function HomeScreen() {
 
   if (!authenticated) {
     return <AuthScreen onAuthenticated={() => setAuthenticated(true)} />;
+  }
+
+  if (checkingStartupState || startupDecision === null) {
+    return (
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" }}>
+        <ActivityIndicator color="#4CAF50" />
+      </View>
+    );
+  }
+
+  if (startupDecision.route === "repair-prompt") {
+    return (
+      <StartupRepairSurface
+        icon="construct-outline"
+        title="Setup Was Interrupted"
+        message="PiPass found an unfinished setup or backup restore. To continue safely, clear the incomplete local setup data and start setup again."
+        primaryLabel="Clear incomplete setup"
+        secondaryLabel="Not now"
+        busy={repairingStartupState}
+        error={startupRepairError}
+        onSecondary={() => setAuthenticated(false)}
+        onPrimary={async () => {
+          if (repairingStartupState) return;
+          setRepairingStartupState(true);
+          setStartupRepairError(null);
+          const result = await confirmStartupRepairDecision(
+            startupDecision,
+            startupRepairStorageDriver,
+          );
+          setRepairingStartupState(false);
+          if (result.success) {
+            await runStartupRepairDecision();
+          } else {
+            setStartupRepairError("PiPass could not clear incomplete setup data safely. Restart the app and try again.");
+          }
+        }}
+      />
+    );
+  }
+
+  if (startupDecision.route === "manual-repair") {
+    return (
+      <StartupRepairSurface
+        icon="warning-outline"
+        title="Manual Repair Needed"
+        message="PiPass found local vault state that needs manual repair. Your initialized vault data was not cleared automatically."
+      />
+    );
+  }
+
+  if (startupDecision.route === "safe-error") {
+    return (
+      <StartupRepairSurface
+        icon="alert-circle-outline"
+        title="Setup Check Failed"
+        message="PiPass could not check local setup state safely. Restart the app and try again."
+      />
+    );
   }
 
   if (vaultExists === null) return null;
@@ -283,6 +396,102 @@ export default function HomeScreen() {
         </View>
       )}
     </>
+  );
+}
+
+function StartupRepairSurface({
+  icon,
+  title,
+  message,
+  primaryLabel,
+  secondaryLabel,
+  busy = false,
+  error = null,
+  onPrimary,
+  onSecondary,
+}: {
+  icon: React.ComponentProps<typeof Ionicons>["name"];
+  title: string;
+  message: string;
+  primaryLabel?: string;
+  secondaryLabel?: string;
+  busy?: boolean;
+  error?: string | null;
+  onPrimary?: () => void | Promise<void>;
+  onSecondary?: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const webTopInset = Platform.OS === "web" ? 67 : 0;
+
+  return (
+    <View style={{ flex: 1, backgroundColor: "#000" }}>
+      <ScrollView
+        contentContainerStyle={{
+          flexGrow: 1,
+          justifyContent: "center",
+          alignItems: "center",
+          padding: 24,
+          paddingTop: insets.top + webTopInset,
+        }}
+      >
+        <Ionicons name={icon} size={64} color="#fbbf24" />
+        <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold" as const, marginTop: 24, textAlign: "center" }}>
+          {title}
+        </Text>
+        <Text style={{ color: "#aaa", fontSize: 15, marginTop: 16, textAlign: "center", lineHeight: 22 }}>
+          {message}
+        </Text>
+        {error && (
+          <Text style={{ color: "#ef4444", fontSize: 14, marginTop: 16, textAlign: "center", lineHeight: 20 }}>
+            {error}
+          </Text>
+        )}
+
+        {(primaryLabel || secondaryLabel) && (
+          <View style={{ width: "100%", marginTop: 36, gap: 12 }}>
+            {primaryLabel && (
+              <Pressable
+                onPress={onPrimary}
+                disabled={busy}
+                style={{
+                  backgroundColor: "#4CAF50",
+                  paddingVertical: 16,
+                  borderRadius: 12,
+                  alignItems: "center",
+                  width: "100%",
+                  opacity: busy ? 0.7 : 1,
+                }}
+              >
+                <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" as const }}>
+                  {busy ? "Clearing..." : primaryLabel}
+                </Text>
+              </Pressable>
+            )}
+
+            {secondaryLabel && (
+              <Pressable
+                onPress={onSecondary}
+                disabled={busy}
+                style={{
+                  backgroundColor: "#1a1a1a",
+                  paddingVertical: 16,
+                  borderRadius: 12,
+                  alignItems: "center",
+                  width: "100%",
+                  borderWidth: 1,
+                  borderColor: "#333",
+                  opacity: busy ? 0.7 : 1,
+                }}
+              >
+                <Text style={{ color: "#aaa", fontSize: 16, fontWeight: "600" as const }}>
+                  {secondaryLabel}
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        )}
+      </ScrollView>
+    </View>
   );
 }
 
