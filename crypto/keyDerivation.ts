@@ -67,12 +67,29 @@ interface KdfDerivationOptions {
 
 type ExplicitArgon2idDeriver = typeof deriveMasterKeyWithArgon2id;
 type ExplicitPbkdf2Deriver = typeof deriveMasterKeyWithPbkdf2;
+type MetadataKdfDeriver = typeof deriveMasterKeyFromKdfMetadata;
+type LegacyKdfDetector = typeof detectLegacyKdfFromMasterHash;
 
 interface LegacyKdfDetectionOptions extends KdfDerivationOptions {
   kdfVersion?: KdfVersion;
   createdAt?: number;
   deriveArgon2id?: ExplicitArgon2idDeriver;
   derivePbkdf2?: ExplicitPbkdf2Deriver;
+}
+
+export type UnlockKdfMetadataStatus = "valid" | "missing" | "invalid";
+
+export interface UnlockKdfDerivationPlanInput extends KdfDerivationOptions {
+  password: string;
+  saltHex: string;
+  profileIterations: number;
+  storedMasterHash: string;
+  existingMetadata?: KdfMetadata | null;
+  metadataStatus?: UnlockKdfMetadataStatus;
+  kdfVersion?: KdfVersion;
+  createdAt?: number;
+  deriveFromMetadata?: MetadataKdfDeriver;
+  detectLegacy?: LegacyKdfDetector;
 }
 
 export type LegacyKdfDetectionResult =
@@ -85,6 +102,24 @@ export type LegacyKdfDetectionResult =
   | {
       matched: false;
       reason: "invalid-input" | "no-match";
+    };
+
+export type UnlockKdfDerivationPlanResult =
+  | {
+      ok: true;
+      source: "metadata" | "legacy-detected";
+      metadata: KdfMetadata;
+      metadataToPersist?: KdfMetadata;
+      masterKeyHex: string;
+    }
+  | {
+      ok: false;
+      reason:
+        | "invalid-input"
+        | "invalid-metadata"
+        | "metadata-hash-mismatch"
+        | "legacy-no-match"
+        | "argon2id-unavailable";
     };
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -281,6 +316,94 @@ export async function detectLegacyKdfFromMasterHash(
   }
 
   return { matched: false, reason: "no-match" };
+}
+
+export async function planUnlockKdfDerivation(
+  input: UnlockKdfDerivationPlanInput,
+): Promise<UnlockKdfDerivationPlanResult> {
+  const {
+    password,
+    saltHex,
+    profileIterations,
+    storedMasterHash,
+    existingMetadata = null,
+    metadataStatus,
+    kdfVersion = "v1",
+    createdAt,
+    deviceUUID,
+  } = input;
+
+  if (
+    typeof password !== "string" ||
+    password.length === 0 ||
+    typeof saltHex !== "string" ||
+    saltHex.length === 0 ||
+    !Number.isSafeInteger(profileIterations) ||
+    profileIterations <= 0 ||
+    !/^[0-9a-f]{64}$/i.test(storedMasterHash) ||
+    !isKdfVersion(kdfVersion)
+  ) {
+    return { ok: false, reason: "invalid-input" };
+  }
+
+  const status = metadataStatus ?? (existingMetadata ? "valid" : "missing");
+  const derivationOptions: KdfDerivationOptions = deviceUUID ? { deviceUUID } : {};
+
+  if (status === "invalid") {
+    return { ok: false, reason: "invalid-metadata" };
+  }
+
+  if (status === "valid") {
+    if (!existingMetadata || !isValidKdfMetadata(existingMetadata)) {
+      return { ok: false, reason: "invalid-metadata" };
+    }
+
+    const deriveFromMetadata = input.deriveFromMetadata ?? deriveMasterKeyFromKdfMetadata;
+    try {
+      const masterKeyHex = await deriveFromMetadata(password, saltHex, existingMetadata, derivationOptions);
+      if (hashMasterKey(masterKeyHex) !== storedMasterHash) {
+        return { ok: false, reason: "metadata-hash-mismatch" };
+      }
+
+      return {
+        ok: true,
+        source: "metadata",
+        masterKeyHex,
+        metadata: existingMetadata,
+      };
+    } catch (err) {
+      if (err instanceof KdfDerivationError && err.message === "Argon2id is unavailable") {
+        return { ok: false, reason: "argon2id-unavailable" };
+      }
+      return { ok: false, reason: "metadata-hash-mismatch" };
+    }
+  }
+
+  if (status !== "missing") {
+    return { ok: false, reason: "invalid-input" };
+  }
+
+  const detectLegacy = input.detectLegacy ?? detectLegacyKdfFromMasterHash;
+  const legacyResult = await detectLegacy(password, saltHex, profileIterations, storedMasterHash, {
+    kdfVersion,
+    createdAt,
+    ...derivationOptions,
+  });
+
+  if (!legacyResult.matched) {
+    return {
+      ok: false,
+      reason: legacyResult.reason === "invalid-input" ? "invalid-input" : "legacy-no-match",
+    };
+  }
+
+  return {
+    ok: true,
+    source: "legacy-detected",
+    masterKeyHex: legacyResult.masterKeyHex,
+    metadata: legacyResult.metadata,
+    metadataToPersist: legacyResult.metadata,
+  };
 }
 
 // Derives the master key from a user-provided password.

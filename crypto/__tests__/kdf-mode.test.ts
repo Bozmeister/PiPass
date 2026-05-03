@@ -11,6 +11,7 @@ import {
   deriveMasterKeyWithPbkdf2,
   hashMasterKey,
   KdfDerivationError,
+  planUnlockKdfDerivation,
 } from "../keyDerivation";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -299,6 +300,233 @@ test("legacy KDF detection does not write KDF metadata to storage", async () => 
     );
 
     assert.equal(result.matched, true);
+    assert.equal(storage.items.has("pipass_kdf_metadata"), false);
+  } finally {
+    setPlatformStorageDriverForTests(null);
+  }
+});
+
+test("unlock KDF planner uses valid Argon2id metadata when the hash matches", async (t) => {
+  const metadata = buildArgon2idKdfMetadata(1000, ARGON2ID_PARAMS, "setup", {
+    createdAt: 1234567890,
+  });
+  let masterKeyHex: string;
+  try {
+    masterKeyHex = await deriveMasterKeyWithArgon2id(TEST_PASSWORD, TEST_SALT, ARGON2ID_PARAMS, {
+      deviceUUID: TEST_DEVICE_UUID,
+    });
+  } catch (err) {
+    if (err instanceof KdfDerivationError) {
+      t.skip("Argon2id is unavailable in this test environment");
+      return;
+    }
+    throw err;
+  }
+
+  const result = await planUnlockKdfDerivation({
+    password: TEST_PASSWORD,
+    saltHex: TEST_SALT,
+    profileIterations: 1000,
+    storedMasterHash: hashMasterKey(masterKeyHex),
+    existingMetadata: metadata,
+    metadataStatus: "valid",
+    deviceUUID: TEST_DEVICE_UUID,
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.source, "metadata");
+  assert.equal(result.masterKeyHex, masterKeyHex);
+  assert.deepEqual(result.metadata, metadata);
+  assert.equal(result.metadataToPersist, undefined);
+});
+
+test("unlock KDF planner uses valid PBKDF2 metadata when the hash matches", async () => {
+  const metadata = buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "legacy-detected", {
+    createdAt: 1234567890,
+  });
+  const masterKeyHex = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS, {
+    deviceUUID: TEST_DEVICE_UUID,
+  });
+
+  const result = await planUnlockKdfDerivation({
+    password: TEST_PASSWORD,
+    saltHex: TEST_SALT,
+    profileIterations: 1000,
+    storedMasterHash: hashMasterKey(masterKeyHex),
+    existingMetadata: metadata,
+    metadataStatus: "valid",
+    deviceUUID: TEST_DEVICE_UUID,
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.source, "metadata");
+  assert.equal(result.masterKeyHex, masterKeyHex);
+  assert.deepEqual(result.metadata, metadata);
+});
+
+test("unlock KDF planner fails closed on Argon2id metadata hash mismatch without legacy fallback", async () => {
+  const metadata = buildArgon2idKdfMetadata(1000, ARGON2ID_PARAMS, "setup", {
+    createdAt: 1234567890,
+  });
+
+  const result = await planUnlockKdfDerivation({
+    password: TEST_PASSWORD,
+    saltHex: TEST_SALT,
+    profileIterations: 1000,
+    storedMasterHash: "0".repeat(64),
+    existingMetadata: metadata,
+    metadataStatus: "valid",
+    deviceUUID: TEST_DEVICE_UUID,
+    deriveFromMetadata: async () => "a".repeat(64),
+    detectLegacy: async () => {
+      throw new Error("legacy detection should not run");
+    },
+  });
+
+  assert.deepEqual(result, { ok: false, reason: "metadata-hash-mismatch" });
+});
+
+test("unlock KDF planner fails closed on PBKDF2 metadata hash mismatch", async () => {
+  const metadata = buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "legacy-detected", {
+    createdAt: 1234567890,
+  });
+
+  const result = await planUnlockKdfDerivation({
+    password: TEST_PASSWORD,
+    saltHex: TEST_SALT,
+    profileIterations: 1000,
+    storedMasterHash: "0".repeat(64),
+    existingMetadata: metadata,
+    metadataStatus: "valid",
+    deviceUUID: TEST_DEVICE_UUID,
+  });
+
+  assert.deepEqual(result, { ok: false, reason: "metadata-hash-mismatch" });
+});
+
+test("unlock KDF planner detects missing-metadata Argon2id legacy match and returns metadataToPersist", async (t) => {
+  let masterKeyHex: string;
+  try {
+    masterKeyHex = await deriveMasterKeyWithArgon2id(TEST_PASSWORD, TEST_SALT, LEGACY_ARGON2ID_PARAMS, {
+      deviceUUID: TEST_DEVICE_UUID,
+    });
+  } catch (err) {
+    if (err instanceof KdfDerivationError) {
+      t.skip("Argon2id is unavailable in this test environment");
+      return;
+    }
+    throw err;
+  }
+
+  const result = await planUnlockKdfDerivation({
+    password: TEST_PASSWORD,
+    saltHex: TEST_SALT,
+    profileIterations: 3,
+    storedMasterHash: hashMasterKey(masterKeyHex),
+    metadataStatus: "missing",
+    deviceUUID: TEST_DEVICE_UUID,
+    createdAt: 1234567890,
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.source, "legacy-detected");
+  assert.equal(result.masterKeyHex, masterKeyHex);
+  assert.equal(result.metadata.algorithm, "argon2id");
+  assert.equal(result.metadata.source, "unlock-migration");
+  assert.deepEqual(result.metadataToPersist, result.metadata);
+});
+
+test("unlock KDF planner detects missing-metadata PBKDF2 legacy match and returns metadataToPersist", async () => {
+  const masterKeyHex = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS, {
+    deviceUUID: TEST_DEVICE_UUID,
+  });
+
+  const result = await planUnlockKdfDerivation({
+    password: TEST_PASSWORD,
+    saltHex: TEST_SALT,
+    profileIterations: 1000,
+    storedMasterHash: hashMasterKey(masterKeyHex),
+    metadataStatus: "missing",
+    deviceUUID: TEST_DEVICE_UUID,
+    createdAt: 1234567890,
+    detectLegacy: async () => ({
+      matched: true,
+      algorithm: "pbkdf2-sha256",
+      masterKeyHex,
+      metadata: buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "legacy-detected", {
+        createdAt: 1234567890,
+      }),
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.source, "legacy-detected");
+  assert.equal(result.masterKeyHex, masterKeyHex);
+  assert.equal(result.metadata.algorithm, "pbkdf2-sha256");
+  assert.equal(result.metadata.source, "legacy-detected");
+  assert.deepEqual(result.metadataToPersist, result.metadata);
+});
+
+test("unlock KDF planner returns legacy-no-match when missing metadata has no matching candidate", async () => {
+  const result = await planUnlockKdfDerivation({
+    password: TEST_PASSWORD,
+    saltHex: TEST_SALT,
+    profileIterations: 1000,
+    storedMasterHash: "0".repeat(64),
+    metadataStatus: "missing",
+    deviceUUID: TEST_DEVICE_UUID,
+    detectLegacy: async () => ({ matched: false, reason: "no-match" }),
+  });
+
+  assert.deepEqual(result, { ok: false, reason: "legacy-no-match" });
+});
+
+test("unlock KDF planner fails closed on invalid metadata status without legacy detection", async () => {
+  const result = await planUnlockKdfDerivation({
+    password: TEST_PASSWORD,
+    saltHex: TEST_SALT,
+    profileIterations: 1000,
+    storedMasterHash: "0".repeat(64),
+    metadataStatus: "invalid",
+    deviceUUID: TEST_DEVICE_UUID,
+    detectLegacy: async () => {
+      throw new Error("legacy detection should not run");
+    },
+  });
+
+  assert.deepEqual(result, { ok: false, reason: "invalid-metadata" });
+});
+
+test("unlock KDF planner does not write KDF metadata to storage", async () => {
+  const storage = new MemoryStorage();
+  setPlatformStorageDriverForTests(storage.driver);
+  try {
+    const masterKeyHex = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS, {
+      deviceUUID: TEST_DEVICE_UUID,
+    });
+
+    const result = await planUnlockKdfDerivation({
+      password: TEST_PASSWORD,
+      saltHex: TEST_SALT,
+      profileIterations: 1000,
+      storedMasterHash: hashMasterKey(masterKeyHex),
+      metadataStatus: "missing",
+      deviceUUID: TEST_DEVICE_UUID,
+      detectLegacy: async () => ({
+        matched: true,
+        algorithm: "pbkdf2-sha256",
+        masterKeyHex,
+        metadata: buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "legacy-detected", {
+          createdAt: 1234567890,
+        }),
+      }),
+    });
+
+    assert.equal(result.ok, true);
     assert.equal(storage.items.has("pipass_kdf_metadata"), false);
   } finally {
     setPlatformStorageDriverForTests(null);
