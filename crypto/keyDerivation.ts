@@ -1,6 +1,8 @@
 import CryptoJS from "crypto-js";
 import { getDeviceUUID, clearDeviceUUID } from "./deviceUUIDStorage";
 import {
+  buildArgon2idKdfMetadata,
+  buildPbkdf2KdfMetadata,
   isValidKdfMetadata,
   type Argon2idKdfParameters,
   type KdfMetadata,
@@ -63,6 +65,28 @@ interface KdfDerivationOptions {
   deviceUUID?: string;
 }
 
+type ExplicitArgon2idDeriver = typeof deriveMasterKeyWithArgon2id;
+type ExplicitPbkdf2Deriver = typeof deriveMasterKeyWithPbkdf2;
+
+interface LegacyKdfDetectionOptions extends KdfDerivationOptions {
+  kdfVersion?: KdfVersion;
+  createdAt?: number;
+  deriveArgon2id?: ExplicitArgon2idDeriver;
+  derivePbkdf2?: ExplicitPbkdf2Deriver;
+}
+
+export type LegacyKdfDetectionResult =
+  | {
+      matched: true;
+      algorithm: "argon2id" | "pbkdf2-sha256";
+      metadata: KdfMetadata;
+      masterKeyHex: string;
+    }
+  | {
+      matched: false;
+      reason: "invalid-input" | "no-match";
+    };
+
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b: number) => b.toString(16).padStart(2, "0"))
@@ -94,6 +118,32 @@ const KDF_CONFIGS = {
     parallelism: 1,
   },
 } as const;
+
+function isKdfVersion(value: unknown): value is KdfVersion {
+  return value === "v1" || value === "v2";
+}
+
+function safeProfileIterations(iterations: number): number {
+  return Math.max(iterations || 100000, 3);
+}
+
+function getArgon2idParameters(profileIterations: number, kdfVersion: KdfVersion): Argon2idKdfParameters {
+  const safeIterations = safeProfileIterations(profileIterations);
+  const config = KDF_CONFIGS[kdfVersion];
+  return {
+    memoryKiB: config.getMemorySize(safeIterations),
+    timeCost: config.getTimeCost(safeIterations),
+    parallelism: config.parallelism,
+    outputBytes: 32,
+  };
+}
+
+function getPbkdf2Parameters(profileIterations: number): Pbkdf2KdfParameters {
+  return {
+    iterations: safeProfileIterations(profileIterations),
+    outputBytes: 32,
+  };
+}
 
 export async function deriveMasterKeyWithArgon2id(
   password: string,
@@ -166,6 +216,73 @@ export async function deriveMasterKeyFromKdfMetadata(
   throw new KdfDerivationError("Unsupported KDF metadata");
 }
 
+export async function detectLegacyKdfFromMasterHash(
+  password: string,
+  saltHex: string,
+  profileIterations: number,
+  storedMasterHash: string,
+  options: LegacyKdfDetectionOptions = {},
+): Promise<LegacyKdfDetectionResult> {
+  const kdfVersion = options.kdfVersion ?? "v1";
+  if (
+    typeof password !== "string" ||
+    password.length === 0 ||
+    typeof saltHex !== "string" ||
+    saltHex.length === 0 ||
+    !Number.isSafeInteger(profileIterations) ||
+    profileIterations <= 0 ||
+    !/^[0-9a-f]{64}$/i.test(storedMasterHash) ||
+    !isKdfVersion(kdfVersion)
+  ) {
+    return { matched: false, reason: "invalid-input" };
+  }
+
+  const createdAt = options.createdAt ?? Date.now();
+  const derivationOptions: KdfDerivationOptions = options.deviceUUID
+    ? { deviceUUID: options.deviceUUID }
+    : {};
+  const argon2idParameters = getArgon2idParameters(profileIterations, kdfVersion);
+  const pbkdf2Parameters = getPbkdf2Parameters(profileIterations);
+  const deriveArgon2id = options.deriveArgon2id ?? deriveMasterKeyWithArgon2id;
+  const derivePbkdf2 = options.derivePbkdf2 ?? deriveMasterKeyWithPbkdf2;
+
+  try {
+    const masterKeyHex = await deriveArgon2id(password, saltHex, argon2idParameters, derivationOptions);
+    if (hashMasterKey(masterKeyHex) === storedMasterHash) {
+      return {
+        matched: true,
+        algorithm: "argon2id",
+        masterKeyHex,
+        metadata: buildArgon2idKdfMetadata(profileIterations, argon2idParameters, "unlock-migration", {
+          kdfVersion,
+          createdAt,
+        }),
+      };
+    }
+  } catch {
+    // Legacy detection must continue to the PBKDF2 candidate when
+    // explicit Argon2id is unavailable or fails.
+  }
+
+  try {
+    const masterKeyHex = await derivePbkdf2(password, saltHex, pbkdf2Parameters, derivationOptions);
+    if (hashMasterKey(masterKeyHex) === storedMasterHash) {
+      return {
+        matched: true,
+        algorithm: "pbkdf2-sha256",
+        masterKeyHex,
+        metadata: buildPbkdf2KdfMetadata(profileIterations, pbkdf2Parameters, "legacy-detected", {
+          createdAt,
+        }),
+      };
+    }
+  } catch {
+    return { matched: false, reason: "no-match" };
+  }
+
+  return { matched: false, reason: "no-match" };
+}
+
 // Derives the master key from a user-provided password.
 // Uses Argon2id when available, PBKDF2-SHA256 as fallback.
 // The salt must be stored alongside the vault — it is NOT secret.
@@ -176,7 +293,7 @@ export async function deriveMasterKey(
   iterations: number = 100000,
   kdfVersion: KdfVersion = "v1"
 ): Promise<string> {
-  const safeIterations = Math.max(iterations || 100000, 3);
+  const safeIterations = safeProfileIterations(iterations);
   const deviceUUID = await getDeviceUUID();
 
   // Mix password with device UUID so keys are device-bound

@@ -5,11 +5,15 @@ import {
   buildPbkdf2KdfMetadata,
 } from "../kdfMetadata";
 import {
+  detectLegacyKdfFromMasterHash,
   deriveMasterKeyFromKdfMetadata,
   deriveMasterKeyWithArgon2id,
   deriveMasterKeyWithPbkdf2,
+  hashMasterKey,
   KdfDerivationError,
 } from "../keyDerivation";
+import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
+import type { PlatformStorageDriver } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../kdfMetadata";
 
 const TEST_PASSWORD = "test password only";
@@ -24,6 +28,27 @@ const ARGON2ID_PARAMS = {
   parallelism: 1,
   outputBytes: 32 as const,
 };
+const LEGACY_ARGON2ID_PARAMS = {
+  memoryKiB: 65536,
+  timeCost: 3,
+  parallelism: 4,
+  outputBytes: 32 as const,
+};
+
+class MemoryStorage {
+  readonly items = new Map<string, string>();
+
+  readonly driver: PlatformStorageDriver = {
+    getItem: (key) => this.items.get(key) ?? null,
+    setItem: (key, value) => {
+      this.items.set(key, value);
+    },
+    deleteItem: (key) => {
+      this.items.delete(key);
+    },
+    isWeb: () => false,
+  };
+}
 
 function assertHexKey(value: string): void {
   assert.match(value, /^[0-9a-f]{64}$/);
@@ -133,4 +158,149 @@ test("metadata derivation rejects invalid metadata with a controlled error", asy
       err instanceof KdfDerivationError &&
       err.message === "Invalid KDF metadata",
   );
+});
+
+test("legacy KDF detection detects Argon2id when the stored master hash matches", async (t) => {
+  let masterKeyHex: string;
+  try {
+    masterKeyHex = await deriveMasterKeyWithArgon2id(TEST_PASSWORD, TEST_SALT, LEGACY_ARGON2ID_PARAMS, {
+      deviceUUID: TEST_DEVICE_UUID,
+    });
+  } catch (err) {
+    if (err instanceof KdfDerivationError) {
+      t.skip("Argon2id is unavailable in this test environment");
+      return;
+    }
+    throw err;
+  }
+
+  const result = await detectLegacyKdfFromMasterHash(
+    TEST_PASSWORD,
+    TEST_SALT,
+    3,
+    hashMasterKey(masterKeyHex),
+    { deviceUUID: TEST_DEVICE_UUID, createdAt: 1234567890 },
+  );
+
+  assert.equal(result.matched, true);
+  if (!result.matched) return;
+  assert.equal(result.algorithm, "argon2id");
+  assert.equal(result.masterKeyHex, masterKeyHex);
+  assert.equal(result.metadata.source, "unlock-migration");
+  assert.equal(result.metadata.profileIterations, 3);
+  assert.equal(result.metadata.kdfVersion, "v1");
+  assert.equal(result.metadata.saltKey, "pipass_master_salt");
+  assert.equal(result.metadata.deviceBinding, "deviceUUID:v1");
+  assert.deepEqual(result.metadata.parameters, LEGACY_ARGON2ID_PARAMS);
+});
+
+test("legacy KDF detection detects PBKDF2 when the stored master hash matches", async () => {
+  const masterKeyHex = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS, {
+    deviceUUID: TEST_DEVICE_UUID,
+  });
+
+  const result = await detectLegacyKdfFromMasterHash(
+    TEST_PASSWORD,
+    TEST_SALT,
+    1000,
+    hashMasterKey(masterKeyHex),
+    {
+      deviceUUID: TEST_DEVICE_UUID,
+      createdAt: 1234567890,
+      deriveArgon2id: async () => {
+        throw new KdfDerivationError("Argon2id is unavailable");
+      },
+    },
+  );
+
+  assert.equal(result.matched, true);
+  if (!result.matched) return;
+  assert.equal(result.algorithm, "pbkdf2-sha256");
+  assert.equal(result.masterKeyHex, masterKeyHex);
+  assert.equal(result.metadata.source, "legacy-detected");
+  assert.equal(result.metadata.profileIterations, 1000);
+  assert.equal(result.metadata.kdfVersion, "legacy-pbkdf2-v1");
+  assert.equal(result.metadata.saltKey, "pipass_master_salt");
+  assert.equal(result.metadata.deviceBinding, "deviceUUID:v1");
+  assert.deepEqual(result.metadata.parameters, PBKDF2_PARAMS);
+});
+
+test("legacy KDF detection returns no-match when neither candidate matches", async () => {
+  const result = await detectLegacyKdfFromMasterHash(
+    TEST_PASSWORD,
+    TEST_SALT,
+    1000,
+    "0".repeat(64),
+    {
+      deviceUUID: TEST_DEVICE_UUID,
+      deriveArgon2id: async () => {
+        throw new KdfDerivationError("Argon2id derivation failed");
+      },
+    },
+  );
+
+  assert.deepEqual(result, { matched: false, reason: "no-match" });
+});
+
+test("legacy KDF detection still tries PBKDF2 after explicit Argon2id failure", async () => {
+  const masterKeyHex = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS, {
+    deviceUUID: TEST_DEVICE_UUID,
+  });
+
+  const result = await detectLegacyKdfFromMasterHash(
+    TEST_PASSWORD,
+    TEST_SALT,
+    1000,
+    hashMasterKey(masterKeyHex),
+    {
+      deviceUUID: TEST_DEVICE_UUID,
+      deriveArgon2id: async () => {
+        throw new KdfDerivationError("Argon2id derivation failed");
+      },
+    },
+  );
+
+  assert.equal(result.matched, true);
+  if (!result.matched) return;
+  assert.equal(result.algorithm, "pbkdf2-sha256");
+});
+
+test("legacy KDF detection returns invalid-input for malformed inputs", async () => {
+  const result = await detectLegacyKdfFromMasterHash(
+    "",
+    TEST_SALT,
+    1000,
+    "not-a-hash",
+    { deviceUUID: TEST_DEVICE_UUID },
+  );
+
+  assert.deepEqual(result, { matched: false, reason: "invalid-input" });
+});
+
+test("legacy KDF detection does not write KDF metadata to storage", async () => {
+  const storage = new MemoryStorage();
+  setPlatformStorageDriverForTests(storage.driver);
+  try {
+    const masterKeyHex = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS, {
+      deviceUUID: TEST_DEVICE_UUID,
+    });
+
+    const result = await detectLegacyKdfFromMasterHash(
+      TEST_PASSWORD,
+      TEST_SALT,
+      1000,
+      hashMasterKey(masterKeyHex),
+      {
+        deviceUUID: TEST_DEVICE_UUID,
+        deriveArgon2id: async () => {
+          throw new KdfDerivationError("Argon2id is unavailable");
+        },
+      },
+    );
+
+    assert.equal(result.matched, true);
+    assert.equal(storage.items.has("pipass_kdf_metadata"), false);
+  } finally {
+    setPlatformStorageDriverForTests(null);
+  }
 });
