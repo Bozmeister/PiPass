@@ -35,6 +35,10 @@ import {
   SETUP_IMPORT_STORAGE_KEYS,
   type SetupImportCommitPlan,
 } from "../../lib/setupImportCommitPlan";
+import {
+  buildSetupImportRepairPlan,
+  classifySetupImportLocalState,
+} from "../../lib/setupImportRepairPlan";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -310,6 +314,16 @@ function commitPlanFixture(options: {
 
   assert.equal(result.ok, true);
   return result.plan;
+}
+
+function setupMetadataSnapshot() {
+  return {
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.masterHash]: "master-hash-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.securityProfile]: "100000",
+    [SETUP_IMPORT_STORAGE_KEYS.kdfMetadata]: "kdf-metadata-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash]: "recovery-hash-placeholder",
+  };
 }
 
 test("clearVault clears local vault data but preserves auth and install identity state", async (t) => {
@@ -1871,5 +1885,191 @@ test("setup/import atomic executor does not write storage when validation fails"
 
   assert.equal(result.success, false);
   assert.equal(storage.calls.length, 0);
+  assert.equal(storage.items.size, 0);
+});
+
+test("setup/import repair planner classifies clean uninitialized state with no action", () => {
+  const snapshot = {};
+  const state = classifySetupImportLocalState(snapshot);
+  const plan = buildSetupImportRepairPlan(snapshot);
+
+  assert.equal(state.classification, "clean-uninitialized");
+  assert.equal(state.initialized, false);
+  assert.equal(plan.action, "none");
+  assert.deepEqual(plan.keysToDelete, []);
+});
+
+test("setup/import repair planner classifies initialized state with metadata with no action", () => {
+  const snapshot = {
+    ...setupMetadataSnapshot(),
+    [SETUP_IMPORT_STORAGE_KEYS.vaultInitialized]: "1",
+  };
+  const state = classifySetupImportLocalState(snapshot);
+  const plan = buildSetupImportRepairPlan(snapshot);
+
+  assert.equal(state.classification, "initialized");
+  assert.equal(state.initialized, true);
+  assert.equal(plan.action, "none");
+});
+
+test("setup/import repair planner recommends clearing partial setup metadata", () => {
+  const snapshot = setupMetadataSnapshot();
+  const state = classifySetupImportLocalState(snapshot);
+  const plan = buildSetupImportRepairPlan(snapshot);
+
+  assert.equal(state.classification, "partial-setup");
+  assert.equal(plan.action, "clear-local-setup-import-state");
+  assert.equal(plan.keysToDelete.includes(SETUP_IMPORT_STORAGE_KEYS.masterSalt), true);
+  assert.equal(plan.keysToDelete.includes(SETUP_IMPORT_STORAGE_KEYS.kdfMetadata), true);
+  assert.equal(plan.keysToDelete.includes(SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash), true);
+});
+
+test("setup/import repair planner recommends clearing partial import records", () => {
+  const snapshot = {
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: JSON.stringify(["entry-a"]),
+    "pipass_vault_entry-a": "entry-record-placeholder",
+  };
+  const state = classifySetupImportLocalState(snapshot);
+  const plan = buildSetupImportRepairPlan(snapshot);
+
+  assert.equal(state.classification, "partial-import");
+  assert.equal(plan.action, "clear-local-setup-import-state");
+  assert.deepEqual(plan.keysToDelete, [
+    "pipass_vault_entry-a",
+    SETUP_IMPORT_STORAGE_KEYS.vaultIndex,
+  ]);
+});
+
+test("setup/import repair planner recommends clearing setup metadata plus imported records", () => {
+  const snapshot = {
+    ...setupMetadataSnapshot(),
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: JSON.stringify(["entry-a"]),
+    "pipass_vault_entry-a": "entry-record-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.notesIndex]: JSON.stringify(["note-a"]),
+    "pipass_note_note-a": "note-record-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.sharedVault]: "shared-vault-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.cachedMasterKey]: "cached-key-placeholder",
+  };
+  const plan = buildSetupImportRepairPlan(snapshot);
+
+  assert.equal(plan.action, "clear-local-setup-import-state");
+  for (const key of [
+    SETUP_IMPORT_STORAGE_KEYS.masterSalt,
+    SETUP_IMPORT_STORAGE_KEYS.masterHash,
+    SETUP_IMPORT_STORAGE_KEYS.securityProfile,
+    SETUP_IMPORT_STORAGE_KEYS.kdfMetadata,
+    SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash,
+    SETUP_IMPORT_STORAGE_KEYS.vaultIndex,
+    "pipass_vault_entry-a",
+    SETUP_IMPORT_STORAGE_KEYS.notesIndex,
+    "pipass_note_note-a",
+    SETUP_IMPORT_STORAGE_KEYS.sharedVault,
+    SETUP_IMPORT_STORAGE_KEYS.cachedMasterKey,
+  ]) {
+    assert.equal(plan.keysToDelete.includes(key), true, `${key} should be in repair plan`);
+  }
+});
+
+test("setup/import repair planner requires manual repair when initialized marker lacks metadata", () => {
+  const snapshot = {
+    [SETUP_IMPORT_STORAGE_KEYS.vaultInitialized]: "1",
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "master-salt-placeholder",
+  };
+  const state = classifySetupImportLocalState(snapshot);
+  const plan = buildSetupImportRepairPlan(snapshot);
+
+  assert.equal(state.classification, "inconsistent-initialized");
+  assert.equal(plan.action, "manual-repair-required");
+  assert.deepEqual(plan.keysToDelete, []);
+});
+
+test("setup/import repair planner clears malformed vault index before initialization", () => {
+  const snapshot = {
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: "{not-json",
+  };
+  const state = classifySetupImportLocalState(snapshot);
+  const plan = buildSetupImportRepairPlan(snapshot);
+
+  assert.equal(state.classification, "unknown-inconsistent");
+  assert.deepEqual(state.reasons, ["malformed-vault-index"]);
+  assert.equal(plan.action, "clear-local-setup-import-state");
+  assert.deepEqual(plan.keysToDelete, [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]);
+});
+
+test("setup/import repair planner clears dangling entry key before initialization", () => {
+  const snapshot = {
+    "pipass_vault_entry-a": "entry-record-placeholder",
+  };
+  const state = classifySetupImportLocalState(snapshot);
+  const plan = buildSetupImportRepairPlan(snapshot);
+
+  assert.equal(state.classification, "unknown-inconsistent");
+  assert.deepEqual(state.reasons, ["dangling-vault-entry"]);
+  assert.equal(plan.action, "clear-local-setup-import-state");
+  assert.deepEqual(plan.keysToDelete, ["pipass_vault_entry-a"]);
+});
+
+test("setup/import repair planner requires manual repair for dangling entry after initialization", () => {
+  const snapshot = {
+    ...setupMetadataSnapshot(),
+    [SETUP_IMPORT_STORAGE_KEYS.vaultInitialized]: "1",
+    "pipass_vault_entry-a": "entry-record-placeholder",
+  };
+  const state = classifySetupImportLocalState(snapshot);
+  const plan = buildSetupImportRepairPlan(snapshot);
+
+  assert.equal(state.classification, "inconsistent-initialized");
+  assert.deepEqual(state.reasons, ["dangling-vault-entry"]);
+  assert.equal(plan.action, "manual-repair-required");
+  assert.deepEqual(plan.keysToDelete, []);
+});
+
+test("setup/import repair plan includes keys only and omits stored values", () => {
+  const secretValue = "PLAINTEXT_SECRET CIPHERTEXT_SECRET KEY_SECRET";
+  const snapshot = {
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: secretValue,
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: JSON.stringify(["entry-a"]),
+    "pipass_vault_entry-a": "CIPHERTEXT_SECRET",
+  };
+  const plan = buildSetupImportRepairPlan(snapshot);
+  const serialized = JSON.stringify(plan);
+
+  assert.equal(plan.action, "clear-local-setup-import-state");
+  assert.equal(serialized.includes(secretValue), false);
+  assert.equal(serialized.includes("PLAINTEXT_SECRET"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+  assert.equal(serialized.includes("KEY_SECRET"), false);
+  assert.equal(serialized.includes(SETUP_IMPORT_STORAGE_KEYS.masterSalt), true);
+  assert.equal(serialized.includes("pipass_vault_entry-a"), true);
+});
+
+test("setup/import repair planner is deterministic", () => {
+  const snapshot = {
+    "pipass_vault_entry-b": "entry-b-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.masterHash]: "master-hash-placeholder",
+    "pipass_note_note-a": "note-a-placeholder",
+    [SETUP_IMPORT_STORAGE_KEYS.notesIndex]: JSON.stringify(["note-a"]),
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: JSON.stringify(["entry-a"]),
+    "pipass_vault_entry-a": "entry-a-placeholder",
+  };
+
+  assert.deepEqual(
+    classifySetupImportLocalState(snapshot),
+    classifySetupImportLocalState(snapshot),
+  );
+  assert.deepEqual(buildSetupImportRepairPlan(snapshot), buildSetupImportRepairPlan(snapshot));
+});
+
+test("setup/import repair planner does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const plan = buildSetupImportRepairPlan({
+    ...setupMetadataSnapshot(),
+    [SETUP_IMPORT_STORAGE_KEYS.vaultIndex]: JSON.stringify(["entry-a"]),
+    "pipass_vault_entry-a": "entry-record-placeholder",
+  });
+
+  assert.equal(plan.action, "clear-local-setup-import-state");
   assert.equal(storage.items.size, 0);
 });
