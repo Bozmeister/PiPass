@@ -145,6 +145,48 @@ Reset/logout boundaries:
 
 ## 8. Automated Coverage Already Present
 
+## 8. Startup Repair Testability Hooks
+
+Prompt 057 adds stable React Native `testID` selectors for future UI automation. Tests should target these IDs instead of visible copy where possible.
+
+Repair prompt:
+
+- container: `startup-repair-prompt`
+- title: `startup-repair-title`
+- message: `startup-repair-message`
+- confirm button: `startup-repair-confirm`
+- cancel button: `startup-repair-cancel`
+
+Manual repair blocking state:
+
+- container: `startup-repair-manual`
+- title: `startup-repair-manual-title`
+- message: `startup-repair-manual-message`
+
+Safe-error blocking state:
+
+- container: `startup-repair-safe-error`
+- title: `startup-repair-safe-error-title`
+- message: `startup-repair-safe-error-message`
+
+Future UI tests should verify:
+
+- `startup-repair-prompt` appears for partial setup/import states.
+- `startup-repair-confirm` exists but does not run until clicked.
+- `startup-repair-cancel` returns to the auth gate.
+- `startup-repair-manual` appears for initialized inconsistent states.
+- `startup-repair-safe-error` appears for snapshot read failures.
+- No repair surface text contains hashes, salts, encrypted blobs, metadata JSON, `deviceUUID`, or record contents.
+
+Accessibility labels are intentionally generic and safe:
+
+- `Startup repair prompt`
+- `Manual startup repair required`
+- `Startup repair check failed`
+- button labels match the visible button text
+
+## 9. Automated Coverage Already Present
+
 Existing tests cover:
 
 - `classifySetupImportLocalState()` classification
@@ -159,7 +201,9 @@ Existing tests cover:
 
 Prompt 055 baseline: `npm test` passed `211/211`.
 
-## 9. Remaining Testability Gaps
+Prompt 057 does not add a UI test framework or app-root rendered component tests. It only adds stable hooks for later automation.
+
+## 10. Remaining Testability Gaps
 
 - No app-root UI automation currently verifies the rendered repair screens.
 - No end-to-end browser test currently clicks "Not now" or "Clear incomplete setup".
@@ -168,7 +212,7 @@ Prompt 055 baseline: `npm test` passed `211/211`.
 - Manual repair copy is not snapshot-tested.
 - The current snapshot reader cannot enumerate dangling record keys that are not referenced by indexes unless a future scoped key-listing abstraction is added.
 
-## 10. Recommended Manual Result Format
+## 11. Recommended Manual Result Format
 
 For each manual run, record only:
 

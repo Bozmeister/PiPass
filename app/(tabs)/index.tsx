@@ -188,6 +188,12 @@ export default function HomeScreen() {
   if (startupDecision.route === "repair-prompt") {
     return (
       <StartupRepairSurface
+        containerTestID="startup-repair-prompt"
+        titleTestID="startup-repair-title"
+        messageTestID="startup-repair-message"
+        primaryTestID="startup-repair-confirm"
+        secondaryTestID="startup-repair-cancel"
+        accessibilityLabel="Startup repair prompt"
         icon="construct-outline"
         title="Setup Was Interrupted"
         message="PiPass found an unfinished setup or backup restore. To continue safely, clear the incomplete local setup data and start setup again."
@@ -218,6 +224,10 @@ export default function HomeScreen() {
   if (startupDecision.route === "manual-repair") {
     return (
       <StartupRepairSurface
+        containerTestID="startup-repair-manual"
+        titleTestID="startup-repair-manual-title"
+        messageTestID="startup-repair-manual-message"
+        accessibilityLabel="Manual startup repair required"
         icon="warning-outline"
         title="Manual Repair Needed"
         message="PiPass found local vault state that needs manual repair. Your initialized vault data was not cleared automatically."
@@ -228,6 +238,10 @@ export default function HomeScreen() {
   if (startupDecision.route === "safe-error") {
     return (
       <StartupRepairSurface
+        containerTestID="startup-repair-safe-error"
+        titleTestID="startup-repair-safe-error-title"
+        messageTestID="startup-repair-safe-error-message"
+        accessibilityLabel="Startup repair check failed"
         icon="alert-circle-outline"
         title="Setup Check Failed"
         message="PiPass could not check local setup state safely. Restart the app and try again."
@@ -400,6 +414,12 @@ export default function HomeScreen() {
 }
 
 function StartupRepairSurface({
+  containerTestID,
+  titleTestID,
+  messageTestID,
+  primaryTestID,
+  secondaryTestID,
+  accessibilityLabel,
   icon,
   title,
   message,
@@ -410,6 +430,12 @@ function StartupRepairSurface({
   onPrimary,
   onSecondary,
 }: {
+  containerTestID: string;
+  titleTestID: string;
+  messageTestID: string;
+  primaryTestID?: string;
+  secondaryTestID?: string;
+  accessibilityLabel: string;
   icon: React.ComponentProps<typeof Ionicons>["name"];
   title: string;
   message: string;
@@ -424,7 +450,12 @@ function StartupRepairSurface({
   const webTopInset = Platform.OS === "web" ? 67 : 0;
 
   return (
-    <View style={{ flex: 1, backgroundColor: "#000" }}>
+    <View
+      style={{ flex: 1, backgroundColor: "#000" }}
+      testID={containerTestID}
+      accessible
+      accessibilityLabel={accessibilityLabel}
+    >
       <ScrollView
         contentContainerStyle={{
           flexGrow: 1,
@@ -435,10 +466,17 @@ function StartupRepairSurface({
         }}
       >
         <Ionicons name={icon} size={64} color="#fbbf24" />
-        <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold" as const, marginTop: 24, textAlign: "center" }}>
+        <Text
+          style={{ color: "#fff", fontSize: 24, fontWeight: "bold" as const, marginTop: 24, textAlign: "center" }}
+          testID={titleTestID}
+          accessibilityRole="header"
+        >
           {title}
         </Text>
-        <Text style={{ color: "#aaa", fontSize: 15, marginTop: 16, textAlign: "center", lineHeight: 22 }}>
+        <Text
+          style={{ color: "#aaa", fontSize: 15, marginTop: 16, textAlign: "center", lineHeight: 22 }}
+          testID={messageTestID}
+        >
           {message}
         </Text>
         {error && (
@@ -453,6 +491,9 @@ function StartupRepairSurface({
               <Pressable
                 onPress={onPrimary}
                 disabled={busy}
+                testID={primaryTestID}
+                accessibilityRole="button"
+                accessibilityLabel={primaryLabel}
                 style={{
                   backgroundColor: "#4CAF50",
                   paddingVertical: 16,
@@ -472,6 +513,9 @@ function StartupRepairSurface({
               <Pressable
                 onPress={onSecondary}
                 disabled={busy}
+                testID={secondaryTestID}
+                accessibilityRole="button"
+                accessibilityLabel={secondaryLabel}
                 style={{
                   backgroundColor: "#1a1a1a",
                   paddingVertical: 16,
