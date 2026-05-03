@@ -55,13 +55,13 @@ const QK_HONEYTOKENS = ["/api/security/honeytokens"] as const;
 // decoy vault entry"). Picked at random so a user creating
 // multiple decoys doesn't end up with N copies of "Backup Crypto
 // Wallet" — that pattern itself would be a tell.
-const DECOY_TEMPLATES: ReadonlyArray<{
+const DECOY_TEMPLATES: readonly {
   label: string;
   title: string;
   username: string;
   url: string;
   notes: string;
-}> = [
+}[] = [
   {
     label: "Backup Crypto Wallet",
     title: "Backup Crypto Wallet",

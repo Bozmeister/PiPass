@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { View, Text, TextInput, Pressable, Platform, Alert, ActivityIndicator, ScrollView } from "react-native";
+import { View, Text, TextInput, Pressable, Platform, ActivityIndicator, ScrollView } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -309,7 +309,7 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
 
       await storeMasterKeySecurely(keyHex);
       onUnlocked(shares);
-    } catch (err) {
+    } catch {
       setError("Failed to derive key. Please try again.");
     }
     setUnlocking(false);

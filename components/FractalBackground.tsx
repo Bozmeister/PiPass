@@ -113,7 +113,7 @@ export default function FractalBackground({
       }
     }
     return elements;
-  }, [pixels, cellW, cellH]);
+  }, [pixels, cellW, cellH, maxIter]);
 
   return (
     <View

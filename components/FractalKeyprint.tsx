@@ -38,7 +38,7 @@ export default function FractalKeyprint({
     );
     animation.start();
     return () => animation.stop();
-  }, [animate]);
+  }, [animate, pulseAnim]);
 
   const dataUri = useMemo(() => generateFractalDataUri(seed, size * 2, 48, 300, fractalParams), [seed, size, fractalParams]);
 

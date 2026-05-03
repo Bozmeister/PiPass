@@ -1,5 +1,5 @@
-import React, { useState, useMemo, useRef, useEffect } from "react";
-import { View, Text, Pressable, Modal, ScrollView, Platform, ActivityIndicator, Alert, Image } from "react-native";
+import React, { useState, useRef, useEffect } from "react";
+import { View, Text, Pressable, Modal, ScrollView, Platform, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Clipboard from "expo-clipboard";

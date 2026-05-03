@@ -37,7 +37,7 @@ export function ErrorFallback({ error, resetError }: ErrorFallbackProps) {
   const handleRestart = async () => {
     try {
       await reloadAppAsync();
-    } catch (restartError) {
+    } catch {
       resetError();
     }
   };

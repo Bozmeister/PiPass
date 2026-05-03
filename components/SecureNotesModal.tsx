@@ -77,7 +77,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
       setContent("");
       setView("list");
       if (Platform.OS === "web") { alert("Secure note saved."); } else { Alert.alert("Saved", "Secure note encrypted and stored."); }
-    } catch (err) {
+    } catch {
       const msg = "Failed to save note.";
       if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Error", msg); }
     } finally {
@@ -103,7 +103,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
       }
       const decrypted = decryptSecureNote(note, keyShares);
       setDecryptedNote(decrypted);
-    } catch (err) {
+    } catch {
       setDecryptedNote(null);
       const msg = "Failed to decrypt note.";
       if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Error", msg); }

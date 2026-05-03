@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { View, Text, Modal, Pressable, TextInput, Platform } from "react-native";
+import { View, Text, Modal, Pressable, TextInput } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_FOCUS } from "../styles/inputTheme";
 
 interface DeleteEntryModalProps {
@@ -19,7 +18,6 @@ export default function DeleteEntryModal({
   onCancel,
   onActivity,
 }: DeleteEntryModalProps) {
-  const insets = useSafeAreaInsets();
   const [confirmText, setConfirmText] = useState("");
   const [inputFocused, setInputFocused] = useState(false);
 
