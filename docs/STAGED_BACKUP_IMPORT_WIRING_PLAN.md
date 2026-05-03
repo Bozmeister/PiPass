@@ -31,6 +31,8 @@ The future staged flow must stop writing records from the picker.
 
 Prompt 059 implementation note: backup selection in `SeedSetupScreen` now validates the selected file with `parsePipassBackup()` and stores only a safe in-memory summary. It no longer calls `saveEntry()` or `saveSecureNote()` from the setup import button, and it does not regenerate `pipass_shared_vault` or commit staged records.
 
+Prompt 060 implementation note: staged backup state is now lifted from `SeedSetupScreen` to app root through an optional in-memory callback. App root stores the staged result for future orchestration and clears it when leaving the first-time setup/auth/reset paths, but it still does not pass staged records into setup, recovery confirmation, or any commit executor.
+
 ## 3. Existing Helper Layers
 
 Prepared helper layers are available but not fully wired into import:
@@ -224,7 +226,7 @@ Manual verification should reuse `docs/STARTUP_REPAIR_MANUAL_VERIFICATION.md` an
 Recommended staged rollout:
 
 1. Prompt 059: change `SeedSetupScreen` import button to parse/stage only, with no storage writes. Completed as local screen state only; app-root staged ownership remains future work.
-2. Prompt 060: pass staged backup summary to app root/setup flow, still with no commit.
+2. Prompt 060: pass staged backup summary/result to app root/setup flow, still with no commit. Completed as in-memory app-root state only.
 3. Prompt 061: add a setup/import commit orchestration helper using existing plan/executor, with injected dependencies.
 4. Prompt 062: wire commit helper behind recovery confirmation.
 5. Prompt 063: remove or block old immediate import writes.

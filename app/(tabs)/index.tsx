@@ -5,7 +5,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_ERROR, INPUT_BORDER_FOCUS } from "../../styles/inputTheme";
 import AuthScreen from "../../screens/AuthScreen";
-import SeedSetupScreen from "../../screens/SeedSetupScreen";
+import SeedSetupScreen, { type StagedBackupSelection } from "../../screens/SeedSetupScreen";
 import VaultScreen from "../../screens/VaultScreen";
 import {
   setVaultInitialized,
@@ -82,6 +82,7 @@ export default function HomeScreen() {
   const [pendingRecoveryKey, setPendingRecoveryKey] = useState<string | null>(null);
   const [pendingRecoveryRawHex, setPendingRecoveryRawHex] = useState<string>("");
   const [pendingSetupShares, setPendingSetupShares] = useState<KeyShares | null>(null);
+  const [, setStagedSetupBackup] = useState<StagedBackupSelection | null>(null);
   const [vaultLocked, setVaultLocked] = useState(false);
   const [showUnlockNuclearReset, setShowUnlockNuclearReset] = useState(false);
   const lockedSharesRef = useRef<KeyShares | null>(null);
@@ -98,6 +99,7 @@ export default function HomeScreen() {
       }
       setKeyShares(null);
       setAuthenticated(false);
+      setStagedSetupBackup(null);
       setTamperLocked(true);
     });
 
@@ -127,6 +129,7 @@ export default function HomeScreen() {
         setMasterSaltState(null);
         setVaultExists(false);
       } else if (decision.route === "unlock") {
+        setStagedSetupBackup(null);
         const savedProfile = await getSecurityProfile();
         setIterations(Math.max(savedProfile || 100000, 3));
         const salt = await getMasterSalt();
@@ -153,6 +156,7 @@ export default function HomeScreen() {
       setVaultExists(null);
       setStartupDecision(null);
       setStartupRepairError(null);
+      setStagedSetupBackup(null);
       return;
     }
 
@@ -259,6 +263,7 @@ export default function HomeScreen() {
         rawKeyHex={pendingRecoveryRawHex}
         onConfirm={async () => {
           await setVaultInitialized(true);
+          setStagedSetupBackup(null);
           setPendingRecoveryKey(null);
           setPendingRecoveryRawHex("");
           setVaultExists(true);
@@ -273,32 +278,35 @@ export default function HomeScreen() {
 
   if (!vaultExists) {
     return (
-      <SeedSetupScreen onSetup={async (password, iters) => {
-        const setup = await performFirstTimeVaultSetup(
-          { password, iterations: iters },
-          {
-            generateMasterSalt,
-            deriveMasterKeyWithArgon2id,
-            splitKeyIntoShares,
-            hashMasterKey,
-            generateRecoveryKey,
-            hashRecoveryKey,
-            saveMasterSalt,
-            saveMasterKeyHash,
-            saveSecurityProfile,
-            saveKdfMetadata,
-            saveRecoveryKeyHash,
-            storeMasterKeySecurely,
-            wipeShares,
-          },
-        );
+      <SeedSetupScreen
+        onStagedBackupChange={setStagedSetupBackup}
+        onSetup={async (password, iters) => {
+          const setup = await performFirstTimeVaultSetup(
+            { password, iterations: iters },
+            {
+              generateMasterSalt,
+              deriveMasterKeyWithArgon2id,
+              splitKeyIntoShares,
+              hashMasterKey,
+              generateRecoveryKey,
+              hashRecoveryKey,
+              saveMasterSalt,
+              saveMasterKeyHash,
+              saveSecurityProfile,
+              saveKdfMetadata,
+              saveRecoveryKeyHash,
+              storeMasterKeySecurely,
+              wipeShares,
+            },
+          );
 
-        setMasterSaltState(setup.salt);
-        setIterations(setup.iterations);
-        setPendingSetupShares(setup.shares);
-        setPendingRecoveryRawHex(setup.rawRecoveryKeyHex);
-        setPendingRecoveryKey(formatRecoveryKey(setup.rawRecoveryKeyHex));
-      }} />
+          setMasterSaltState(setup.salt);
+          setIterations(setup.iterations);
+          setPendingSetupShares(setup.shares);
+          setPendingRecoveryRawHex(setup.rawRecoveryKeyHex);
+          setPendingRecoveryKey(formatRecoveryKey(setup.rawRecoveryKeyHex));
+        }}
+      />
     );
   }
 
@@ -317,6 +325,7 @@ export default function HomeScreen() {
           onConfirmReset={async () => {
             await destroyAllData();
             setShowUnlockNuclearReset(false);
+            setStagedSetupBackup(null);
             setVaultExists(false);
             setKeyShares(null);
           }}
@@ -361,6 +370,7 @@ export default function HomeScreen() {
             setKeyShares(null);
             setVaultLocked(false);
             setVaultExists(false);
+            setStagedSetupBackup(null);
             setAuthenticated(false);
           }}
         />
@@ -393,6 +403,7 @@ export default function HomeScreen() {
               setKeyShares(null);
               setVaultLocked(false);
               setVaultExists(false);
+              setStagedSetupBackup(null);
               setAuthenticated(false);
             }}
             verifyPassword={async (pw) => {

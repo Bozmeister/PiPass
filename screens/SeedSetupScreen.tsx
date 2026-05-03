@@ -4,7 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
-import { parsePipassBackup } from "../lib/backupSchema";
+import { parsePipassBackup, type BackupStageResult } from "../lib/backupSchema";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_ERROR, INPUT_BORDER_FOCUS, INPUT_BORDER_SUCCESS, LABEL_COLOR } from "../styles/inputTheme";
 
 const PROFILES = [
@@ -15,17 +15,23 @@ const PROFILES = [
 
 const MIN_PASSWORD_LENGTH = 8;
 
-interface StagedBackupSummary {
+export interface StagedBackupSummary {
   entries: number;
   secureNotes: number;
   warnings: string[];
 }
 
-interface SeedSetupScreenProps {
-  onSetup: (password: string, iterations: number) => Promise<void> | void;
+export interface StagedBackupSelection {
+  backup: BackupStageResult;
+  summary: StagedBackupSummary;
 }
 
-export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
+interface SeedSetupScreenProps {
+  onSetup: (password: string, iterations: number) => Promise<void> | void;
+  onStagedBackupChange?: (selection: StagedBackupSelection | null) => void;
+}
+
+export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedSetupScreenProps) {
   const insets = useSafeAreaInsets();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -78,6 +84,7 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
       const staged = parsePipassBackup(json);
       if (!staged.ok) {
         setStagedBackupSummary(null);
+        onStagedBackupChange?.(null);
         const msg = "This file is not a supported PiPass backup. Nothing was imported.";
         setBackupStageError(msg);
         if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Backup Not Supported", msg); }
@@ -90,12 +97,14 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
         warnings: staged.backup.warnings,
       };
       setStagedBackupSummary(summary);
+      onStagedBackupChange?.({ backup: staged.backup, summary });
 
       const msg = `Backup validated: ${summary.entries} entries, ${summary.secureNotes} secure notes. Import commit will be enabled in a future step.`;
       if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Backup Validated", msg); }
     } catch {
       const msg = "Could not read the backup file. Make sure it's a valid .vault file.";
       setStagedBackupSummary(null);
+      onStagedBackupChange?.(null);
       setBackupStageError(msg);
       if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Import Failed", msg); }
     } finally {
@@ -348,6 +357,7 @@ export default function SeedSetupScreen({ onSetup }: SeedSetupScreenProps) {
                   onPress={() => {
                     setStagedBackupSummary(null);
                     setBackupStageError(null);
+                    onStagedBackupChange?.(null);
                   }}
                   style={{ marginTop: 10, alignSelf: "flex-start", paddingVertical: 6, paddingHorizontal: 8 }}
                   testID="clear-staged-backup-button"
