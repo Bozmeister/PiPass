@@ -76,6 +76,8 @@ Recommended flow:
 
 The short-term design may use the existing `reEncryptEntry` helper, but implementation must still add a full transactional workflow around it. A helper by itself is not enough.
 
+Current safety decision: changing the security/KDF profile for a populated local vault is paused until the staged re-encryption flow exists. Updating only `pipass_security_profile`, `pipass_master_hash`, cached key material, and active shares would change the key path without rewriting existing entries and secure notes.
+
 ## 6. Preferred Future Design Using Vault Root Key / Key Wrapping
 
 The preferred future architecture is:
@@ -376,4 +378,3 @@ Do not combine all stages into one implementation prompt. Password rotation touc
 - How should staged local rotation state be stored without risking rollback confusion?
 - Should passkey-only users still have server authHash rotation, or should passkey account recovery be a separate design?
 - How should existing users be migrated to the future root-key model without forcing immediate password change?
-

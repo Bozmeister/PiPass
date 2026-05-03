@@ -383,7 +383,7 @@ Minimum safe commit ordering for current architecture:
 - `FractalFingerprintRecord.kdf` is hard-coded to `"argon2id"` even though PBKDF2 fallback exists.
 - `getMasterKeySecurely()` is implemented but not used by current unlock flow.
 - `reEncryptEntry()` and `reEncryptSecureNote()` exist but are not wired into a transactional password rotation flow.
-- `confirmProfileChange()` in `VaultScreen` changes local key derivation profile/hash/cache/shares without re-encrypting existing vault entries or notes. Since iterations affect the derived master key, this path may make existing records undecryptable. It needs a dedicated audit/fix prompt before password rotation work.
+- Security profile changes are now blocked when indexed local vault entries or secure notes exist. This is a short-term safety guard only; profile changes for populated vaults still need a real staged re-encryption transaction before they can be enabled.
 - Setup backup import writes encrypted records before local password metadata is finalized. Compatibility and rekey expectations need a backup/restore audit.
 - `combineShares()` creates non-wipeable JavaScript strings.
 - `clearVault()` deletes `pipass_master_hash` but preserves salt/profile/recovery hash/deviceUUID; that is intentional reset-boundary behavior but important for rotation staging.
@@ -395,7 +395,7 @@ Minimum safe commit ordering for current architecture:
 Before implementing password rotation:
 
 - decide whether KDF algorithm/version must be stored before rotation
-- audit or disable profile changes that alter iterations without re-encryption
+- replace the short-term profile-change block with a staged re-encryption flow before enabling profile changes for populated vaults
 - add tests around current unlock with Argon2id and PBKDF2 fallback behavior where practical
 - add tests for password mismatch and missing `pipass_master_hash`
 - add tests proving all entries and secure notes survive staged re-encryption

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clearVault, destroyAllData } from "../storageWorker";
+import { clearVault, destroyAllData, hasLocalEncryptedVaultData } from "../storageWorker";
 import { logoutCurrentSession } from "../../lib/logout";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -174,4 +174,20 @@ test("logoutCurrentSession still clears local credentials when server logout fai
   assert.equal(storage.items.has("pipass_vault_entry-a"), true);
   assert.equal(storage.items.get("pipass.installId"), "22222222-2222-4222-8222-222222222222");
   assert.equal(storage.items.get("deviceUUID"), "33333333-3333-4333-8333-333333333333");
+});
+
+test("hasLocalEncryptedVaultData detects indexed vault entries and secure notes", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  assert.equal(await hasLocalEncryptedVaultData(), false);
+
+  storage.items.set("pipass_vault_index", JSON.stringify(["entry-a"]));
+  assert.equal(await hasLocalEncryptedVaultData(), true);
+
+  storage.items.delete("pipass_vault_index");
+  assert.equal(await hasLocalEncryptedVaultData(), false);
+
+  storage.items.set("pipass_notes_index", JSON.stringify(["note-a"]));
+  assert.equal(await hasLocalEncryptedVaultData(), true);
 });

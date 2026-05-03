@@ -201,6 +201,14 @@ async function setNotesIndex(ids: string[]): Promise<void> {
   await setItem(NOTES_INDEX_KEY, JSON.stringify(ids));
 }
 
+export async function hasLocalEncryptedVaultData(): Promise<boolean> {
+  const entryIds = await getVaultIndex();
+  if (entryIds.length > 0) return true;
+
+  const noteIds = await getNotesIndex();
+  return noteIds.length > 0;
+}
+
 export async function saveSecureNote(note: SecureNote): Promise<void> {
   await setItem(NOTES_KEY_PREFIX + note.id, JSON.stringify(note));
   const index = await getNotesIndex();

@@ -35,6 +35,7 @@ import {
   FractalFingerprintRecord,
   migrateToSharedStorage,
   storeMasterKeySecurely,
+  hasLocalEncryptedVaultData,
 } from "../workers/storageWorker";
 
 import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer } from "../crypto/secureMemory";
@@ -58,6 +59,11 @@ import FractalBackground from "../components/FractalBackground";
 import { useSecurityState } from "../context/SecurityContext";
 
 const AUTO_LOCK_MS = 120000;
+const PROFILE_CHANGE_PAUSED_TITLE = "Profile changes are paused";
+const PROFILE_CHANGE_REENCRYPTION_MESSAGE =
+  "Changing the security profile changes the vault key path. A safe re-encryption flow is required before this can be enabled for vaults that contain entries or secure notes.";
+const PROFILE_CHANGE_VERIFY_MESSAGE =
+  "PiPass could not verify whether this vault contains entries or secure notes, so the profile was left unchanged.";
 
 const PROFILES = [
   { label: "Balanced", iterations: 25000, time: "~3s", desc: "Fast unlock", color: "#4CAF50", icon: "flash-outline" as const },
@@ -491,8 +497,22 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     setDecryptedEntry(null);
   }
 
+  function showProfileChangePaused(message = PROFILE_CHANGE_REENCRYPTION_MESSAGE) {
+    Alert.alert(PROFILE_CHANGE_PAUSED_TITLE, message);
+  }
+
   async function handleProfileChange(newIterations: number) {
     if (newIterations === iterations || !keySharesRef.current) return;
+    try {
+      if (await hasLocalEncryptedVaultData()) {
+        showProfileChangePaused();
+        return;
+      }
+    } catch {
+      showProfileChangePaused(PROFILE_CHANGE_VERIFY_MESSAGE);
+      return;
+    }
+
     const safeNew = Math.max(newIterations || 100000, 3);
     setPendingProfileIterations(safeNew);
     setProfilePassword("");
@@ -503,6 +523,18 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
 
     setMigrating(true);
     try {
+      try {
+        if (await hasLocalEncryptedVaultData()) {
+          setPendingProfileIterations(null);
+          setProfilePassword("");
+          showProfileChangePaused();
+          return;
+        }
+      } catch {
+        showProfileChangePaused(PROFILE_CHANGE_VERIFY_MESSAGE);
+        return;
+      }
+
       const salt = await getMasterSalt();
       if (!salt) throw new Error("No salt found");
 
@@ -532,8 +564,9 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       Alert.alert("Profile Updated", `Now using ${PROFILES.find(p => p.iterations === pendingProfileIterations)?.label || "custom"} profile.`);
     } catch (err) {
       Alert.alert("Migration Failed", "Incorrect password or key derivation error. Settings remain unchanged.");
+    } finally {
+      setMigrating(false);
     }
-    setMigrating(false);
   }
 
   async function verifyPasswordForReset(pw: string): Promise<boolean> {
