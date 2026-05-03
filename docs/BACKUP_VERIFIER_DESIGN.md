@@ -126,6 +126,8 @@ Prompt 045 adds pure schema validation helpers for this verifier shape. They val
 
 Prompt 046 adds a pure sentinel verification helper that uses injected entry/note decryptors and compares a SHA-256 hash of the returned sentinel plaintext. It does not wire runtime import, derive keys itself, or write storage.
 
+Prompt 047 adds pure staged decrypt verification helpers for already-staged entries and secure notes. They verify decryptability through injected decryptors and return only counts plus safe failure details; they do not retain plaintext, commit records, or write storage.
+
 Design notes:
 
 - `recordId` and `salt` should be synthetic and independent from user entries.

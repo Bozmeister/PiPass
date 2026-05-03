@@ -19,6 +19,7 @@ import {
   type BackupCompatibilityContext,
   type BackupStageResult,
 } from "../../lib/backupSchema";
+import { verifyStagedBackupDecryptability } from "../../lib/backupDecryptVerification";
 import {
   getBackupVerifierFromMetadata,
   isBackupVerifier,
@@ -196,6 +197,13 @@ function stagedBackupWithCompatibility(
           : { app: "PiPass", compatibility },
     }),
   );
+
+  assert.equal(result.ok, true);
+  return result.backup;
+}
+
+function stagedBackupFixture(overrides: Record<string, unknown> = {}): BackupStageResult {
+  const result = parsePipassBackup(validBackupFixture(overrides));
 
   assert.equal(result.ok, true);
   return result.backup;
@@ -1063,4 +1071,222 @@ test("backup sentinel verifier keeps secret values out of controlled error messa
   assert.equal(result.message.includes(parsed.verifier.salt), false);
   assert.equal(result.message.includes(parsed.verifier.recordId), false);
   assert.equal(result.message.includes(parsed.verifier.expectedPlaintextHash), false);
+});
+
+test("staged backup decrypt verification succeeds when all entries and notes decrypt", async () => {
+  const stagedBackup = stagedBackupFixture();
+  const result = await verifyStagedBackupDecryptability({
+    stagedBackup,
+    masterKeyHex: "a".repeat(64),
+    decryptEntry: ({ entry, masterKeyHex }) => {
+      assert.equal(entry.id, "entry-a");
+      assert.equal(masterKeyHex, "a".repeat(64));
+      return { title: "plaintext title", password: "plaintext password" };
+    },
+    decryptSecureNote: ({ note, masterKeyHex }) => {
+      assert.equal(note.id, "note-a");
+      assert.equal(masterKeyHex, "a".repeat(64));
+      return { label: "plaintext label", content: "plaintext content" };
+    },
+  });
+
+  assert.deepEqual(result, {
+    ok: true,
+    counts: {
+      entriesChecked: 1,
+      notesChecked: 1,
+      entriesFailed: 0,
+      notesFailed: 0,
+    },
+    failures: [],
+  });
+});
+
+test("staged backup decrypt verification succeeds for an empty staged backup", async () => {
+  const stagedBackup = stagedBackupFixture({ entries: [], secureNotes: [] });
+  const result = await verifyStagedBackupDecryptability({ stagedBackup });
+
+  assert.deepEqual(result, {
+    ok: true,
+    counts: {
+      entriesChecked: 0,
+      notesChecked: 0,
+      entriesFailed: 0,
+      notesFailed: 0,
+    },
+    failures: [],
+  });
+});
+
+test("staged backup decrypt verification fails safely when one entry decrypt fails", async () => {
+  const stagedBackup = stagedBackupFixture();
+  const result = await verifyStagedBackupDecryptability({
+    stagedBackup,
+    masterKeyHex: "b".repeat(64),
+    decryptEntry: () => {
+      throw new Error("PLAINTEXT_OR_KEY_SHOULD_NOT_LEAK");
+    },
+    decryptSecureNote: () => ({ content: "note plaintext" }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.counts, {
+    entriesChecked: 1,
+    notesChecked: 1,
+    entriesFailed: 1,
+    notesFailed: 0,
+  });
+  assert.deepEqual(result.failures, [
+    { kind: "entry", id: "entry-a", index: 0, reason: "decrypt-failed" },
+  ]);
+});
+
+test("staged backup decrypt verification fails safely when one secure note decrypt fails", async () => {
+  const stagedBackup = stagedBackupFixture();
+  const result = await verifyStagedBackupDecryptability({
+    stagedBackup,
+    masterKeyHex: "c".repeat(64),
+    decryptEntry: () => ({ password: "entry plaintext" }),
+    decryptSecureNote: () => {
+      throw new Error("NOTE_PLAINTEXT_SHOULD_NOT_LEAK");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.counts, {
+    entriesChecked: 1,
+    notesChecked: 1,
+    entriesFailed: 0,
+    notesFailed: 1,
+  });
+  assert.deepEqual(result.failures, [
+    { kind: "secure-note", id: "note-a", index: 0, reason: "decrypt-failed" },
+  ]);
+});
+
+test("staged backup decrypt verification checks every entry and secure note", async () => {
+  const base = validBackupFixture();
+  const entries = base.entries as Array<Record<string, unknown>>;
+  const secureNotes = base.secureNotes as Array<Record<string, unknown>>;
+  const stagedBackup = stagedBackupFixture({
+    entries: [
+      entries[0],
+      { ...entries[0], id: "entry-b", salt: "entry-salt-b" },
+      { ...entries[0], id: "entry-c", salt: "entry-salt-c" },
+    ],
+    secureNotes: [
+      secureNotes[0],
+      { ...secureNotes[0], id: "note-b", salt: "note-salt-b" },
+    ],
+  });
+  const entriesSeen: string[] = [];
+  const notesSeen: string[] = [];
+
+  const result = await verifyStagedBackupDecryptability({
+    stagedBackup,
+    decryptEntry: ({ entry }) => {
+      entriesSeen.push(entry.id);
+      return {};
+    },
+    decryptSecureNote: ({ note }) => {
+      notesSeen.push(note.id);
+      return {};
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(entriesSeen, ["entry-a", "entry-b", "entry-c"]);
+  assert.deepEqual(notesSeen, ["note-a", "note-b"]);
+  assert.deepEqual(result.counts, {
+    entriesChecked: 3,
+    notesChecked: 2,
+    entriesFailed: 0,
+    notesFailed: 0,
+  });
+});
+
+test("staged backup decrypt verification failure output omits plaintext ciphertext and key material", async () => {
+  const stagedBackup = stagedBackupFixture({
+    entries: [
+      {
+        id: "entry-secret",
+        title: "display-secret",
+        username: "username-secret",
+        encryptedPassword: "CIPHERTEXT_SECRET_VALUE",
+        salt: "SALT_SECRET_VALUE",
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ],
+    secureNotes: [],
+  });
+  const result = await verifyStagedBackupDecryptability({
+    stagedBackup,
+    masterKeyHex: "d".repeat(64),
+    decryptEntry: () => {
+      throw new Error("PLAINTEXT_SECRET_VALUE CIPHERTEXT_SECRET_VALUE ddddd");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes("PLAINTEXT_SECRET_VALUE"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET_VALUE"), false);
+  assert.equal(serialized.includes("SALT_SECRET_VALUE"), false);
+  assert.equal(serialized.includes("d".repeat(64)), false);
+});
+
+test("staged backup decrypt verification does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const result = await verifyStagedBackupDecryptability({
+    stagedBackup: stagedBackupFixture(),
+    decryptEntry: () => ({}),
+    decryptSecureNote: () => ({}),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(storage.items.size, 0);
+});
+
+test("staged backup decrypt verification does not mix entry and note decryptors", async () => {
+  const stagedBackup = stagedBackupFixture();
+  let entryCalls = 0;
+  let noteCalls = 0;
+
+  const result = await verifyStagedBackupDecryptability({
+    stagedBackup,
+    decryptEntry: ({ entry }) => {
+      entryCalls++;
+      assert.equal(entry.id, "entry-a");
+      return {};
+    },
+    decryptSecureNote: ({ note }) => {
+      noteCalls++;
+      assert.equal(note.id, "note-a");
+      return {};
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(entryCalls, 1);
+  assert.equal(noteCalls, 1);
+});
+
+test("staged backup decrypt verification handles missing decryptors as controlled failures", async () => {
+  const stagedBackup = stagedBackupFixture();
+  const result = await verifyStagedBackupDecryptability({ stagedBackup });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.counts, {
+    entriesChecked: 1,
+    notesChecked: 1,
+    entriesFailed: 1,
+    notesFailed: 1,
+  });
+  assert.deepEqual(result.failures, [
+    { kind: "entry", id: "entry-a", index: 0, reason: "missing-decryptor" },
+    { kind: "secure-note", id: "note-a", index: 0, reason: "missing-decryptor" },
+  ]);
 });
