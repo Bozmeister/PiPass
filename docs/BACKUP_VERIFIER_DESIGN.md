@@ -122,6 +122,8 @@ Future backup schema should add a verifier object outside user records:
 }
 ```
 
+Prompt 045 adds pure schema validation helpers for this verifier shape. They validate and stage the verifier metadata only; they do not decrypt the sentinel, derive keys, require the verifier during backup parsing, or authorize import.
+
 Design notes:
 
 - `recordId` and `salt` should be synthetic and independent from user entries.

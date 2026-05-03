@@ -18,6 +18,11 @@ import {
   type BackupCompatibilityContext,
   type BackupStageResult,
 } from "../../lib/backupSchema";
+import {
+  getBackupVerifierFromMetadata,
+  isBackupVerifier,
+  parseBackupVerifier,
+} from "../../lib/backupVerifier";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -132,6 +137,19 @@ function validBackupFixture(overrides: Record<string, unknown> = {}): Record<str
       },
     ],
     metadata: { app: "PiPass" },
+    ...overrides,
+  };
+}
+
+function validBackupVerifierFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 1,
+    type: "encrypted-sentinel",
+    derivation: "entry-v1",
+    recordId: "pipass-backup-verifier-v1",
+    salt: "a".repeat(64),
+    ciphertext: "encrypted-sentinel-ciphertext-placeholder",
+    expectedPlaintextHash: "b".repeat(64),
     ...overrides,
   };
 }
@@ -715,5 +733,132 @@ test("backup compatibility classifier does not write platform storage", async (t
   const result = classifyBackupCompatibility(backup, localCompatibilityContext());
 
   assert.equal(result.status, "compatible");
+  assert.equal(storage.items.size, 0);
+});
+
+test("backup verifier parser accepts valid entry-v1 encrypted-sentinel verifier", () => {
+  const result = parseBackupVerifier(validBackupVerifierFixture());
+
+  assert.equal(result.ok, true);
+  assert.equal(isBackupVerifier(validBackupVerifierFixture()), true);
+  assert.equal(result.verifier.derivation, "entry-v1");
+});
+
+test("backup verifier parser accepts valid note-v1 encrypted-sentinel verifier", () => {
+  const result = parseBackupVerifier(validBackupVerifierFixture({ derivation: "note-v1" }));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.verifier.derivation, "note-v1");
+});
+
+test("backup verifier parser rejects unsupported version", () => {
+  const result = parseBackupVerifier(validBackupVerifierFixture({ version: 2 }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup verifier parser failure");
+  }
+  assert.equal(result.error.code, "unsupported-version");
+});
+
+test("backup verifier parser rejects unsupported type", () => {
+  const result = parseBackupVerifier(validBackupVerifierFixture({ type: "plain-sentinel" }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup verifier parser failure");
+  }
+  assert.equal(result.error.code, "unsupported-type");
+});
+
+test("backup verifier parser rejects unsupported derivation", () => {
+  const result = parseBackupVerifier(validBackupVerifierFixture({ derivation: "root-key-v1" }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup verifier parser failure");
+  }
+  assert.equal(result.error.code, "unsupported-derivation");
+});
+
+test("backup verifier parser rejects empty recordId", () => {
+  const result = parseBackupVerifier(validBackupVerifierFixture({ recordId: "" }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup verifier parser failure");
+  }
+  assert.equal(result.error.code, "invalid-record-id");
+});
+
+test("backup verifier parser rejects invalid salt hex", () => {
+  const result = parseBackupVerifier(validBackupVerifierFixture({ salt: "not-hex" }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup verifier parser failure");
+  }
+  assert.equal(result.error.code, "invalid-salt");
+});
+
+test("backup verifier parser rejects empty ciphertext", () => {
+  const result = parseBackupVerifier(validBackupVerifierFixture({ ciphertext: "" }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup verifier parser failure");
+  }
+  assert.equal(result.error.code, "invalid-ciphertext");
+});
+
+test("backup verifier parser rejects invalid expectedPlaintextHash", () => {
+  const result = parseBackupVerifier(
+    validBackupVerifierFixture({ expectedPlaintextHash: "ABC123" }),
+  );
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup verifier parser failure");
+  }
+  assert.equal(result.error.code, "invalid-expected-plaintext-hash");
+});
+
+test("backup staging preserves valid verifier metadata when present", () => {
+  const verifier = validBackupVerifierFixture();
+  const result = parsePipassBackup(
+    validBackupFixture({ metadata: { app: "PiPass", verifier } }),
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.backup.metadata.verifier, verifier);
+
+  const verifierResult = getBackupVerifierFromMetadata(result.backup.metadata);
+  assert.equal(verifierResult.ok, true);
+});
+
+test("backup staging preserves invalid verifier metadata for controlled verifier validation", () => {
+  const verifier = validBackupVerifierFixture({ expectedPlaintextHash: "not-valid" });
+  const result = parsePipassBackup(
+    validBackupFixture({ metadata: { app: "PiPass", verifier } }),
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.backup.metadata.verifier, verifier);
+
+  const verifierResult = getBackupVerifierFromMetadata(result.backup.metadata);
+  assert.equal(verifierResult.ok, false);
+  if (verifierResult.ok) {
+    throw new Error("expected backup verifier parser failure");
+  }
+  assert.equal(verifierResult.error.code, "invalid-expected-plaintext-hash");
+});
+
+test("backup verifier parser does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const result = parseBackupVerifier(validBackupVerifierFixture());
+
+  assert.equal(result.ok, true);
   assert.equal(storage.items.size, 0);
 });
