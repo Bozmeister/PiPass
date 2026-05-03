@@ -17,7 +17,7 @@
     "ios": "expo run:ios",
     "prebuild": "expo prebuild",
     "typecheck": "tsc --noEmit --pretty false",
-    "test": "node --env-file-if-exists=.env --env-file-if-exists=.env.test --import ./server/__tests__/setup-env.js --import tsx --test --test-force-exit server/__tests__/security.test.ts workers/__tests__/storage-reset.test.ts",
+    "test": "node --env-file-if-exists=.env --env-file-if-exists=.env.test --import ./server/__tests__/setup-env.js --import tsx --test --test-force-exit server/__tests__/security.test.ts workers/__tests__/storage-reset.test.ts crypto/__tests__/kdf-mode.test.ts",
     "lint": "npx expo lint",
     "lint:fix": "npx expo lint --fix"
   },

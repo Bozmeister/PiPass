@@ -1,7 +1,11 @@
 import CryptoJS from "crypto-js";
-import * as ExpoCrypto from "expo-crypto";
 import { getDeviceUUID, clearDeviceUUID } from "./deviceUUIDStorage";
-import { wipeBuffer } from "./secureMemory";
+import {
+  isValidKdfMetadata,
+  type Argon2idKdfParameters,
+  type KdfMetadata,
+  type Pbkdf2KdfParameters,
+} from "./kdfMetadata";
 
 // Key derivation using industry-standard PBKDF2-SHA256.
 // Argon2id is attempted first (if WebAssembly is available), with PBKDF2 as fallback.
@@ -39,6 +43,7 @@ async function loadArgon2(): Promise<((params: Argon2BinaryParams) => Promise<Ui
 export { clearDeviceUUID };
 
 export function generateMasterSalt(): string {
+  const ExpoCrypto = require("expo-crypto") as typeof import("expo-crypto");
   const saltBytes = ExpoCrypto.getRandomBytes(32);
   return Array.from(saltBytes)
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -46,6 +51,32 @@ export function generateMasterSalt(): string {
 }
 
 export type KdfVersion = "v1" | "v2";
+
+export class KdfDerivationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "KdfDerivationError";
+  }
+}
+
+interface KdfDerivationOptions {
+  deviceUUID?: string;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b: number) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function wipeBuffer(buffer: Uint8Array): void {
+  buffer.fill(0);
+}
+
+async function getKdfMaterial(password: string, options: KdfDerivationOptions = {}): Promise<string> {
+  const deviceUUID = options.deviceUUID ?? await getDeviceUUID();
+  return password + ":" + deviceUUID;
+}
 
 const KDF_CONFIGS = {
   v1: {
@@ -63,6 +94,77 @@ const KDF_CONFIGS = {
     parallelism: 1,
   },
 } as const;
+
+export async function deriveMasterKeyWithArgon2id(
+  password: string,
+  saltHex: string,
+  parameters: Argon2idKdfParameters,
+  options: KdfDerivationOptions = {},
+): Promise<string> {
+  const argon2 = await loadArgon2();
+  if (!argon2) {
+    throw new KdfDerivationError("Argon2id is unavailable");
+  }
+
+  const material = await getKdfMaterial(password, options);
+  const salt = new TextEncoder().encode(saltHex);
+  const passwordBytes = new TextEncoder().encode(material);
+
+  try {
+    const keyBytes = await argon2({
+      password: passwordBytes,
+      salt,
+      iterations: parameters.timeCost,
+      memorySize: parameters.memoryKiB,
+      parallelism: parameters.parallelism,
+      hashLength: parameters.outputBytes,
+    });
+    const result = bytesToHex(keyBytes);
+    wipeBuffer(keyBytes);
+    return result;
+  } catch {
+    throw new KdfDerivationError("Argon2id derivation failed");
+  } finally {
+    wipeBuffer(passwordBytes);
+    wipeBuffer(salt);
+  }
+}
+
+export async function deriveMasterKeyWithPbkdf2(
+  password: string,
+  saltHex: string,
+  parameters: Pbkdf2KdfParameters,
+  options: KdfDerivationOptions = {},
+): Promise<string> {
+  const material = await getKdfMaterial(password, options);
+  const stretched = CryptoJS.PBKDF2(material, saltHex, {
+    keySize: parameters.outputBytes / 4,
+    iterations: parameters.iterations,
+    hasher: CryptoJS.algo.SHA256,
+  });
+  return stretched.toString(CryptoJS.enc.Hex);
+}
+
+export async function deriveMasterKeyFromKdfMetadata(
+  password: string,
+  saltHex: string,
+  metadata: KdfMetadata,
+  options: KdfDerivationOptions = {},
+): Promise<string> {
+  if (!isValidKdfMetadata(metadata)) {
+    throw new KdfDerivationError("Invalid KDF metadata");
+  }
+
+  if (metadata.algorithm === "argon2id") {
+    return deriveMasterKeyWithArgon2id(password, saltHex, metadata.parameters, options);
+  }
+
+  if (metadata.algorithm === "pbkdf2-sha256") {
+    return deriveMasterKeyWithPbkdf2(password, saltHex, metadata.parameters, options);
+  }
+
+  throw new KdfDerivationError("Unsupported KDF metadata");
+}
 
 // Derives the master key from a user-provided password.
 // Uses Argon2id when available, PBKDF2-SHA256 as fallback.
@@ -108,9 +210,7 @@ export async function deriveMasterKey(
         parallelism: config.parallelism,
         hashLength: 32,
       });
-      const result = Array.from(keyBytes)
-        .map((b: number) => b.toString(16).padStart(2, "0"))
-        .join("");
+      const result = bytesToHex(keyBytes);
       wipeBuffer(keyBytes);
       wipeBuffer(passwordBytes);
       wipeBuffer(salt);
