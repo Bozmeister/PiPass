@@ -26,6 +26,10 @@ import {
   parseBackupVerifier,
   verifyBackupSentinel,
 } from "../../lib/backupVerifier";
+import {
+  buildSetupImportCommitPlan,
+  SETUP_IMPORT_STORAGE_KEYS,
+} from "../../lib/setupImportCommitPlan";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -222,6 +226,17 @@ function localCompatibilityContext(overrides: Record<string, unknown> = {}) {
     ...context,
     ...overrides,
   } as BackupCompatibilityContext;
+}
+
+function commitSetupMetadataFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    masterSalt: "setup-master-salt-placeholder",
+    masterHash: "setup-master-hash-placeholder",
+    securityProfile: 100000,
+    kdfMetadata: testArgon2idMetadata(),
+    recoveryKeyHash: "setup-recovery-hash-placeholder",
+    ...overrides,
+  };
 }
 
 test("clearVault clears local vault data but preserves auth and install identity state", async (t) => {
@@ -1289,4 +1304,255 @@ test("staged backup decrypt verification handles missing decryptors as controlle
     { kind: "entry", id: "entry-a", index: 0, reason: "missing-decryptor" },
     { kind: "secure-note", id: "note-a", index: 0, reason: "missing-decryptor" },
   ]);
+});
+
+test("setup/import commit plan builds setup-only operations with initialized marker last", () => {
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+  });
+
+  assert.equal(result.ok, true);
+  const keys = result.plan.operations.map((operation) => operation.key);
+
+  assert.deepEqual(keys, [
+    SETUP_IMPORT_STORAGE_KEYS.masterSalt,
+    SETUP_IMPORT_STORAGE_KEYS.securityProfile,
+    SETUP_IMPORT_STORAGE_KEYS.kdfMetadata,
+    SETUP_IMPORT_STORAGE_KEYS.masterHash,
+    SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash,
+    SETUP_IMPORT_STORAGE_KEYS.vaultInitialized,
+  ]);
+  assert.equal(result.plan.operations.at(-1)?.category, "initialized-marker");
+});
+
+test("setup/import commit plan orders entries notes indexes shared vault cache and initialized marker", () => {
+  const stagedBackup = stagedBackupFixture();
+  const sharedVaultBlob = {
+    encryptedBlob: "shared-vault-blob-placeholder",
+    version: 1,
+    updatedAt: 1234567890,
+  };
+
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+    entries: stagedBackup.entries,
+    secureNotes: stagedBackup.secureNotes,
+    sharedVaultBlob,
+    includeCachedMasterKey: true,
+    cachedMasterKeyReference: "prepared-cached-master-key-reference",
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    result.plan.operations.map((operation) => operation.category),
+    [
+      "setup-metadata",
+      "setup-metadata",
+      "setup-metadata",
+      "setup-metadata",
+      "setup-metadata",
+      "vault-entry",
+      "vault-index",
+      "secure-note",
+      "secure-note-index",
+      "shared-vault",
+      "cached-master-key",
+      "initialized-marker",
+    ],
+  );
+  assert.deepEqual(
+    result.plan.operations.map((operation) => operation.key),
+    [
+      SETUP_IMPORT_STORAGE_KEYS.masterSalt,
+      SETUP_IMPORT_STORAGE_KEYS.securityProfile,
+      SETUP_IMPORT_STORAGE_KEYS.kdfMetadata,
+      SETUP_IMPORT_STORAGE_KEYS.masterHash,
+      SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash,
+      "pipass_vault_entry-a",
+      SETUP_IMPORT_STORAGE_KEYS.vaultIndex,
+      "pipass_note_note-a",
+      SETUP_IMPORT_STORAGE_KEYS.notesIndex,
+      SETUP_IMPORT_STORAGE_KEYS.sharedVault,
+      SETUP_IMPORT_STORAGE_KEYS.cachedMasterKey,
+      SETUP_IMPORT_STORAGE_KEYS.vaultInitialized,
+    ],
+  );
+});
+
+test("setup/import rollback manifest includes all planned storage keys", () => {
+  const stagedBackup = stagedBackupFixture();
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+    entries: stagedBackup.entries,
+    secureNotes: stagedBackup.secureNotes,
+    sharedVaultBlob: {
+      encryptedBlob: "shared-vault-blob-placeholder",
+      version: 1,
+      updatedAt: 1234567890,
+    },
+    includeCachedMasterKey: true,
+    cachedMasterKeyReference: "prepared-cached-master-key-reference",
+  });
+
+  assert.equal(result.ok, true);
+  const operationKeys = result.plan.operations.map((operation) => operation.key);
+  const rollbackKeys = result.plan.rollbackManifest.targets.map((target) => target.key);
+
+  assert.deepEqual(rollbackKeys, operationKeys);
+  assert.deepEqual(result.plan.rollbackManifest.keysToSnapshot, operationKeys);
+  assert.deepEqual(result.plan.rollbackManifest.keysToDeleteIfNew, operationKeys);
+  assert.equal(
+    result.plan.rollbackManifest.initializedMarkerKey,
+    SETUP_IMPORT_STORAGE_KEYS.vaultInitialized,
+  );
+});
+
+test("setup/import commit plan rejects missing required setup metadata", () => {
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture({ masterSalt: "" }),
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected setup/import commit plan failure");
+  }
+  assert.equal(result.error.code, "missing-setup-metadata");
+  assert.equal(result.error.path, "setupMetadata.masterSalt");
+});
+
+test("setup/import commit plan rejects duplicate entry ids", () => {
+  const stagedBackup = stagedBackupFixture();
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+    entries: [stagedBackup.entries[0], { ...stagedBackup.entries[0] }],
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected setup/import commit plan failure");
+  }
+  assert.equal(result.error.code, "duplicate-entry-id");
+});
+
+test("setup/import commit plan rejects duplicate secure note ids", () => {
+  const stagedBackup = stagedBackupFixture();
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+    secureNotes: [stagedBackup.secureNotes[0], { ...stagedBackup.secureNotes[0] }],
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected setup/import commit plan failure");
+  }
+  assert.equal(result.error.code, "duplicate-note-id");
+});
+
+test("setup/import commit plan rejects empty entry and secure note ids", () => {
+  const stagedBackup = stagedBackupFixture();
+  const invalidEntryResult = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+    entries: [{ ...stagedBackup.entries[0], id: "" }],
+  });
+
+  assert.equal(invalidEntryResult.ok, false);
+  if (invalidEntryResult.ok) {
+    throw new Error("expected setup/import commit plan failure");
+  }
+  assert.equal(invalidEntryResult.error.code, "invalid-entry-id");
+
+  const invalidNoteResult = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+    secureNotes: [{ ...stagedBackup.secureNotes[0], id: "   " }],
+  });
+
+  assert.equal(invalidNoteResult.ok, false);
+  if (invalidNoteResult.ok) {
+    throw new Error("expected setup/import commit plan failure");
+  }
+  assert.equal(invalidNoteResult.error.code, "invalid-note-id");
+});
+
+test("setup/import commit plan writes shared vault after entry records and index", () => {
+  const stagedBackup = stagedBackupFixture();
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+    entries: stagedBackup.entries,
+    sharedVaultBlob: {
+      encryptedBlob: "shared-vault-blob-placeholder",
+      version: 1,
+      updatedAt: 1234567890,
+    },
+  });
+
+  assert.equal(result.ok, true);
+  const keys = result.plan.operations.map((operation) => operation.key);
+  const entryIndex = keys.indexOf("pipass_vault_entry-a");
+  const vaultIndex = keys.indexOf(SETUP_IMPORT_STORAGE_KEYS.vaultIndex);
+  const sharedVaultIndex = keys.indexOf(SETUP_IMPORT_STORAGE_KEYS.sharedVault);
+
+  assert.equal(entryIndex > -1, true);
+  assert.equal(vaultIndex > entryIndex, true);
+  assert.equal(sharedVaultIndex > vaultIndex, true);
+});
+
+test("setup/import commit plan always writes initialized marker last", () => {
+  const stagedBackup = stagedBackupFixture();
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+    entries: stagedBackup.entries,
+    secureNotes: stagedBackup.secureNotes,
+    sharedVaultBlob: {
+      encryptedBlob: "shared-vault-blob-placeholder",
+      version: 1,
+      updatedAt: 1234567890,
+    },
+    includeCachedMasterKey: true,
+    cachedMasterKeyReference: "prepared-cached-master-key-reference",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.plan.operations.at(-1)?.key, SETUP_IMPORT_STORAGE_KEYS.vaultInitialized);
+  assert.equal(result.plan.operations.at(-1)?.category, "initialized-marker");
+});
+
+test("setup/import commit plan is deterministic for the same input", () => {
+  const stagedBackup = stagedBackupFixture();
+  const input = {
+    setupMetadata: commitSetupMetadataFixture(),
+    entries: stagedBackup.entries,
+    secureNotes: stagedBackup.secureNotes,
+    sharedVaultBlob: {
+      encryptedBlob: "shared-vault-blob-placeholder",
+      version: 1,
+      updatedAt: 1234567890,
+    },
+    includeCachedMasterKey: true,
+    cachedMasterKeyReference: "prepared-cached-master-key-reference",
+  };
+
+  const first = buildSetupImportCommitPlan(input);
+  const second = buildSetupImportCommitPlan(input);
+
+  assert.deepEqual(first, second);
+});
+
+test("setup/import commit plan helper does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+  const stagedBackup = stagedBackupFixture();
+
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+    entries: stagedBackup.entries,
+    secureNotes: stagedBackup.secureNotes,
+    sharedVaultBlob: {
+      encryptedBlob: "shared-vault-blob-placeholder",
+      version: 1,
+      updatedAt: 1234567890,
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(storage.items.size, 0);
 });
