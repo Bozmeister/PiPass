@@ -327,10 +327,17 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
                 backgroundColor: "#0a1a1a", borderRadius: 10, padding: 14,
                 borderWidth: 1, borderColor: "#114a4a",
               }}
-              testID="import-backup-button"
+              testID="setup-backup-select"
+              accessibilityRole="button"
+              accessibilityLabel="Select backup file for validation"
             >
               {importing ? (
-                <ActivityIndicator size="small" color="#4CAF50" />
+                <ActivityIndicator
+                  size="small"
+                  color="#4CAF50"
+                  testID="setup-backup-loading"
+                  accessibilityLabel="Reading backup file"
+                />
               ) : (
                 <>
                   <Ionicons name="cloud-upload-outline" size={18} color="#4CAF50" style={{ marginRight: 8 }} />
@@ -341,15 +348,36 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
               )}
             </Pressable>
             {stagedBackupSummary && (
-              <View style={{ backgroundColor: "#0f1a0f", borderWidth: 1, borderColor: "#214d21", borderRadius: 8, padding: 12, marginTop: 12 }}>
+              <View
+                style={{ backgroundColor: "#0f1a0f", borderWidth: 1, borderColor: "#214d21", borderRadius: 8, padding: 12, marginTop: 12 }}
+                testID="setup-backup-summary"
+                accessibilityLabel="Backup validation summary"
+              >
                 <Text style={{ color: "#4CAF50", fontSize: 13, fontWeight: "700" as const, marginBottom: 4 }}>
                   Backup validated
                 </Text>
                 <Text style={{ color: "#aaa", fontSize: 12, lineHeight: 18 }}>
-                  {stagedBackupSummary.entries} entries and {stagedBackupSummary.secureNotes} secure notes were staged in memory only. Import commit will be enabled in a future step.
+                  <Text
+                    testID="setup-backup-entry-count"
+                    accessibilityLabel={`Staged backup entries: ${stagedBackupSummary.entries}`}
+                  >
+                    {stagedBackupSummary.entries} entries
+                  </Text>
+                  {" and "}
+                  <Text
+                    testID="setup-backup-note-count"
+                    accessibilityLabel={`Staged backup secure notes: ${stagedBackupSummary.secureNotes}`}
+                  >
+                    {stagedBackupSummary.secureNotes} secure notes
+                  </Text>
+                  {" were staged in memory only. Import commit will be enabled in a future step."}
                 </Text>
                 {stagedBackupSummary.warnings.length > 0 && (
-                  <Text style={{ color: "#fbbf24", fontSize: 12, lineHeight: 18, marginTop: 8 }}>
+                  <Text
+                    style={{ color: "#fbbf24", fontSize: 12, lineHeight: 18, marginTop: 8 }}
+                    testID="setup-backup-warning"
+                    accessibilityLabel="Backup validation warning"
+                  >
                     This encrypted backup still requires future compatibility verification before it can be imported.
                   </Text>
                 )}
@@ -360,7 +388,9 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
                     onStagedBackupChange?.(null);
                   }}
                   style={{ marginTop: 10, alignSelf: "flex-start", paddingVertical: 6, paddingHorizontal: 8 }}
-                  testID="clear-staged-backup-button"
+                  testID="setup-backup-clear"
+                  accessibilityRole="button"
+                  accessibilityLabel="Clear selected backup"
                 >
                   <Text style={{ color: "#aaa", fontSize: 12, fontWeight: "600" as const }}>
                     Clear selected backup
@@ -369,7 +399,11 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
               </View>
             )}
             {backupStageError && (
-              <Text style={{ color: "#ef4444", fontSize: 12, lineHeight: 18, marginTop: 10 }}>
+              <Text
+                style={{ color: "#ef4444", fontSize: 12, lineHeight: 18, marginTop: 10 }}
+                testID="setup-backup-error"
+                accessibilityLabel="Backup validation error"
+              >
                 {backupStageError}
               </Text>
             )}

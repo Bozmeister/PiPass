@@ -165,7 +165,22 @@ Existing automated tests cover:
 
 Prompt 063 baseline: `npm test` passed `227/227`.
 
-## 9. Remaining Testability Gaps
+## 9. UI Automation Selectors
+
+Future UI automation should target these stable hooks instead of visible copy:
+
+- backup select button: `setup-backup-select`
+- backup loading indicator: `setup-backup-loading`
+- staged summary container: `setup-backup-summary`
+- staged entry count text: `setup-backup-entry-count`
+- staged secure note count text: `setup-backup-note-count`
+- staged warning text: `setup-backup-warning`
+- staged error text: `setup-backup-error`
+- clear staged backup button: `setup-backup-clear`
+
+Selector assertions should still avoid reading or snapshotting backup contents. Prefer checks that the selector exists, count text is present, storage remains unchanged, and setup can proceed without importing staged records.
+
+## 10. Remaining Testability Gaps
 
 - No app-root UI automation currently selects a backup through `SeedSetupScreen`.
 - No browser end-to-end test currently verifies local storage after backup selection.
@@ -174,7 +189,7 @@ Prompt 063 baseline: `npm test` passed `227/227`.
 - No automated test currently proves app-root staged backup state is cleared through every possible navigation path.
 - No staged backup record commit tests exist yet because record commit remains future work.
 
-## 10. Recommended Manual Result Format
+## 11. Recommended Manual Result Format
 
 For each manual run, record only:
 
