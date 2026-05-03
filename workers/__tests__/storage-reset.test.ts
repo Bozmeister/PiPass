@@ -12,8 +12,14 @@ import {
   saveKdfMetadata,
 } from "../storageWorker";
 import { logoutCurrentSession } from "../../lib/logout";
-import { parsePipassBackup } from "../../lib/backupSchema";
+import {
+  classifyBackupCompatibility,
+  parsePipassBackup,
+  type BackupCompatibilityContext,
+  type BackupStageResult,
+} from "../../lib/backupSchema";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
+import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
 
 class MemoryStorage {
@@ -128,6 +134,62 @@ function validBackupFixture(overrides: Record<string, unknown> = {}): Record<str
     metadata: { app: "PiPass" },
     ...overrides,
   };
+}
+
+function testArgon2idMetadata(): KdfMetadata {
+  return buildArgon2idKdfMetadata(
+    100000,
+    { memoryKiB: 131072, timeCost: 4, parallelism: 4, outputBytes: 32 },
+    "setup",
+    { createdAt: 1234567890 },
+  );
+}
+
+function testKdfMetadataRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ...testArgon2idMetadata(), ...overrides };
+}
+
+function compatibilityMetadata(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    format: "encrypted-local-records",
+    kdfMetadata: testArgon2idMetadata(),
+    saltKey: "pipass_master_salt",
+    deviceBinding: "deviceUUID:v1",
+    deviceScope: "same-install",
+    requiresSameDeviceUUID: true,
+    ...overrides,
+  };
+}
+
+function stagedBackupWithCompatibility(
+  compatibility: Record<string, unknown> | null = compatibilityMetadata(),
+): BackupStageResult {
+  const result = parsePipassBackup(
+    validBackupFixture({
+      metadata:
+        compatibility === null
+          ? { app: "PiPass" }
+          : { app: "PiPass", compatibility },
+    }),
+  );
+
+  assert.equal(result.ok, true);
+  return result.backup;
+}
+
+function localCompatibilityContext(overrides: Record<string, unknown> = {}) {
+  const context: BackupCompatibilityContext = {
+    format: "encrypted-local-records",
+    kdfMetadata: testArgon2idMetadata(),
+    masterSaltPresent: true,
+    deviceBinding: "deviceUUID:v1",
+    deviceUUIDPresent: true,
+  };
+
+  return {
+    ...context,
+    ...overrides,
+  } as BackupCompatibilityContext;
 }
 
 test("clearVault clears local vault data but preserves auth and install identity state", async (t) => {
@@ -519,5 +581,139 @@ test("backup parser does not write platform storage", async (t) => {
   const result = parsePipassBackup(validBackupFixture());
 
   assert.equal(result.ok, true);
+  assert.equal(storage.items.size, 0);
+});
+
+test("backup compatibility classifier accepts matching same-install KDF metadata", () => {
+  const backup = stagedBackupWithCompatibility();
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext());
+
+  assert.equal(result.status, "compatible");
+  assert.equal(result.reason, "same-install-metadata-match");
+});
+
+test("backup compatibility classifier returns unknown when metadata is missing", () => {
+  const backup = stagedBackupWithCompatibility(null);
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext());
+
+  assert.equal(result.status, "unknown");
+  assert.equal(result.reason, "missing-compatibility-metadata");
+});
+
+test("backup compatibility classifier rejects portable encrypted backups for now", () => {
+  const backup = stagedBackupWithCompatibility(
+    compatibilityMetadata({ deviceScope: "portable", requiresSameDeviceUUID: false }),
+  );
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext());
+
+  assert.equal(result.status, "incompatible");
+  assert.equal(result.reason, "portable-encrypted-backups-not-supported");
+});
+
+test("backup compatibility classifier rejects same-device backups when local deviceUUID is missing", () => {
+  const backup = stagedBackupWithCompatibility();
+  const result = classifyBackupCompatibility(
+    backup,
+    localCompatibilityContext({ deviceUUIDPresent: false }),
+  );
+
+  assert.equal(result.status, "incompatible");
+  assert.equal(result.reason, "required-device-uuid-missing");
+});
+
+test("backup compatibility classifier rejects KDF algorithm mismatch", () => {
+  const backup = stagedBackupWithCompatibility(
+    compatibilityMetadata({
+      kdfMetadata: buildPbkdf2KdfMetadata(
+        100000,
+        { iterations: 100000, outputBytes: 32 },
+        "legacy-detected",
+        { createdAt: 1234567890 },
+      ),
+    }),
+  );
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext());
+
+  assert.equal(result.status, "incompatible");
+  assert.equal(result.reason, "kdf-metadata-mismatch");
+});
+
+test("backup compatibility classifier rejects KDF parameter mismatch", () => {
+  const backup = stagedBackupWithCompatibility(
+    compatibilityMetadata({
+      kdfMetadata: buildArgon2idKdfMetadata(
+        100000,
+        { memoryKiB: 65536, timeCost: 3, parallelism: 4, outputBytes: 32 },
+        "setup",
+        { createdAt: 1234567890 },
+      ),
+    }),
+  );
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext());
+
+  assert.equal(result.status, "incompatible");
+  assert.equal(result.reason, "kdf-metadata-mismatch");
+});
+
+test("backup compatibility classifier returns unknown when local KDF metadata is missing", () => {
+  const backup = stagedBackupWithCompatibility();
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext({ kdfMetadata: null }));
+
+  assert.equal(result.status, "unknown");
+  assert.equal(result.reason, "local-kdf-metadata-missing");
+});
+
+test("backup compatibility classifier rejects invalid backup KDF metadata", () => {
+  const backup = stagedBackupWithCompatibility(
+    compatibilityMetadata({
+      kdfMetadata: testKdfMetadataRecord({ algorithm: "scrypt" }),
+    }),
+  );
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext());
+
+  assert.equal(result.status, "incompatible");
+  assert.equal(result.reason, "invalid-backup-kdf-metadata");
+});
+
+test("backup compatibility classifier rejects salt key mismatch", () => {
+  const backup = stagedBackupWithCompatibility(
+    compatibilityMetadata({ saltKey: "other_salt_key" }),
+  );
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext());
+
+  assert.equal(result.status, "incompatible");
+  assert.equal(result.reason, "salt-key-mismatch");
+});
+
+test("backup compatibility classifier rejects device binding mismatch", () => {
+  const backup = stagedBackupWithCompatibility(
+    compatibilityMetadata({ deviceBinding: "deviceUUID:v2" }),
+  );
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext());
+
+  assert.equal(result.status, "incompatible");
+  assert.equal(result.reason, "device-binding-mismatch");
+});
+
+test("backup compatibility classifier warns when encryptedAux is present", () => {
+  const backup = stagedBackupWithCompatibility();
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext());
+
+  assert.equal(
+    result.warnings.includes(
+      "backup contains encrypted honeytoken aux metadata that may require server-side reissue or review",
+    ),
+    true,
+  );
+});
+
+test("backup compatibility classifier does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const backup = stagedBackupWithCompatibility();
+  const result = classifyBackupCompatibility(backup, localCompatibilityContext());
+
+  assert.equal(result.status, "compatible");
   assert.equal(storage.items.size, 0);
 });

@@ -1,4 +1,5 @@
 import type { SecureNote, VaultEntry } from "../workers/vaultWorker";
+import { isValidKdfMetadata, type KdfMetadata } from "../crypto/kdfMetadata";
 
 export const PIPASS_BACKUP_SCHEMA = "pipass-backup";
 export const PIPASS_BACKUP_VERSION = 1;
@@ -45,6 +46,20 @@ export interface BackupStageResult {
 export type BackupParseResult =
   | { ok: true; backup: BackupStageResult }
   | { ok: false; error: BackupParseError };
+
+export interface BackupCompatibilityContext {
+  format: PipassBackupKind | string;
+  kdfMetadata: KdfMetadata | null;
+  masterSaltPresent: boolean;
+  deviceBinding: "deviceUUID:v1" | string;
+  deviceUUIDPresent: boolean;
+}
+
+export interface BackupCompatibilityResult {
+  status: "compatible" | "incompatible" | "unknown";
+  reason: string;
+  warnings: string[];
+}
 
 export function parsePipassBackup(input: unknown): BackupParseResult {
   const parsed = parseInput(input);
@@ -140,6 +155,151 @@ export function isVersionedPipassBackup(value: unknown): boolean {
   );
 }
 
+export function classifyBackupCompatibility(
+  backup: BackupStageResult,
+  localContext: BackupCompatibilityContext,
+): BackupCompatibilityResult {
+  const warnings = collectCompatibilityWarnings(backup);
+
+  if (
+    backup.kind !== PIPASS_BACKUP_FORMAT_ENCRYPTED_LOCAL_RECORDS ||
+    backup.format !== PIPASS_BACKUP_FORMAT_ENCRYPTED_LOCAL_RECORDS ||
+    localContext.format !== PIPASS_BACKUP_FORMAT_ENCRYPTED_LOCAL_RECORDS
+  ) {
+    return {
+      status: "incompatible",
+      reason: "unsupported-backup-format",
+      warnings,
+    };
+  }
+
+  const compatibility = getBackupCompatibilityMetadata(backup);
+  if (compatibility === undefined) {
+    return {
+      status: "unknown",
+      reason: "missing-compatibility-metadata",
+      warnings: [
+        ...warnings,
+        "backup compatibility must be verified by a future rekey or full decrypt flow before commit",
+      ],
+    };
+  }
+
+  if (!isRecord(compatibility)) {
+    return {
+      status: "incompatible",
+      reason: "invalid-compatibility-metadata",
+      warnings,
+    };
+  }
+
+  if (compatibility.format !== PIPASS_BACKUP_FORMAT_ENCRYPTED_LOCAL_RECORDS) {
+    return {
+      status: "incompatible",
+      reason: "compatibility-format-mismatch",
+      warnings,
+    };
+  }
+
+  if (compatibility.deviceScope === "portable") {
+    return {
+      status: "incompatible",
+      reason: "portable-encrypted-backups-not-supported",
+      warnings,
+    };
+  }
+
+  if (compatibility.deviceScope !== undefined && compatibility.deviceScope !== "same-install") {
+    return {
+      status: "incompatible",
+      reason: "unsupported-device-scope",
+      warnings,
+    };
+  }
+
+  if (compatibility.requiresSameDeviceUUID === true && !localContext.deviceUUIDPresent) {
+    return {
+      status: "incompatible",
+      reason: "required-device-uuid-missing",
+      warnings,
+    };
+  }
+
+  if (compatibility.saltKey !== undefined && compatibility.saltKey !== "pipass_master_salt") {
+    return {
+      status: "incompatible",
+      reason: "salt-key-mismatch",
+      warnings,
+    };
+  }
+
+  if (!localContext.masterSaltPresent) {
+    return {
+      status: "unknown",
+      reason: "local-master-salt-missing",
+      warnings,
+    };
+  }
+
+  if (
+    compatibility.deviceBinding !== undefined &&
+    compatibility.deviceBinding !== localContext.deviceBinding
+  ) {
+    return {
+      status: "incompatible",
+      reason: "device-binding-mismatch",
+      warnings,
+    };
+  }
+
+  if (localContext.deviceBinding !== "deviceUUID:v1") {
+    return {
+      status: "incompatible",
+      reason: "unsupported-local-device-binding",
+      warnings,
+    };
+  }
+
+  const backupKdfMetadata = compatibility.kdfMetadata;
+  if (backupKdfMetadata === undefined) {
+    return {
+      status: "unknown",
+      reason: "missing-kdf-metadata",
+      warnings,
+    };
+  }
+
+  if (!isValidKdfMetadata(backupKdfMetadata)) {
+    return {
+      status: "incompatible",
+      reason: "invalid-backup-kdf-metadata",
+      warnings,
+    };
+  }
+
+  if (!localContext.kdfMetadata) {
+    return {
+      status: "unknown",
+      reason: "local-kdf-metadata-missing",
+      warnings,
+    };
+  }
+
+  if (!kdfMetadataMatches(backupKdfMetadata, localContext.kdfMetadata)) {
+    return {
+      status: "incompatible",
+      reason: "kdf-metadata-mismatch",
+      warnings,
+    };
+  }
+
+  return {
+    status: "compatible",
+    reason: "same-install-metadata-match",
+    warnings,
+  };
+}
+
 function parseInput(input: unknown): { ok: true; value: unknown } | { ok: false; error: BackupParseError } {
   if (typeof input !== "string") {
     return { ok: true, value: input };
@@ -156,6 +316,43 @@ function parseInput(input: unknown): { ok: true; value: unknown } | { ok: false;
       },
     };
   }
+}
+
+function getBackupCompatibilityMetadata(backup: BackupStageResult): unknown {
+  return backup.metadata.compatibility;
+}
+
+function collectCompatibilityWarnings(backup: BackupStageResult): string[] {
+  const warnings: string[] = [];
+  if (backup.entries.some((entry) => typeof entry.encryptedAux === "string" && entry.encryptedAux.length > 0)) {
+    warnings.push("backup contains encrypted honeytoken aux metadata that may require server-side reissue or review");
+  }
+  return warnings;
+}
+
+function kdfMetadataMatches(left: KdfMetadata, right: KdfMetadata): boolean {
+  return (
+    left.version === right.version &&
+    left.algorithm === right.algorithm &&
+    left.profileIterations === right.profileIterations &&
+    left.kdfVersion === right.kdfVersion &&
+    left.saltKey === right.saltKey &&
+    left.deviceBinding === right.deviceBinding &&
+    jsonStableStringify(left.parameters) === jsonStableStringify(right.parameters)
+  );
+}
+
+function jsonStableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => jsonStableStringify(item)).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${jsonStableStringify(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function validateEncryptedEntry(value: unknown, index: number): BackupParseResult | null {

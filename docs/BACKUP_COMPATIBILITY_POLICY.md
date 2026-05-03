@@ -138,6 +138,8 @@ Options to evaluate:
 
 Recommended policy: use a backup-specific verifier plus full staged decrypt verification before committing encrypted-local-records.
 
+Prompt 043 adds pure metadata-only compatibility classification helpers. These helpers can return compatible, incompatible, or unknown from staged backup metadata and a supplied local context, but they do not decrypt records, derive keys, compare actual `deviceUUID` values, or authorize a runtime import commit.
+
 ## 8. Secure Notes And Honeytokens
 
 Secure notes must follow the same compatibility policy as vault entries.
