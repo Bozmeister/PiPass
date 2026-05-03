@@ -27,8 +27,13 @@ import {
   verifyBackupSentinel,
 } from "../../lib/backupVerifier";
 import {
+  executeSetupImportCommitPlan,
+  type SetupImportStorageDriver,
+} from "../../lib/setupImportCommitExecutor";
+import {
   buildSetupImportCommitPlan,
   SETUP_IMPORT_STORAGE_KEYS,
+  type SetupImportCommitPlan,
 } from "../../lib/setupImportCommitPlan";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
@@ -47,6 +52,46 @@ class MemoryStorage {
     },
     isWeb: () => false,
   };
+}
+
+class CommitPlanMemoryStorage implements SetupImportStorageDriver {
+  readonly items = new Map<string, string>();
+  readonly calls: string[] = [];
+  readonly failSetAttempts = new Set<string>();
+  readonly failDeleteAttempts = new Set<string>();
+  private readonly setAttempts = new Map<string, number>();
+  private readonly deleteAttempts = new Map<string, number>();
+
+  constructor(initialItems: Record<string, string> = {}) {
+    for (const [key, value] of Object.entries(initialItems)) {
+      this.items.set(key, value);
+    }
+  }
+
+  async getItem(key: string): Promise<string | null> {
+    this.calls.push(`get:${key}`);
+    return this.items.get(key) ?? null;
+  }
+
+  async setItem(key: string, value: string): Promise<void> {
+    const attempt = (this.setAttempts.get(key) ?? 0) + 1;
+    this.setAttempts.set(key, attempt);
+    this.calls.push(`set:${key}`);
+    if (this.failSetAttempts.has(`${key}#${attempt}`)) {
+      throw new Error(`set failed for ${key}`);
+    }
+    this.items.set(key, value);
+  }
+
+  async deleteItem(key: string): Promise<void> {
+    const attempt = (this.deleteAttempts.get(key) ?? 0) + 1;
+    this.deleteAttempts.set(key, attempt);
+    this.calls.push(`delete:${key}`);
+    if (this.failDeleteAttempts.has(`${key}#${attempt}`)) {
+      throw new Error(`delete failed for ${key}`);
+    }
+    this.items.delete(key);
+  }
 }
 
 function installMemoryStorage(): MemoryStorage {
@@ -237,6 +282,34 @@ function commitSetupMetadataFixture(overrides: Record<string, unknown> = {}) {
     recoveryKeyHash: "setup-recovery-hash-placeholder",
     ...overrides,
   };
+}
+
+function commitPlanFixture(options: {
+  includeEntries?: boolean;
+  includeNotes?: boolean;
+  includeSharedVault?: boolean;
+  includeCachedKey?: boolean;
+} = {}): SetupImportCommitPlan {
+  const stagedBackup = stagedBackupFixture();
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+    entries: options.includeEntries ? stagedBackup.entries : undefined,
+    secureNotes: options.includeNotes ? stagedBackup.secureNotes : undefined,
+    sharedVaultBlob: options.includeSharedVault
+      ? {
+          encryptedBlob: "shared-vault-blob-placeholder",
+          version: 1,
+          updatedAt: 1234567890,
+        }
+      : undefined,
+    includeCachedMasterKey: options.includeCachedKey,
+    cachedMasterKeyReference: options.includeCachedKey
+      ? "prepared-cached-master-key-reference"
+      : undefined,
+  });
+
+  assert.equal(result.ok, true);
+  return result.plan;
 }
 
 test("clearVault clears local vault data but preserves auth and install identity state", async (t) => {
@@ -1554,5 +1627,249 @@ test("setup/import commit plan helper does not write platform storage", async (t
   });
 
   assert.equal(result.ok, true);
+  assert.equal(storage.items.size, 0);
+});
+
+test("setup/import atomic executor writes all operations in order", async () => {
+  const plan = commitPlanFixture({
+    includeEntries: true,
+    includeNotes: true,
+    includeSharedVault: true,
+    includeCachedKey: true,
+  });
+  const storage = new CommitPlanMemoryStorage();
+
+  const result = await executeSetupImportCommitPlan(plan, storage);
+
+  assert.deepEqual(result, {
+    success: true,
+    operationsApplied: plan.operations.length,
+    rollbackStatus: "not-needed",
+  });
+  const setCalls = storage.calls.filter((call) => call.startsWith("set:"));
+  assert.deepEqual(
+    setCalls,
+    plan.operations.map((operation) => `set:${operation.key}`),
+  );
+  assert.equal(storage.items.get(SETUP_IMPORT_STORAGE_KEYS.vaultInitialized), "1");
+});
+
+test("setup/import atomic executor snapshots previous values before writes", async () => {
+  const plan = commitPlanFixture();
+  const storage = new CommitPlanMemoryStorage();
+
+  const result = await executeSetupImportCommitPlan(plan, storage);
+
+  assert.equal(result.success, true);
+  for (const operation of plan.operations) {
+    const getIndex = storage.calls.indexOf(`get:${operation.key}`);
+    const setIndex = storage.calls.indexOf(`set:${operation.key}`);
+    assert.equal(getIndex > -1, true, `${operation.key} should be snapshotted`);
+    assert.equal(setIndex > getIndex, true, `${operation.key} should be written after snapshot`);
+  }
+});
+
+test("setup/import atomic executor failure on first write leaves new key state clean", async () => {
+  const plan = commitPlanFixture();
+  const firstKey = plan.operations[0].key;
+  const storage = new CommitPlanMemoryStorage();
+  storage.failSetAttempts.add(`${firstKey}#1`);
+
+  const result = await executeSetupImportCommitPlan(plan, storage);
+
+  assert.equal(result.success, false);
+  if (result.success) {
+    throw new Error("expected setup/import commit failure");
+  }
+  assert.equal(result.reason, "write-failed");
+  assert.equal(result.rollbackStatus, "not-needed");
+  assert.equal(storage.items.size, 0);
+});
+
+test("setup/import atomic executor middle failure restores previous values and deletes new keys", async () => {
+  const plan = commitPlanFixture({ includeEntries: true });
+  const failingKey = SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash;
+  const storage = new CommitPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "previous-master-salt",
+  });
+  storage.failSetAttempts.add(`${failingKey}#1`);
+
+  const result = await executeSetupImportCommitPlan(plan, storage);
+
+  assert.equal(result.success, false);
+  if (result.success) {
+    throw new Error("expected setup/import commit failure");
+  }
+  assert.equal(result.rollbackStatus, "completed");
+  assert.equal(storage.items.get(SETUP_IMPORT_STORAGE_KEYS.masterSalt), "previous-master-salt");
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.securityProfile), false);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.kdfMetadata), false);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.masterHash), false);
+  assert.equal(storage.items.has("pipass_vault_entry-a"), false);
+});
+
+test("setup/import atomic executor failure on initialized marker rolls back earlier writes", async () => {
+  const plan = commitPlanFixture({
+    includeEntries: true,
+    includeNotes: true,
+    includeSharedVault: true,
+    includeCachedKey: true,
+  });
+  const storage = new CommitPlanMemoryStorage();
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.vaultInitialized}#1`);
+
+  const result = await executeSetupImportCommitPlan(plan, storage);
+
+  assert.equal(result.success, false);
+  if (result.success) {
+    throw new Error("expected setup/import commit failure");
+  }
+  assert.equal(result.rollbackStatus, "completed");
+  assert.equal(storage.items.size, 0);
+});
+
+test("setup/import atomic executor rollback restores previous overwritten value", async () => {
+  const plan = commitPlanFixture();
+  const storage = new CommitPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.securityProfile]: "25000",
+  });
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash}#1`);
+
+  const result = await executeSetupImportCommitPlan(plan, storage);
+
+  assert.equal(result.success, false);
+  assert.equal(storage.items.get(SETUP_IMPORT_STORAGE_KEYS.securityProfile), "25000");
+});
+
+test("setup/import atomic executor rollback deletes newly created key", async () => {
+  const plan = commitPlanFixture();
+  const storage = new CommitPlanMemoryStorage();
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash}#1`);
+
+  const result = await executeSetupImportCommitPlan(plan, storage);
+
+  assert.equal(result.success, false);
+  assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.masterSalt), false);
+});
+
+test("setup/import atomic executor reports rollback failures with safe key-only details", async () => {
+  const plan = commitPlanFixture();
+  const storage = new CommitPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "previous-master-salt",
+  });
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash}#1`);
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.masterSalt}#2`);
+
+  const result = await executeSetupImportCommitPlan(plan, storage);
+
+  assert.equal(result.success, false);
+  if (result.success) {
+    throw new Error("expected setup/import commit failure");
+  }
+  assert.equal(result.rollbackStatus, "failed");
+  assert.deepEqual(result.rollbackFailures, [
+    { key: SETUP_IMPORT_STORAGE_KEYS.masterSalt, action: "restore" },
+  ]);
+  assert.equal(JSON.stringify(result).includes("previous-master-salt"), false);
+});
+
+test("setup/import atomic executor rejects plan where initialized marker is not last", async () => {
+  const plan = commitPlanFixture();
+  const invalidPlan: SetupImportCommitPlan = {
+    ...plan,
+    operations: [plan.operations[plan.operations.length - 1], ...plan.operations.slice(0, -1)],
+  };
+  const storage = new CommitPlanMemoryStorage();
+
+  const result = await executeSetupImportCommitPlan(invalidPlan, storage);
+
+  assert.equal(result.success, false);
+  if (result.success) {
+    throw new Error("expected setup/import commit validation failure");
+  }
+  assert.equal(result.reason, "invalid-plan");
+  assert.equal(result.validationError, "initialized-marker-not-last");
+  assert.equal(storage.calls.length, 0);
+  assert.equal(storage.items.size, 0);
+});
+
+test("setup/import atomic executor rejects duplicate write keys", async () => {
+  const plan = commitPlanFixture();
+  const invalidPlan: SetupImportCommitPlan = {
+    ...plan,
+    operations: [...plan.operations, plan.operations[plan.operations.length - 1]],
+  };
+  const storage = new CommitPlanMemoryStorage();
+
+  const result = await executeSetupImportCommitPlan(invalidPlan, storage);
+
+  assert.equal(result.success, false);
+  if (result.success) {
+    throw new Error("expected setup/import commit validation failure");
+  }
+  assert.equal(result.reason, "invalid-plan");
+  assert.equal(result.validationError, "duplicate-write-key");
+  assert.equal(storage.calls.length, 0);
+});
+
+test("setup/import atomic executor rejects unknown operation types", async () => {
+  const plan = commitPlanFixture();
+  const invalidPlan = {
+    ...plan,
+    operations: [
+      ...plan.operations.slice(0, -1),
+      {
+        type: "delete",
+        key: "pipass_unknown",
+        category: "setup-metadata",
+        safeDescription: "unknown operation",
+      },
+      plan.operations[plan.operations.length - 1],
+    ],
+  } as SetupImportCommitPlan;
+  const storage = new CommitPlanMemoryStorage();
+
+  const result = await executeSetupImportCommitPlan(invalidPlan, storage);
+
+  assert.equal(result.success, false);
+  if (result.success) {
+    throw new Error("expected setup/import commit validation failure");
+  }
+  assert.equal(result.reason, "invalid-plan");
+  assert.equal(result.validationError, "unknown-operation-type");
+  assert.equal(storage.calls.length, 0);
+});
+
+test("setup/import atomic executor omits values and secret-like content from failure output", async () => {
+  const secretValue = "PLAINTEXT_SECRET CIPHERTEXT_SECRET KEY_SECRET";
+  const plan = commitPlanFixture();
+  const storage = new CommitPlanMemoryStorage({
+    [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: secretValue,
+  });
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash}#1`);
+
+  const result = await executeSetupImportCommitPlan(plan, storage);
+  const serialized = JSON.stringify(result);
+
+  assert.equal(result.success, false);
+  assert.equal(serialized.includes(secretValue), false);
+  assert.equal(serialized.includes("PLAINTEXT_SECRET"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+  assert.equal(serialized.includes("KEY_SECRET"), false);
+  assert.equal(serialized.includes("setup-master-salt-placeholder"), false);
+});
+
+test("setup/import atomic executor does not write storage when validation fails", async () => {
+  const plan = commitPlanFixture();
+  const invalidPlan: SetupImportCommitPlan = {
+    ...plan,
+    operations: plan.operations.slice(0, -1),
+  };
+  const storage = new CommitPlanMemoryStorage();
+
+  const result = await executeSetupImportCommitPlan(invalidPlan, storage);
+
+  assert.equal(result.success, false);
+  assert.equal(storage.calls.length, 0);
   assert.equal(storage.items.size, 0);
 });
