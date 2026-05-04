@@ -8,6 +8,8 @@ This is documentation-only. It does not change runtime code, tests, UI, storage 
 
 Prompt 077 implementation note: `determineStagedBackupImportCommitEligibility()` now provides a pure safe-state decision for whether runtime `importCommitEnabled` may become true. It does not parse backups, decrypt records, write storage, or wire staged records into runtime commit.
 
+Prompt 078 implementation note: `prepareSetupImportCommitFromRuntimeState()` now models the future app-root setup/import orchestration shape with injected dependencies. It evaluates import eligibility before calling the setup/import orchestrator and is not wired into live runtime setup.
+
 ## 2. Current Pre-Commit State
 
 Current behavior remains the temporary bridge:

@@ -63,6 +63,7 @@ import { decideStagedBackupCommitGate } from "../../lib/stagedBackupCommitGate";
 import { computeStagedBackupPreflightStatus } from "../../lib/stagedBackupBridgeStatus";
 import { determineStagedBackupImportTransition } from "../../lib/stagedBackupImportTransition";
 import { determineStagedBackupImportCommitEligibility } from "../../lib/stagedBackupImportEligibility";
+import { prepareSetupImportCommitFromRuntimeState } from "../../lib/runtimeSetupImportCommit";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -2484,6 +2485,259 @@ test("staged backup import eligibility helper does not write platform storage", 
 
   assert.equal(eligibility.status, "eligible");
   assert.equal(storage.items.size, 0);
+});
+
+test("runtime setup/import commit shape uses setup-only orchestration with no staged backup", async () => {
+  const calls: string[] = [];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: null,
+    eligibilityInput: { stagedBackupPresent: false, featureFlagEnabled: true },
+    dependencies: commitOrchestrationDependencies(calls),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stage, "setup-only");
+  assert.equal(result.recordsIncluded, false);
+  assert.equal(result.activeSharesPublished, false);
+  assert.deepEqual(calls, ["plan", "commit"]);
+});
+
+test("runtime setup/import commit shape keeps feature-disabled staged backup setup-only", async () => {
+  const calls: string[] = [];
+  let operationCategories: string[] = [];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    eligibilityInput: eligibleImportCommitInput({ featureFlagEnabled: false }),
+    dependencies: commitOrchestrationDependencies(calls, {
+      executePlan: (plan) => {
+        calls.push("commit");
+        operationCategories = plan.operations.map((operation) => operation.category);
+        return {
+          success: true,
+          operationsApplied: plan.operations.length,
+          rollbackStatus: "not-needed",
+        };
+      },
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stage, "setup-only");
+  assert.equal(result.eligibility.status, "not-yet-enabled");
+  assert.equal(result.recordsIncluded, false);
+  assert.deepEqual(calls, ["plan", "commit"]);
+  assert.equal(operationCategories.includes("vault-entry"), false);
+  assert.equal(operationCategories.includes("secure-note"), false);
+});
+
+test("runtime setup/import commit shape stops at blocked eligibility before staged commit work", async () => {
+  const calls: string[] = [];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    eligibilityInput: eligibleImportCommitInput({
+      compatibilityStatus: "incompatible",
+    }),
+    dependencies: commitOrchestrationDependencies(calls),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, "eligibility");
+  assert.equal(result.reason, "incompatible");
+  assert.equal(result.recordsIncluded, false);
+  assert.equal(result.activeSharesPublished, false);
+  assert.deepEqual(calls, []);
+});
+
+test("runtime setup/import commit shape evaluates eligibility before staged orchestrator work", async () => {
+  const calls: string[] = [];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    eligibilityInput: eligibleImportCommitInput(),
+    determineEligibility: (input) => {
+      calls.push("eligibility");
+      return determineStagedBackupImportCommitEligibility(input);
+    },
+    dependencies: commitOrchestrationDependencies(calls, {
+      decideCommitGate: (gateInput) => {
+        calls.push("gate");
+        return decideStagedBackupCommitGate(gateInput);
+      },
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stage, "commit");
+  assert.equal(result.recordsIncluded, true);
+  assert.deepEqual(calls, [
+    "eligibility",
+    "compatibility",
+    "decryptability",
+    "gate",
+    "shared-vault",
+    "plan",
+    "commit",
+  ]);
+});
+
+test("runtime setup/import commit shape runs gate before shared vault plan and executor", async () => {
+  const calls: string[] = [];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    eligibilityInput: eligibleImportCommitInput(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      decideCommitGate: (gateInput) => {
+        calls.push("gate");
+        return decideStagedBackupCommitGate(gateInput);
+      },
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.slice(-4), ["gate", "shared-vault", "plan", "commit"]);
+});
+
+test("runtime setup/import commit shape skips shared vault build when decryptability fails", async () => {
+  const calls: string[] = [];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    eligibilityInput: eligibleImportCommitInput(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      verifyDecryptability: () => {
+        calls.push("decryptability");
+        return decryptabilityGateResult(false);
+      },
+      decideCommitGate: (gateInput) => {
+        calls.push("gate");
+        return decideStagedBackupCommitGate(gateInput);
+      },
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, "gate");
+  assert.equal(result.reason, "decryptability-failed");
+  assert.deepEqual(calls, ["compatibility", "decryptability", "gate"]);
+});
+
+test("runtime setup/import commit shape stops before plan and executor when shared vault build fails", async () => {
+  const calls: string[] = [];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    eligibilityInput: eligibleImportCommitInput(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      buildSharedVaultBlob: () => {
+        calls.push("shared-vault");
+        throw new Error("SECRET_SHARED_VAULT_CONTENT");
+      },
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, "shared-vault");
+  assert.equal(result.reason, "shared-vault-build-failed");
+  assert.deepEqual(calls, ["compatibility", "decryptability", "shared-vault"]);
+});
+
+test("runtime setup/import commit shape returns safe executor failure without publishing shares", async () => {
+  const calls: string[] = [];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    eligibilityInput: eligibleImportCommitInput(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      executePlan: () => {
+        calls.push("commit");
+        return {
+          success: false,
+          reason: "write-failed",
+          message: "Setup/import commit write failed",
+          operationsApplied: 2,
+          rollbackStatus: "completed",
+        };
+      },
+    }),
+  });
+  const serialized = JSON.stringify(result);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, "commit");
+  assert.equal(result.reason, "write-failed");
+  assert.equal(result.recordsIncluded, false);
+  assert.equal(result.activeSharesPublished, false);
+  assert.equal(serialized.includes("SECRET_SHARED_VAULT_CONTENT"), false);
+});
+
+test("runtime setup/import commit shape succeeds through injected staged path safely", async () => {
+  const calls: string[] = [];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    eligibilityInput: eligibleImportCommitInput({
+      verifierStatus: "valid",
+      sentinelStatus: "passed",
+    }),
+    backupVerifier: backupVerifierFixture(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      decideCommitGate: (gateInput) => {
+        calls.push("gate");
+        return decideStagedBackupCommitGate(gateInput);
+      },
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stage, "commit");
+  assert.equal(result.recordsIncluded, true);
+  assert.equal(result.activeSharesPublished, false);
+  assert.deepEqual(calls, [
+    "compatibility",
+    "sentinel",
+    "decryptability",
+    "gate",
+    "shared-vault",
+    "plan",
+    "commit",
+  ]);
+});
+
+test("runtime setup/import commit shape output contains no raw backup or key material", async () => {
+  const secret = "PLAINTEXT_SECRET CIPHERTEXT_SECRET HASH_SECRET SALT_SECRET deviceUUID RECOVERY_KEY MASTER_KEY";
+  const backup = validBackupFixture();
+  const [entry] = backup.entries as Record<string, unknown>[];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture({
+      masterHash: "HASH_SECRET",
+      recoveryKeyHash: "RECOVERY_KEY",
+    }),
+    stagedBackup: stagedBackupFixture({
+      entries: [
+        {
+          ...entry,
+          id: "SECRET_RECORD_ID",
+          encryptedPassword: secret,
+        },
+      ],
+    }),
+    eligibilityInput: eligibleImportCommitInput(),
+    dependencies: commitOrchestrationDependencies(),
+  });
+  const serialized = JSON.stringify(result);
+
+  assert.equal(serialized.includes("PLAINTEXT_SECRET"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+  assert.equal(serialized.includes("HASH_SECRET"), false);
+  assert.equal(serialized.includes("SALT_SECRET"), false);
+  assert.equal(serialized.includes("deviceUUID"), false);
+  assert.equal(serialized.includes("RECOVERY_KEY"), false);
+  assert.equal(serialized.includes("MASTER_KEY"), false);
+  assert.equal(serialized.includes("SECRET_RECORD_ID"), false);
 });
 
 test("SeedSetupScreen backup selection remains staged-only without immediate writes", () => {
