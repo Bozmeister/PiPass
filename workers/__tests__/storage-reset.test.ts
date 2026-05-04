@@ -1863,13 +1863,47 @@ test("setup/import commit orchestrator builds and executes setup-only plan", asy
   assert.deepEqual(calls, ["plan", "commit"]);
 });
 
+test("setup/import commit orchestrator can gate setup-only before plan execution", async () => {
+  const calls: string[] = [];
+  let operationCategories: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      decideCommitGate: (gateInput) => {
+        calls.push("gate");
+        assert.equal(gateInput.stagedBackupPresent, false);
+        return decideStagedBackupCommitGate(gateInput);
+      },
+      executePlan: (plan) => {
+        calls.push("commit");
+        operationCategories = plan.operations.map((operation) => operation.category);
+        return {
+          success: true,
+          operationsApplied: plan.operations.length,
+          rollbackStatus: "not-needed",
+        };
+      },
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stage, "setup-only");
+  assert.deepEqual(calls, ["gate", "plan", "commit"]);
+  assert.equal(operationCategories.includes("vault-entry"), false);
+});
+
 test("setup/import commit orchestrator runs staged gates before commit", async () => {
   const calls: string[] = [];
   const result = await prepareAndExecuteSetupImportCommit({
     setupMetadata: commitSetupMetadataFixture(),
     stagedBackup: stagedBackupWithCompatibility(),
     backupVerifier: backupVerifierFixture(),
-    dependencies: commitOrchestrationDependencies(calls),
+    dependencies: commitOrchestrationDependencies(calls, {
+      decideCommitGate: (gateInput) => {
+        calls.push("gate");
+        return decideStagedBackupCommitGate(gateInput);
+      },
+    }),
   });
 
   assert.equal(result.ok, true);
@@ -1877,10 +1911,74 @@ test("setup/import commit orchestrator runs staged gates before commit", async (
     "compatibility",
     "sentinel",
     "decryptability",
+    "gate",
     "shared-vault",
     "plan",
     "commit",
   ]);
+});
+
+test("setup/import commit orchestrator stops before shared vault plan or executor when gate blocks", async () => {
+  const calls: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      decideCommitGate: () => {
+        calls.push("gate");
+        return {
+          allowed: false,
+          mode: "setup-only",
+          reason: "warnings-blocked",
+          warnings: ["safe gate warning"],
+          safeMessage: "Backup warnings must be reviewed before import.",
+        };
+      },
+    }),
+  });
+
+  assertOrchestrationFailure(result);
+  assert.equal(result.stage, "gate");
+  assert.equal(result.reason, "warnings-blocked");
+  assert.deepEqual(calls, ["compatibility", "decryptability", "gate"]);
+  assert.equal(result.warnings.includes("safe gate warning"), true);
+});
+
+test("setup/import commit orchestrator honors gate setup-only mode without committing staged records", async () => {
+  const calls: string[] = [];
+  let operationCategories: string[] = [];
+  const result = await prepareAndExecuteSetupImportCommit({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      decideCommitGate: () => {
+        calls.push("gate");
+        return {
+          allowed: true,
+          mode: "setup-only",
+          reason: "no-backup",
+          warnings: ["safe gate warning"],
+          safeMessage: "Setup can continue without backup import.",
+        };
+      },
+      executePlan: (plan) => {
+        calls.push("commit");
+        operationCategories = plan.operations.map((operation) => operation.category);
+        return {
+          success: true,
+          operationsApplied: plan.operations.length,
+          rollbackStatus: "not-needed",
+        };
+      },
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stage, "setup-only");
+  assert.deepEqual(calls, ["compatibility", "decryptability", "gate", "plan", "commit"]);
+  assert.equal(operationCategories.includes("vault-entry"), false);
+  assert.equal(operationCategories.includes("secure-note"), false);
+  assert.equal(result.warnings.includes("safe gate warning"), true);
 });
 
 test("setup/import commit orchestrator rejects incompatible backup before commit", async () => {
@@ -1897,8 +1995,8 @@ test("setup/import commit orchestrator rejects incompatible backup before commit
   });
 
   assertOrchestrationFailure(result);
-  assert.equal(result.stage, "compatibility");
-  assert.equal(result.reason, "kdf-metadata-mismatch");
+  assert.equal(result.stage, "gate");
+  assert.equal(result.reason, "incompatible");
   assert.deepEqual(calls, ["compatibility"]);
 });
 
@@ -1920,8 +2018,8 @@ test("setup/import commit orchestrator rejects unknown compatibility by default"
   });
 
   assertOrchestrationFailure(result);
-  assert.equal(result.stage, "compatibility");
-  assert.equal(result.reason, "missing-compatibility-metadata");
+  assert.equal(result.stage, "gate");
+  assert.equal(result.reason, "unknown-compatibility");
   assert.deepEqual(calls, ["compatibility"]);
 });
 
@@ -1962,8 +2060,8 @@ test("setup/import commit orchestrator rejects sentinel failure before decryptab
   });
 
   assertOrchestrationFailure(result);
-  assert.equal(result.stage, "sentinel");
-  assert.equal(result.reason, "hash-mismatch");
+  assert.equal(result.stage, "gate");
+  assert.equal(result.reason, "sentinel-failed");
   assert.deepEqual(calls, ["compatibility", "sentinel"]);
 });
 
@@ -1990,8 +2088,8 @@ test("setup/import commit orchestrator rejects decryptability failure before com
   });
 
   assertOrchestrationFailure(result);
-  assert.equal(result.stage, "decryptability");
-  assert.equal(result.reason, "staged-backup-decryptability-failed");
+  assert.equal(result.stage, "gate");
+  assert.equal(result.reason, "decryptability-failed");
   assert.deepEqual(calls, ["compatibility", "decryptability"]);
 });
 
@@ -2113,7 +2211,11 @@ test("setup/import commit orchestrator preserves safe warnings", async () => {
     ),
     true,
   );
-  assert.equal(result.warnings.includes("safe compatibility warning"), true);
+  assert.equal(
+    result.warnings.includes("Backup has a non-blocking warning that should be reviewed before import."),
+    true,
+  );
+  assert.equal(result.warnings.includes("safe compatibility warning"), false);
 });
 
 test("setup/import commit orchestrator omits plaintext ciphertext and key material from failures", async () => {

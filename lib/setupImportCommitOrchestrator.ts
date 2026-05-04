@@ -14,6 +14,11 @@ import type {
   SetupImportCommitPlanResult,
   SetupImportSetupMetadata,
 } from "./setupImportCommitPlan";
+import {
+  decideStagedBackupCommitGate,
+  type StagedBackupCommitGateDecision,
+  type StagedBackupCommitGateInput,
+} from "./stagedBackupCommitGate";
 import type { SharedVaultBlob } from "../workers/sharedVaultStorage";
 import type { VaultEntry } from "../workers/vaultWorker";
 
@@ -22,6 +27,7 @@ export type SetupImportCommitOrchestrationStage =
   | "compatibility"
   | "sentinel"
   | "decryptability"
+  | "gate"
   | "shared-vault"
   | "plan"
   | "commit";
@@ -36,6 +42,9 @@ export interface SetupImportCommitOrchestrationDependencies {
   verifyDecryptability: (
     stagedBackup: BackupStageResult,
   ) => BackupDecryptVerificationResult | Promise<BackupDecryptVerificationResult>;
+  decideCommitGate?: (
+    input: StagedBackupCommitGateInput,
+  ) => StagedBackupCommitGateDecision | Promise<StagedBackupCommitGateDecision>;
   buildSharedVaultBlob?: (
     entries: VaultEntry[],
   ) => SharedVaultBlob | null | Promise<SharedVaultBlob | null>;
@@ -52,6 +61,8 @@ export interface SetupImportCommitOrchestrationInput {
   cachedMasterKeyReference?: string;
   initializedMarkerValue?: "1";
   allowUnknownCompatibility?: boolean;
+  requireBackupVerifier?: boolean;
+  allowHoneytokenWarnings?: boolean;
   dependencies: SetupImportCommitOrchestrationDependencies;
 }
 
@@ -77,46 +88,123 @@ export async function prepareAndExecuteSetupImportCommit(
   const warnings = collectWarnings(stagedBackup?.warnings);
 
   if (!stagedBackup) {
-    return buildAndExecutePlan(input, warnings, "setup-only", undefined);
+    const gateDecision = await resolveGateDecision(input, {
+      stagedBackupPresent: false,
+    });
+    const gateWarnings = mergeWarnings(warnings, gateDecision.warnings);
+    if (!gateDecision.allowed) {
+      return failure("gate", gateDecision.reason, gateWarnings);
+    }
+    return buildAndExecutePlan(input, gateWarnings, "setup-only", undefined);
   }
 
   const compatibility = await input.dependencies.classifyCompatibility(stagedBackup);
-  warnings.push(...collectWarnings(compatibility.warnings));
 
   if (compatibility.status === "incompatible") {
-    return failure("compatibility", compatibility.reason, warnings);
+    return gateFailure(input, stagedBackup, compatibility, null, null, null, warnings);
   }
 
   if (compatibility.status === "unknown" && !input.allowUnknownCompatibility) {
-    return failure("compatibility", compatibility.reason, warnings);
+    return gateFailure(input, stagedBackup, compatibility, null, null, null, warnings);
   }
 
+  let sentinelResult: BackupSentinelVerificationResult | null = null;
   if (input.backupVerifier) {
     if (!input.dependencies.verifySentinel) {
-      return failure("sentinel", "missing-sentinel-verifier", warnings);
+      sentinelResult = {
+        ok: false,
+        reason: "missing-decryptor",
+        message: "Backup verifier decryptor is unavailable.",
+      };
+    } else {
+      sentinelResult = await input.dependencies.verifySentinel(input.backupVerifier);
     }
-
-    const sentinelResult = await input.dependencies.verifySentinel(input.backupVerifier);
     if (!sentinelResult.ok) {
-      return failure("sentinel", sentinelResult.reason, warnings);
+      return gateFailure(
+        input,
+        stagedBackup,
+        compatibility,
+        { ok: true, verifier: input.backupVerifier },
+        sentinelResult,
+        null,
+        warnings,
+      );
     }
   }
 
   const decryptability = await input.dependencies.verifyDecryptability(stagedBackup);
   if (!decryptability.ok) {
-    return failure("decryptability", "staged-backup-decryptability-failed", warnings);
+    return gateFailure(input, stagedBackup, compatibility, null, sentinelResult, decryptability, warnings);
   }
 
-  const sharedVaultResult = await resolveSharedVaultBlob(input, stagedBackup, warnings);
+  const gateDecision = await resolveGateDecision(input, {
+    stagedBackupPresent: true,
+    format: stagedBackup.format,
+    compatibility,
+    verifier: input.backupVerifier
+      ? { ok: true, verifier: input.backupVerifier }
+      : null,
+    sentinelVerification: sentinelResult,
+    decryptability,
+    options: {
+      allowUnknownCompatibility: input.allowUnknownCompatibility,
+      requireVerifier: input.requireBackupVerifier,
+      allowHoneytokenWarnings: input.allowHoneytokenWarnings,
+    },
+  });
+
+  const gateWarnings = mergeWarnings(warnings, gateDecision.warnings);
+  if (!gateDecision.allowed) {
+    return failure("gate", gateDecision.reason, gateWarnings);
+  }
+
+  if (gateDecision.mode !== "commit-staged-backup") {
+    return buildAndExecutePlan(input, gateWarnings, "setup-only", undefined);
+  }
+
+  const sharedVaultResult = await resolveSharedVaultBlob(input, stagedBackup, gateWarnings);
   if (!sharedVaultResult.ok) {
     return sharedVaultResult;
   }
 
-  return buildAndExecutePlan(input, warnings, "commit", {
+  return buildAndExecutePlan(input, gateWarnings, "commit", {
     entries: stagedBackup.entries,
     secureNotes: stagedBackup.secureNotes,
     sharedVaultBlob: sharedVaultResult.sharedVaultBlob,
   });
+}
+
+async function gateFailure(
+  input: SetupImportCommitOrchestrationInput,
+  stagedBackup: BackupStageResult,
+  compatibility: BackupCompatibilityResult,
+  verifier: StagedBackupCommitGateInput["verifier"],
+  sentinelVerification: BackupSentinelVerificationResult | null,
+  decryptability: BackupDecryptVerificationResult | null,
+  warnings: string[],
+): Promise<Extract<SetupImportCommitOrchestrationResult, { ok: false }>> {
+  const gateDecision = await resolveGateDecision(input, {
+    stagedBackupPresent: true,
+    format: stagedBackup.format,
+    compatibility,
+    verifier,
+    sentinelVerification,
+    decryptability,
+    options: {
+      allowUnknownCompatibility: input.allowUnknownCompatibility,
+      requireVerifier: input.requireBackupVerifier,
+      allowHoneytokenWarnings: input.allowHoneytokenWarnings,
+    },
+  });
+
+  return failure("gate", gateDecision.reason, mergeWarnings(warnings, gateDecision.warnings));
+}
+
+function resolveGateDecision(
+  input: SetupImportCommitOrchestrationInput,
+  gateInput: StagedBackupCommitGateInput,
+): StagedBackupCommitGateDecision | Promise<StagedBackupCommitGateDecision> {
+  return (input.dependencies.decideCommitGate ?? decideStagedBackupCommitGate)(gateInput);
 }
 
 async function resolveSharedVaultBlob(
@@ -208,4 +296,14 @@ function failure(
 function collectWarnings(warnings: string[] | undefined): string[] {
   if (!warnings) return [];
   return warnings.filter((warning) => typeof warning === "string" && warning.length > 0);
+}
+
+function mergeWarnings(...warningGroups: Array<string[] | undefined>): string[] {
+  const merged = new Set<string>();
+  for (const warnings of warningGroups) {
+    for (const warning of collectWarnings(warnings)) {
+      merged.add(warning);
+    }
+  }
+  return [...merged];
 }

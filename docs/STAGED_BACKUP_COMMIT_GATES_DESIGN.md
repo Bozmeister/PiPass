@@ -6,6 +6,8 @@ This document defines the runtime gates required before staged backup records ca
 
 This is design-only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, or package scripts.
 
+Prompt 070 implementation note: the pure setup/import commit orchestrator now accepts the staged backup commit gate decision as an injected dependency and requires that gate to allow `commit-staged-backup` before shared vault building, commit-plan building, or executor calls for staged records. Runtime setup and recovery confirmation are still not wired to staged backup record commit.
+
 ## 2. Current Bridge State
 
 Current first-time setup backup behavior is intentionally temporary:
