@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { View, Text, TextInput, Pressable, Platform, ActivityIndicator, ScrollView, Alert } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
@@ -57,6 +57,7 @@ import {
 } from "../../lib/setupImportCommitPlan";
 import { executeSetupImportCommitPlan } from "../../lib/setupImportCommitExecutor";
 import { prepareAndExecuteSetupImportCommit } from "../../lib/setupImportCommitOrchestrator";
+import { computeStagedBackupPreflightStatus } from "../../lib/stagedBackupBridgeStatus";
 
 const startupSnapshotDriver = {
   getItem: readPlatformItem,
@@ -109,7 +110,7 @@ export default function HomeScreen() {
   const [pendingRecoveryKey, setPendingRecoveryKey] = useState<string | null>(null);
   const [pendingRecoveryRawHex, setPendingRecoveryRawHex] = useState<string>("");
   const [pendingSetupShares, setPendingSetupShares] = useState<KeyShares | null>(null);
-  const [, setStagedSetupBackup] = useState<StagedBackupSelection | null>(null);
+  const [stagedSetupBackup, setStagedSetupBackup] = useState<StagedBackupSelection | null>(null);
   const [committingSetup, setCommittingSetup] = useState(false);
   const [vaultLocked, setVaultLocked] = useState(false);
   const [showUnlockNuclearReset, setShowUnlockNuclearReset] = useState(false);
@@ -118,6 +119,13 @@ export default function HomeScreen() {
   const pendingSetupSharesRef = useRef<KeyShares | null>(null);
   const pendingSetupCommitRef = useRef<PreparedFirstTimeVaultSetupResult | null>(null);
   const committingSetupRef = useRef(false);
+
+  const stagedBackupBridgeStatus = useMemo(
+    () => computeStagedBackupPreflightStatus({
+      stagedBackup: stagedSetupBackup?.backup ?? null,
+    }),
+    [stagedSetupBackup],
+  );
 
   useEffect(() => {
     keySharesRef.current = keyShares;
@@ -392,6 +400,7 @@ export default function HomeScreen() {
     return (
       <SeedSetupScreen
         onStagedBackupChange={setStagedSetupBackup}
+        stagedBackupBridgeStatus={stagedBackupBridgeStatus}
         onSetup={async (password, iters) => {
           clearPendingSetupState(true);
           const setup = await prepareFirstTimeVaultSetup(

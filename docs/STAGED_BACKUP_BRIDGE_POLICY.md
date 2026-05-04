@@ -22,6 +22,8 @@ Current behavior after Prompts 059, 060, 062, 063, 064, and 065:
 
 Prompt 067 implementation note: the first-time setup backup surface now uses "Backup File Check" / "Backup checked only" language and explicitly says staged records are held in memory only and will not be added to the vault in this setup step.
 
+Prompt 071 implementation note: app root now computes a safe runtime staged-backup preflight/bridge status from the in-memory staged backup. The status can report whether gates would currently allow records, but runtime commit remains disabled and the setup screen still says records will not be added to the vault in this setup step.
+
 This bridge exists only to remove the old immediate-write import risk before the final staged import commit flow is ready.
 
 ## 3. User Trust Risk

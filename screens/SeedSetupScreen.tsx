@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { parsePipassBackup, type BackupStageResult } from "../lib/backupSchema";
+import type { RuntimeStagedBackupBridgeStatus } from "../lib/stagedBackupBridgeStatus";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_ERROR, INPUT_BORDER_FOCUS, INPUT_BORDER_SUCCESS, LABEL_COLOR } from "../styles/inputTheme";
 
 const PROFILES = [
@@ -31,9 +32,10 @@ export interface StagedBackupSelection {
 interface SeedSetupScreenProps {
   onSetup: (password: string, iterations: number) => Promise<void> | void;
   onStagedBackupChange?: (selection: StagedBackupSelection | null) => void;
+  stagedBackupBridgeStatus?: RuntimeStagedBackupBridgeStatus | null;
 }
 
-export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedSetupScreenProps) {
+export default function SeedSetupScreen({ onSetup, onStagedBackupChange, stagedBackupBridgeStatus }: SeedSetupScreenProps) {
   const insets = useSafeAreaInsets();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -52,6 +54,10 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
   const showMismatch = confirmPassword.length > 0 && !passwordsMatch;
   const passwordStrong = password.length >= MIN_PASSWORD_LENGTH;
   const isValid = passwordStrong && passwordsMatch && confirmPassword.length > 0;
+  const stagedBackupBridgeMessage =
+    stagedBackupBridgeStatus?.stagedBackupPresent
+      ? stagedBackupBridgeStatus.safeMessage
+      : STAGED_BACKUP_BRIDGE_MESSAGE;
 
   async function handleImport() {
     try {
@@ -372,7 +378,7 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange }: SeedS
                   >
                     {stagedBackupSummary.secureNotes} secure notes
                   </Text>
-                  {` were found. ${STAGED_BACKUP_BRIDGE_MESSAGE}`}
+                  {` were found. ${stagedBackupBridgeMessage}`}
                 </Text>
                 {stagedBackupSummary.warnings.length > 0 && (
                   <Text

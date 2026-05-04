@@ -60,6 +60,7 @@ import {
   type SetupImportSnapshotReadDriver,
 } from "../../lib/startupRepairDecision";
 import { decideStagedBackupCommitGate } from "../../lib/stagedBackupCommitGate";
+import { computeStagedBackupPreflightStatus } from "../../lib/stagedBackupBridgeStatus";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -1825,6 +1826,121 @@ test("staged backup commit gate does not write platform storage", async (t) => {
   });
 
   assert.equal(decision.allowed, true);
+  assert.equal(storage.items.size, 0);
+});
+
+test("runtime staged backup preflight returns setup-only status when no backup is staged", () => {
+  const status = computeStagedBackupPreflightStatus();
+
+  assert.deepEqual(status, {
+    kind: "no-backup",
+    stagedBackupPresent: false,
+    setupAllowed: true,
+    recordsWillBeCommitted: false,
+    gateAllowed: true,
+    gateReason: "no-backup",
+    warnings: [],
+    safeMessage: "No backup is selected. Setup will continue without backup records.",
+  });
+});
+
+test("runtime staged backup preflight reports checked-only when commit gates would pass", () => {
+  const status = computeStagedBackupPreflightStatus({
+    stagedBackup: stagedBackupWithCompatibility(),
+    gateInput: {
+      compatibility: compatibleBackupGateResult(),
+      decryptability: decryptabilityGateResult(),
+    },
+  });
+
+  assert.equal(status.kind, "checked-only-not-imported-yet");
+  assert.equal(status.setupAllowed, true);
+  assert.equal(status.recordsWillBeCommitted, false);
+  assert.equal(status.gateAllowed, true);
+  assert.equal(status.gateReason, "allowed");
+  assert.equal(
+    status.safeMessage,
+    "Backup checked only. Backup records are staged in memory and will not be added to this vault in this setup step.",
+  );
+});
+
+test("runtime staged backup preflight keeps gate-blocked backups setup-only by default", () => {
+  const status = computeStagedBackupPreflightStatus({
+    stagedBackup: stagedBackupWithCompatibility(),
+    gateInput: {
+      compatibility: incompatibleBackupGateResult(),
+    },
+  });
+
+  assert.equal(status.kind, "gate-blocked-setup-only");
+  assert.equal(status.setupAllowed, true);
+  assert.equal(status.recordsWillBeCommitted, false);
+  assert.equal(status.gateAllowed, false);
+  assert.equal(status.gateReason, "incompatible");
+  assert.equal(
+    status.safeMessage,
+    "Backup checked only. This backup is not ready to add to the vault, and setup will continue without backup records.",
+  );
+});
+
+test("runtime staged backup preflight can require clearing blocked backup before setup", () => {
+  const status = computeStagedBackupPreflightStatus({
+    stagedBackup: stagedBackupWithCompatibility(),
+    gateInput: {
+      compatibility: incompatibleBackupGateResult(),
+    },
+    blockSetupWhenGateBlocked: true,
+  });
+
+  assert.equal(status.kind, "gate-blocked-clear-required");
+  assert.equal(status.setupAllowed, false);
+  assert.equal(status.recordsWillBeCommitted, false);
+  assert.equal(status.gateReason, "incompatible");
+});
+
+test("runtime staged backup preflight output contains no secret raw backup values", () => {
+  const secret = "PLAINTEXT_SECRET CIPHERTEXT_SECRET HASH_SECRET SALT_SECRET deviceUUID SECRET_RECORD_ID";
+  const backup = validBackupFixture();
+  const [entry] = backup.entries as Record<string, unknown>[];
+  const status = computeStagedBackupPreflightStatus({
+    stagedBackup: stagedBackupFixture({
+      entries: [
+        {
+          ...entry,
+          id: "entry-secret",
+          encryptedPassword: secret,
+        },
+      ],
+    }),
+    gateInput: {
+      compatibility: compatibleBackupGateResult([secret]),
+      decryptability: decryptabilityGateResult(),
+    },
+  });
+  const serialized = JSON.stringify(status);
+
+  assert.equal(serialized.includes("PLAINTEXT_SECRET"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+  assert.equal(serialized.includes("HASH_SECRET"), false);
+  assert.equal(serialized.includes("SALT_SECRET"), false);
+  assert.equal(serialized.includes("deviceUUID"), false);
+  assert.equal(serialized.includes("SECRET_RECORD_ID"), false);
+  assert.equal(status.recordsWillBeCommitted, false);
+});
+
+test("runtime staged backup preflight does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const status = computeStagedBackupPreflightStatus({
+    stagedBackup: stagedBackupWithCompatibility(),
+    gateInput: {
+      compatibility: compatibleBackupGateResult(),
+      decryptability: decryptabilityGateResult(),
+    },
+  });
+
+  assert.equal(status.kind, "checked-only-not-imported-yet");
   assert.equal(storage.items.size, 0);
 });
 
