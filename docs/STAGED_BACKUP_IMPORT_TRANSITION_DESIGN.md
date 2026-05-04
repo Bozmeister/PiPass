@@ -6,6 +6,8 @@ This document designs the transition from the current "backup checked only" brid
 
 This is design-only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, or package scripts.
 
+Prompt 074 implementation note: `determineStagedBackupImportTransition()` now maps supplied staged-backup state and gate decisions into safe transition statuses and copy tokens without parsing, decrypting, writing storage, or wiring runtime record commit.
+
 ## 2. Current Checked-Only Bridge State
 
 Current temporary behavior:

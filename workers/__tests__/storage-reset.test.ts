@@ -61,6 +61,7 @@ import {
 } from "../../lib/startupRepairDecision";
 import { decideStagedBackupCommitGate } from "../../lib/stagedBackupCommitGate";
 import { computeStagedBackupPreflightStatus } from "../../lib/stagedBackupBridgeStatus";
+import { determineStagedBackupImportTransition } from "../../lib/stagedBackupImportTransition";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -1941,6 +1942,262 @@ test("runtime staged backup preflight does not write platform storage", async (t
   });
 
   assert.equal(status.kind, "checked-only-not-imported-yet");
+  assert.equal(storage.items.size, 0);
+});
+
+test("staged backup import transition returns no-backup setup continuation", () => {
+  const transition = determineStagedBackupImportTransition({
+    stagedBackupPresent: false,
+    importCommitEnabled: false,
+    gateDecision: null,
+  });
+
+  assert.deepEqual(transition, {
+    status: "no-backup",
+    canContinueSetup: true,
+    canAttemptImport: false,
+    requiresClearOrDismiss: false,
+    safeTitle: "No backup selected",
+    safeMessage: "Setup can continue without backup records.",
+    warnings: [],
+  });
+});
+
+test("staged backup import transition keeps checked-only state when commit is disabled", () => {
+  const transition = determineStagedBackupImportTransition({
+    stagedBackupPresent: true,
+    importCommitEnabled: false,
+    gateDecision: {
+      allowed: true,
+      mode: "commit-staged-backup",
+      reason: "allowed",
+      warnings: [],
+      safeMessage: "SECRET_GATE_MESSAGE",
+    },
+  });
+
+  assert.equal(transition.status, "checked-only");
+  assert.equal(transition.canContinueSetup, true);
+  assert.equal(transition.canAttemptImport, false);
+  assert.equal(
+    transition.safeMessage,
+    "Backup records are staged in memory and will not be added to this vault in this setup step.",
+  );
+});
+
+test("staged backup import transition reports ready-to-import only for allowed gate with commit enabled", () => {
+  const transition = determineStagedBackupImportTransition({
+    stagedBackupPresent: true,
+    importCommitEnabled: true,
+    gateDecision: {
+      allowed: true,
+      mode: "commit-staged-backup",
+      reason: "allowed",
+      warnings: [],
+      safeMessage: "This staged backup passed the required import gates.",
+    },
+  });
+  const serialized = JSON.stringify({
+    safeTitle: transition.safeTitle,
+    safeMessage: transition.safeMessage,
+  }).toLowerCase();
+
+  assert.equal(transition.status, "ready-to-import");
+  assert.equal(transition.canContinueSetup, true);
+  assert.equal(transition.canAttemptImport, true);
+  assert.equal(transition.requiresClearOrDismiss, false);
+  assert.equal(serialized.includes("imported"), false);
+  assert.equal(serialized.includes("restored"), false);
+});
+
+test("staged backup import transition blocks import by default when gate blocks", () => {
+  const transition = determineStagedBackupImportTransition({
+    stagedBackupPresent: true,
+    importCommitEnabled: true,
+    gateDecision: {
+      allowed: false,
+      mode: "setup-only",
+      reason: "incompatible",
+      warnings: [],
+      safeMessage: "This backup does not match the current local vault setup.",
+    },
+  });
+
+  assert.equal(transition.status, "blocked-import");
+  assert.equal(transition.canAttemptImport, false);
+  assert.equal(transition.canContinueSetup, false);
+  assert.equal(transition.requiresClearOrDismiss, true);
+});
+
+test("staged backup import transition allows setup-only after blocked import dismissal", () => {
+  const transition = determineStagedBackupImportTransition({
+    stagedBackupPresent: true,
+    importCommitEnabled: true,
+    userDismissedImport: true,
+    gateDecision: {
+      allowed: false,
+      mode: "setup-only",
+      reason: "unknown-compatibility",
+      warnings: [],
+      safeMessage: "PiPass cannot prove this backup is compatible yet.",
+    },
+  });
+
+  assert.equal(transition.status, "setup-only-dismissed");
+  assert.equal(transition.canContinueSetup, true);
+  assert.equal(transition.canAttemptImport, false);
+  assert.equal(transition.requiresClearOrDismiss, false);
+  assert.equal(
+    transition.safeMessage,
+    "Backup import was dismissed. Setup can continue without adding backup records.",
+  );
+});
+
+test("staged backup import transition reports import-committed after durable success", () => {
+  const transition = determineStagedBackupImportTransition({
+    stagedBackupPresent: true,
+    importCommitEnabled: true,
+    importCommitted: true,
+    gateDecision: {
+      allowed: true,
+      mode: "commit-staged-backup",
+      reason: "allowed",
+      warnings: [],
+      safeMessage: "This staged backup passed the required import gates.",
+    },
+  });
+
+  assert.equal(transition.status, "import-committed");
+  assert.equal(transition.canContinueSetup, true);
+  assert.equal(transition.canAttemptImport, false);
+  assert.equal(transition.safeTitle, "Backup imported");
+  assert.equal(
+    transition.safeMessage,
+    "Backup records were added only after setup/import commit completed.",
+  );
+});
+
+test("staged backup import transition limits committed wording to committed state", () => {
+  const states = [
+    determineStagedBackupImportTransition({
+      stagedBackupPresent: false,
+      importCommitEnabled: false,
+      gateDecision: null,
+    }),
+    determineStagedBackupImportTransition({
+      stagedBackupPresent: true,
+      importCommitEnabled: false,
+      gateDecision: null,
+    }),
+    determineStagedBackupImportTransition({
+      stagedBackupPresent: true,
+      importCommitEnabled: true,
+      gateDecision: {
+        allowed: true,
+        mode: "commit-staged-backup",
+        reason: "allowed",
+        warnings: [],
+        safeMessage: "This staged backup passed the required import gates.",
+      },
+    }),
+    determineStagedBackupImportTransition({
+      stagedBackupPresent: true,
+      importCommitEnabled: true,
+      gateDecision: {
+        allowed: false,
+        mode: "setup-only",
+        reason: "decryptability-failed",
+        warnings: [],
+        safeMessage: "PiPass could not verify every staged backup record.",
+      },
+    }),
+    determineStagedBackupImportTransition({
+      stagedBackupPresent: true,
+      importCommitEnabled: true,
+      userDismissedImport: true,
+      gateDecision: {
+        allowed: false,
+        mode: "setup-only",
+        reason: "warnings-blocked",
+        warnings: [],
+        safeMessage: "This backup has decoy trigger metadata that needs review before import.",
+      },
+    }),
+  ];
+
+  for (const state of states) {
+    const serialized = JSON.stringify({
+      safeTitle: state.safeTitle,
+      safeMessage: state.safeMessage,
+    }).toLowerCase();
+    assert.equal(serialized.includes("imported"), false);
+    assert.equal(serialized.includes("restored"), false);
+    assert.equal(serialized.includes("committed"), false);
+  }
+});
+
+test("staged backup import transition preserves only safe warning text", () => {
+  const transition = determineStagedBackupImportTransition({
+    stagedBackupPresent: true,
+    importCommitEnabled: true,
+    gateDecision: {
+      allowed: false,
+      mode: "setup-only",
+      reason: "warnings-blocked",
+      warnings: [
+        "Backup has a non-blocking warning that should be reviewed before import.",
+        "CIPHERTEXT_SECRET SALT_SECRET HASH_SECRET deviceUUID SECRET_RECORD_ID",
+      ],
+      safeMessage: "SECRET_GATE_MESSAGE",
+    },
+  });
+
+  assert.deepEqual(transition.warnings, [
+    "Backup has a non-blocking warning that should be reviewed before import.",
+    "Backup has a warning that should be reviewed before records can be added.",
+  ]);
+});
+
+test("staged backup import transition output contains no raw backup secrets", () => {
+  const secret = "PLAINTEXT_SECRET CIPHERTEXT_SECRET HASH_SECRET SALT_SECRET deviceUUID SECRET_RECORD_ID";
+  const transition = determineStagedBackupImportTransition({
+    stagedBackupPresent: true,
+    importCommitEnabled: true,
+    gateDecision: {
+      allowed: false,
+      mode: "setup-only",
+      reason: "decryptability-failed",
+      warnings: [secret],
+      safeMessage: secret,
+    },
+  });
+  const serialized = JSON.stringify(transition);
+
+  assert.equal(serialized.includes("PLAINTEXT_SECRET"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+  assert.equal(serialized.includes("HASH_SECRET"), false);
+  assert.equal(serialized.includes("SALT_SECRET"), false);
+  assert.equal(serialized.includes("deviceUUID"), false);
+  assert.equal(serialized.includes("SECRET_RECORD_ID"), false);
+});
+
+test("staged backup import transition helper does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const transition = determineStagedBackupImportTransition({
+    stagedBackupPresent: true,
+    importCommitEnabled: true,
+    gateDecision: {
+      allowed: true,
+      mode: "commit-staged-backup",
+      reason: "allowed",
+      warnings: [],
+      safeMessage: "This staged backup passed the required import gates.",
+    },
+  });
+
+  assert.equal(transition.status, "ready-to-import");
   assert.equal(storage.items.size, 0);
 });
 
