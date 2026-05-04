@@ -1835,17 +1835,18 @@ test("runtime staged backup preflight returns setup-only status when no backup i
 
   assert.deepEqual(status, {
     kind: "no-backup",
+    transitionStatus: "no-backup",
     stagedBackupPresent: false,
     setupAllowed: true,
     recordsWillBeCommitted: false,
     gateAllowed: true,
     gateReason: "no-backup",
     warnings: [],
-    safeMessage: "No backup is selected. Setup will continue without backup records.",
+    safeMessage: "Setup can continue without backup records.",
   });
 });
 
-test("runtime staged backup preflight reports checked-only when commit gates would pass", () => {
+test("runtime staged backup preflight uses checked-only transition when commit is disabled", () => {
   const status = computeStagedBackupPreflightStatus({
     stagedBackup: stagedBackupWithCompatibility(),
     gateInput: {
@@ -1855,17 +1856,22 @@ test("runtime staged backup preflight reports checked-only when commit gates wou
   });
 
   assert.equal(status.kind, "checked-only-not-imported-yet");
+  assert.equal(status.transitionStatus, "checked-only");
   assert.equal(status.setupAllowed, true);
   assert.equal(status.recordsWillBeCommitted, false);
   assert.equal(status.gateAllowed, true);
   assert.equal(status.gateReason, "allowed");
   assert.equal(
     status.safeMessage,
-    "Backup checked only. Backup records are staged in memory and will not be added to this vault in this setup step.",
+    "Backup records are staged in memory and will not be added to this vault in this setup step.",
   );
+  assert.equal(status.safeMessage.includes("will not be added"), true);
+  assert.equal(status.safeMessage.includes("this setup step"), true);
+  assert.equal(status.safeMessage.toLowerCase().includes("imported"), false);
+  assert.equal(status.safeMessage.toLowerCase().includes("restored"), false);
 });
 
-test("runtime staged backup preflight keeps gate-blocked backups setup-only by default", () => {
+test("runtime staged backup preflight stays checked-only for blocked gates while commit is disabled", () => {
   const status = computeStagedBackupPreflightStatus({
     stagedBackup: stagedBackupWithCompatibility(),
     gateInput: {
@@ -1873,14 +1879,15 @@ test("runtime staged backup preflight keeps gate-blocked backups setup-only by d
     },
   });
 
-  assert.equal(status.kind, "gate-blocked-setup-only");
+  assert.equal(status.kind, "checked-only-not-imported-yet");
+  assert.equal(status.transitionStatus, "checked-only");
   assert.equal(status.setupAllowed, true);
   assert.equal(status.recordsWillBeCommitted, false);
   assert.equal(status.gateAllowed, false);
   assert.equal(status.gateReason, "incompatible");
   assert.equal(
     status.safeMessage,
-    "Backup checked only. This backup is not ready to add to the vault, and setup will continue without backup records.",
+    "Backup records are staged in memory and will not be added to this vault in this setup step.",
   );
 });
 
@@ -1890,10 +1897,12 @@ test("runtime staged backup preflight can require clearing blocked backup before
     gateInput: {
       compatibility: incompatibleBackupGateResult(),
     },
+    importCommitEnabled: true,
     blockSetupWhenGateBlocked: true,
   });
 
   assert.equal(status.kind, "gate-blocked-clear-required");
+  assert.equal(status.transitionStatus, "blocked-import");
   assert.equal(status.setupAllowed, false);
   assert.equal(status.recordsWillBeCommitted, false);
   assert.equal(status.gateReason, "incompatible");
@@ -1942,6 +1951,7 @@ test("runtime staged backup preflight does not write platform storage", async (t
   });
 
   assert.equal(status.kind, "checked-only-not-imported-yet");
+  assert.equal(status.transitionStatus, "checked-only");
   assert.equal(storage.items.size, 0);
 });
 

@@ -8,6 +8,8 @@ This is design-only. It does not change runtime code, tests, UI, storage writes,
 
 Prompt 074 implementation note: `determineStagedBackupImportTransition()` now maps supplied staged-backup state and gate decisions into safe transition statuses and copy tokens without parsing, decrypting, writing storage, or wiring runtime record commit.
 
+Prompt 075 implementation note: the runtime staged-backup bridge/preflight status now derives its checked-only copy from `determineStagedBackupImportTransition()` with runtime import commit disabled. Backup records remain staged in memory only and are still not added to the setup commit plan.
+
 ## 2. Current Checked-Only Bridge State
 
 Current temporary behavior:

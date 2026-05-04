@@ -5,6 +5,10 @@ import {
   type StagedBackupCommitGateInput,
   type StagedBackupCommitGateReason,
 } from "./stagedBackupCommitGate";
+import {
+  determineStagedBackupImportTransition,
+  type StagedBackupImportTransitionStatus,
+} from "./stagedBackupImportTransition";
 
 export type RuntimeStagedBackupBridgeStatusKind =
   | "no-backup"
@@ -19,10 +23,13 @@ export interface RuntimeStagedBackupBridgeStatusInput {
     input: StagedBackupCommitGateInput,
   ) => StagedBackupCommitGateDecision;
   blockSetupWhenGateBlocked?: boolean;
+  importCommitEnabled?: boolean;
+  userDismissedImport?: boolean;
 }
 
 export interface RuntimeStagedBackupBridgeStatus {
   kind: RuntimeStagedBackupBridgeStatusKind;
+  transitionStatus: StagedBackupImportTransitionStatus;
   stagedBackupPresent: boolean;
   setupAllowed: boolean;
   recordsWillBeCommitted: false;
@@ -32,32 +39,31 @@ export interface RuntimeStagedBackupBridgeStatus {
   safeMessage: string;
 }
 
-const CHECKED_ONLY_MESSAGE =
-  "Backup checked only. Backup records are staged in memory and will not be added to this vault in this setup step.";
-
-const GATE_BLOCKED_SETUP_ONLY_MESSAGE =
-  "Backup checked only. This backup is not ready to add to the vault, and setup will continue without backup records.";
-
-const GATE_BLOCKED_CLEAR_REQUIRED_MESSAGE =
-  "Backup checked only. Clear the selected backup before continuing setup.";
-
 export function computeStagedBackupPreflightStatus(
   input: RuntimeStagedBackupBridgeStatusInput = {},
 ): RuntimeStagedBackupBridgeStatus {
   const stagedBackup = input.stagedBackup ?? null;
   const decideGate = input.decideGate ?? decideStagedBackupCommitGate;
+  const importCommitEnabled = input.importCommitEnabled ?? false;
 
   if (!stagedBackup) {
     const gateDecision = decideGate({ stagedBackupPresent: false });
+    const transition = determineStagedBackupImportTransition({
+      stagedBackupPresent: false,
+      importCommitEnabled,
+      gateDecision,
+    });
+
     return {
       kind: "no-backup",
+      transitionStatus: transition.status,
       stagedBackupPresent: false,
-      setupAllowed: true,
+      setupAllowed: transition.canContinueSetup,
       recordsWillBeCommitted: false,
       gateAllowed: gateDecision.allowed,
       gateReason: gateDecision.reason,
-      warnings: sanitizeWarnings(gateDecision.warnings),
-      safeMessage: "No backup is selected. Setup will continue without backup records.",
+      warnings: transition.warnings,
+      safeMessage: transition.safeMessage,
     };
   }
 
@@ -66,64 +72,63 @@ export function computeStagedBackupPreflightStatus(
     format: stagedBackup.format,
     ...input.gateInput,
   });
-  const warnings = sanitizeWarnings([
-    ...stagedBackup.warnings,
-    ...gateDecision.warnings,
-  ]);
-
-  if (gateDecision.allowed) {
-    return {
-      kind: "checked-only-not-imported-yet",
-      stagedBackupPresent: true,
-      setupAllowed: true,
-      recordsWillBeCommitted: false,
-      gateAllowed: true,
-      gateReason: gateDecision.reason,
-      warnings,
-      safeMessage: CHECKED_ONLY_MESSAGE,
-    };
-  }
-
-  const setupAllowed = !input.blockSetupWhenGateBlocked;
-  return {
-    kind: setupAllowed ? "gate-blocked-setup-only" : "gate-blocked-clear-required",
+  const transitionGateDecision = {
+    ...gateDecision,
+    warnings: [...stagedBackup.warnings, ...gateDecision.warnings],
+  };
+  const transition = determineStagedBackupImportTransition({
     stagedBackupPresent: true,
-    setupAllowed,
+    importCommitEnabled,
+    gateDecision: transitionGateDecision,
+    userDismissedImport: input.userDismissedImport,
+  });
+
+  return {
+    kind: bridgeKindForTransition(transition.status, input.blockSetupWhenGateBlocked),
+    transitionStatus: transition.status,
+    stagedBackupPresent: true,
+    setupAllowed: setupAllowedForTransition(
+      transition.status,
+      transition.canContinueSetup,
+      input.blockSetupWhenGateBlocked,
+    ),
     recordsWillBeCommitted: false,
-    gateAllowed: false,
+    gateAllowed: gateDecision.allowed,
     gateReason: gateDecision.reason,
-    warnings,
-    safeMessage: setupAllowed
-      ? GATE_BLOCKED_SETUP_ONLY_MESSAGE
-      : GATE_BLOCKED_CLEAR_REQUIRED_MESSAGE,
+    warnings: transition.warnings,
+    safeMessage: transition.safeMessage,
   };
 }
 
-function sanitizeWarnings(warnings: string[]): string[] {
-  const safeWarnings = new Set<string>();
-  for (const warning of warnings) {
-    if (typeof warning !== "string" || warning.length === 0) continue;
-    if (isKnownSafeParserWarning(warning) || isKnownSafeGateWarning(warning)) {
-      safeWarnings.add(warning);
-      continue;
-    }
-    safeWarnings.add("Backup has a warning that should be reviewed before records can be added.");
+function bridgeKindForTransition(
+  transitionStatus: StagedBackupImportTransitionStatus,
+  blockSetupWhenGateBlocked: boolean | undefined,
+): RuntimeStagedBackupBridgeStatusKind {
+  if (transitionStatus === "no-backup") {
+    return "no-backup";
   }
-  return [...safeWarnings];
+
+  if (transitionStatus === "blocked-import") {
+    return blockSetupWhenGateBlocked
+      ? "gate-blocked-clear-required"
+      : "gate-blocked-setup-only";
+  }
+
+  if (transitionStatus === "setup-only-dismissed") {
+    return "gate-blocked-setup-only";
+  }
+
+  return "checked-only-not-imported-yet";
 }
 
-function isKnownSafeParserWarning(warning: string): boolean {
-  return (
-    warning ===
-    "encrypted-local-records backups are staged only and require a future compatibility or rekey flow before commit"
-  );
-}
+function setupAllowedForTransition(
+  transitionStatus: StagedBackupImportTransitionStatus,
+  canContinueSetup: boolean,
+  blockSetupWhenGateBlocked: boolean | undefined,
+): boolean {
+  if (transitionStatus === "blocked-import") {
+    return blockSetupWhenGateBlocked ? false : true;
+  }
 
-function isKnownSafeGateWarning(warning: string): boolean {
-  return (
-    warning ===
-      "Backup contains decoy trigger metadata that may need review after import." ||
-    warning ===
-      "Backup has a non-blocking warning that should be reviewed before import."
-  );
+  return canContinueSetup;
 }
