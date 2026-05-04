@@ -6,6 +6,8 @@ This checklist defines the conditions that must be true before PiPass enables th
 
 This is documentation-only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, or package scripts.
 
+Prompt 077 implementation note: `determineStagedBackupImportCommitEligibility()` now provides a pure safe-state decision for whether runtime `importCommitEnabled` may become true. It does not parse backups, decrypt records, write storage, or wire staged records into runtime commit.
+
 ## 2. Current Pre-Commit State
 
 Current behavior remains the temporary bridge:

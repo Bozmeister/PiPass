@@ -62,6 +62,7 @@ import {
 import { decideStagedBackupCommitGate } from "../../lib/stagedBackupCommitGate";
 import { computeStagedBackupPreflightStatus } from "../../lib/stagedBackupBridgeStatus";
 import { determineStagedBackupImportTransition } from "../../lib/stagedBackupImportTransition";
+import { determineStagedBackupImportCommitEligibility } from "../../lib/stagedBackupImportEligibility";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -396,6 +397,21 @@ function decryptabilityGateResult(ok: boolean = true): BackupDecryptVerification
         reason: "decrypt-failed" as const,
       },
     ],
+  };
+}
+
+function eligibleImportCommitInput(
+  overrides: Partial<Parameters<typeof determineStagedBackupImportCommitEligibility>[0]> = {},
+): Parameters<typeof determineStagedBackupImportCommitEligibility>[0] {
+  return {
+    stagedBackupPresent: true,
+    stagedBackupFormat: "encrypted-local-records",
+    compatibilityStatus: "compatible",
+    verifierStatus: "missing",
+    sentinelStatus: "not-needed",
+    decryptabilityStatus: "passed",
+    featureFlagEnabled: true,
+    ...overrides,
   };
 }
 
@@ -2208,6 +2224,265 @@ test("staged backup import transition helper does not write platform storage", a
   });
 
   assert.equal(transition.status, "ready-to-import");
+  assert.equal(storage.items.size, 0);
+});
+
+test("staged backup import eligibility returns not-selected without enabling import", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility({
+    stagedBackupPresent: false,
+    featureFlagEnabled: true,
+  });
+
+  assert.equal(eligibility.status, "not-selected");
+  assert.equal(eligibility.reason, "no-backup");
+  assert.equal(eligibility.importCommitEnabled, false);
+  assert.equal(eligibility.setupOnlyAllowed, true);
+  assert.equal(eligibility.canAttemptImport, false);
+});
+
+test("staged backup import eligibility stays not-yet-enabled when feature flag is disabled", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ featureFlagEnabled: false }),
+  );
+
+  assert.equal(eligibility.status, "not-yet-enabled");
+  assert.equal(eligibility.reason, "feature-disabled");
+  assert.equal(eligibility.importCommitEnabled, false);
+  assert.equal(eligibility.setupOnlyAllowed, true);
+  assert.equal(
+    eligibility.safeMessage,
+    "Backup records are staged in memory and will not be added to this vault in this setup step.",
+  );
+});
+
+test("staged backup import eligibility blocks unsupported format", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ stagedBackupFormat: "portable-encrypted-records" }),
+  );
+
+  assert.equal(eligibility.status, "blocked");
+  assert.equal(eligibility.reason, "unsupported-format");
+  assert.equal(eligibility.importCommitEnabled, false);
+});
+
+test("staged backup import eligibility blocks incompatible compatibility", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ compatibilityStatus: "incompatible" }),
+  );
+
+  assert.equal(eligibility.status, "blocked");
+  assert.equal(eligibility.reason, "incompatible");
+  assert.equal(eligibility.requiresClearOrDismiss, true);
+});
+
+test("staged backup import eligibility blocks unknown compatibility by default", () => {
+  const unknown = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ compatibilityStatus: "unknown" }),
+  );
+  const missing = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ compatibilityStatus: "missing" }),
+  );
+
+  assert.equal(unknown.status, "blocked");
+  assert.equal(unknown.reason, "unknown-compatibility");
+  assert.equal(missing.status, "blocked");
+  assert.equal(missing.reason, "missing-compatibility");
+});
+
+test("staged backup import eligibility allows missing verifier by default", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ verifierStatus: "missing" }),
+  );
+
+  assert.equal(eligibility.status, "eligible");
+  assert.equal(eligibility.importCommitEnabled, true);
+  assert.equal(eligibility.canAttemptImport, true);
+});
+
+test("staged backup import eligibility blocks missing verifier when required", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({
+      verifierStatus: "missing",
+      options: { requireVerifier: true },
+    }),
+  );
+
+  assert.equal(eligibility.status, "blocked");
+  assert.equal(eligibility.reason, "missing-verifier");
+});
+
+test("staged backup import eligibility blocks invalid verifier", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ verifierStatus: "invalid" }),
+  );
+
+  assert.equal(eligibility.status, "blocked");
+  assert.equal(eligibility.reason, "invalid-verifier");
+});
+
+test("staged backup import eligibility blocks valid verifier when sentinel is not run", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({
+      verifierStatus: "valid",
+      sentinelStatus: "not-run",
+    }),
+  );
+
+  assert.equal(eligibility.status, "blocked");
+  assert.equal(eligibility.reason, "sentinel-not-run");
+});
+
+test("staged backup import eligibility blocks valid verifier when sentinel fails", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({
+      verifierStatus: "valid",
+      sentinelStatus: "failed",
+    }),
+  );
+
+  assert.equal(eligibility.status, "blocked");
+  assert.equal(eligibility.reason, "sentinel-failed");
+});
+
+test("staged backup import eligibility with passed sentinel continues to decryptability gate", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({
+      verifierStatus: "valid",
+      sentinelStatus: "passed",
+      decryptabilityStatus: "not-run",
+    }),
+  );
+
+  assert.equal(eligibility.status, "blocked");
+  assert.equal(eligibility.reason, "decryptability-not-run");
+});
+
+test("staged backup import eligibility blocks decryptability not-run", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ decryptabilityStatus: "not-run" }),
+  );
+
+  assert.equal(eligibility.status, "blocked");
+  assert.equal(eligibility.reason, "decryptability-not-run");
+});
+
+test("staged backup import eligibility blocks decryptability failure", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ decryptabilityStatus: "failed" }),
+  );
+
+  assert.equal(eligibility.status, "blocked");
+  assert.equal(eligibility.reason, "decryptability-failed");
+});
+
+test("staged backup import eligibility blocks honeytoken warnings by default", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({
+      warningKinds: ["encryptedAux honeytoken SECRET_RECORD_ID"],
+    }),
+  );
+
+  assert.equal(eligibility.status, "blocked");
+  assert.equal(eligibility.reason, "warnings-blocked");
+  assert.deepEqual(eligibility.warnings, [
+    "Backup contains decoy trigger metadata that must be reviewed before import.",
+  ]);
+});
+
+test("staged backup import eligibility can allow honeytoken warnings by option", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({
+      warningKinds: ["encryptedAux honeytoken SECRET_RECORD_ID"],
+      options: { blockHoneytokenWarnings: false },
+    }),
+  );
+
+  assert.equal(eligibility.status, "eligible");
+  assert.equal(eligibility.reason, "eligible");
+  assert.equal(eligibility.importCommitEnabled, true);
+  assert.deepEqual(eligibility.warnings, [
+    "Backup contains decoy trigger metadata that must be reviewed before import.",
+  ]);
+});
+
+test("staged backup import eligibility requires explicit import intent when configured", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({
+      options: { requireExplicitImportIntent: true },
+      userConfirmedImportIntent: false,
+    }),
+  );
+
+  assert.equal(eligibility.status, "requires-clear-or-dismiss");
+  assert.equal(eligibility.reason, "import-intent-required");
+  assert.equal(eligibility.importCommitEnabled, false);
+  assert.equal(eligibility.setupOnlyAllowed, false);
+  assert.equal(eligibility.requiresClearOrDismiss, true);
+});
+
+test("staged backup import eligibility dismissal allows setup-only without import", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({
+      options: { requireExplicitImportIntent: true },
+      userConfirmedImportIntent: false,
+      userDismissedImport: true,
+    }),
+  );
+
+  assert.equal(eligibility.status, "requires-clear-or-dismiss");
+  assert.equal(eligibility.importCommitEnabled, false);
+  assert.equal(eligibility.setupOnlyAllowed, true);
+  assert.equal(eligibility.canAttemptImport, false);
+  assert.equal(
+    eligibility.safeMessage,
+    "Backup import was dismissed. Setup can continue without adding backup records.",
+  );
+});
+
+test("staged backup import eligibility returns eligible when all gates pass", () => {
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({
+      verifierStatus: "valid",
+      sentinelStatus: "passed",
+      userConfirmedImportIntent: true,
+      options: { requireExplicitImportIntent: true },
+    }),
+  );
+
+  assert.equal(eligibility.status, "eligible");
+  assert.equal(eligibility.reason, "eligible");
+  assert.equal(eligibility.importCommitEnabled, true);
+  assert.equal(eligibility.setupOnlyAllowed, true);
+  assert.equal(eligibility.canAttemptImport, true);
+});
+
+test("staged backup import eligibility output contains no raw backup secrets", () => {
+  const secret = "PLAINTEXT_SECRET CIPHERTEXT_SECRET HASH_SECRET SALT_SECRET deviceUUID SECRET_RECORD_ID";
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({
+      stagedBackupFormat: secret,
+      warningKinds: [secret],
+    }),
+  );
+  const serialized = JSON.stringify(eligibility);
+
+  assert.equal(serialized.includes("PLAINTEXT_SECRET"), false);
+  assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+  assert.equal(serialized.includes("HASH_SECRET"), false);
+  assert.equal(serialized.includes("SALT_SECRET"), false);
+  assert.equal(serialized.includes("deviceUUID"), false);
+  assert.equal(serialized.includes("SECRET_RECORD_ID"), false);
+});
+
+test("staged backup import eligibility helper does not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const eligibility = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput(),
+  );
+
+  assert.equal(eligibility.status, "eligible");
   assert.equal(storage.items.size, 0);
 });
 
