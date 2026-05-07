@@ -1,22 +1,30 @@
-# Staged Backup Import Manual Verification Results
+# Staged Backup Import Manual Verification Record
 
-Use this template while running `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md`. The checklist defines the manual cases; this file records the results.
+This record starts manual verification tracking for the Prompt 079 recovery-gated staged backup import work.
 
-The initial Prompt 083 verification record is `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION_RECORD.md`.
+This record is documentation only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, package files, or TypeScript config.
 
-This results log is documentation only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, package files, or TypeScript config.
+Manual UI/device verification has not been executed in this record. Do not treat this feature as manually release-verified until those checks are run and recorded.
 
 ## 1. Status
 
-- Verification date:
-- Tester:
-- Branch or commit:
-- Platform:
-- Build type:
-- Test data source:
-- Overall result: Not started / In progress / Passed / Failed / Blocked
+- Verification date: 2026-05-07
+- Tester: TODO
+- Branch or commit: `docs/prompt-083-staged-backup-verification-record` / `19e5d53`
+- Platform: TODO
+- Build type: TODO
+- Test data source: TODO
+- Overall result: In progress
 
-## 2. Baseline Setup With No Backup
+## 2. Automated Baseline Captured
+
+- `npm run lint`: passed with 0 errors and 2 existing documented warnings.
+- `npm run typecheck`: passed.
+- `npm test`: passed 311/311.
+
+These are automated checks only. They do not replace manual UI/device verification from `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md`.
+
+## 3. Baseline Setup With No Backup
 
 Preconditions:
 
@@ -25,7 +33,7 @@ Preconditions:
 
 Steps performed:
 
-- 
+- Not yet manually executed.
 
 Expected result:
 
@@ -36,15 +44,15 @@ Expected result:
 
 Actual result:
 
-- 
+- Not yet manually verified.
 
-Status: Not run / Pass / Fail / Blocked
+Status: Not run
 
 Notes:
 
-- 
+- Manual execution required.
 
-## 3. Backup Selection Remains Staged-Only
+## 4. Backup Selection Remains Staged-Only
 
 Preconditions:
 
@@ -54,7 +62,7 @@ Preconditions:
 
 Steps performed:
 
-- 
+- Not yet manually executed.
 
 Expected result:
 
@@ -64,15 +72,15 @@ Expected result:
 
 Actual result:
 
-- 
+- Not yet manually verified.
 
-Status: Not run / Pass / Fail / Blocked
+Status: Not run
 
 Notes:
 
-- 
+- Manual execution required.
 
-## 4. Unsupported Or Ineligible Backup
+## 5. Unsupported Or Ineligible Backup
 
 Preconditions:
 
@@ -93,7 +101,7 @@ Fixtures exercised:
 
 Steps performed:
 
-- 
+- Not yet manually executed.
 
 Expected result:
 
@@ -105,15 +113,15 @@ Expected result:
 
 Actual result:
 
-- 
+- Not yet manually verified.
 
-Status: Not run / Pass / Fail / Blocked
+Status: Not run
 
 Notes:
 
-- 
+- Manual execution required.
 
-## 5. Eligible Same-Install Backup
+## 6. Eligible Same-Install Backup
 
 Preconditions:
 
@@ -126,7 +134,7 @@ Preconditions:
 
 Steps performed:
 
-- 
+- Not yet manually executed.
 
 Expected result:
 
@@ -136,15 +144,15 @@ Expected result:
 
 Actual result:
 
-- 
+- Not yet manually verified.
 
-Status: Not run / Pass / Fail / Blocked
+Status: Not run
 
 Notes:
 
-- 
+- Manual execution required.
 
-## 6. Successful Staged Import Commit
+## 7. Successful Staged Import Commit
 
 Preconditions:
 
@@ -154,7 +162,7 @@ Preconditions:
 
 Steps performed:
 
-- 
+- Not yet manually executed.
 
 Expected result:
 
@@ -172,15 +180,15 @@ Expected result:
 
 Actual result:
 
-- 
+- Not yet manually verified.
 
-Status: Not run / Pass / Fail / Blocked
+Status: Not run
 
 Notes:
 
-- 
+- Manual execution required.
 
-## 7. Commit Failure And Rollback Assumptions
+## 8. Commit Failure And Rollback Assumptions
 
 Preconditions:
 
@@ -189,7 +197,7 @@ Preconditions:
 
 Steps performed:
 
-- 
+- Not yet manually executed.
 
 Expected result:
 
@@ -203,15 +211,15 @@ Expected result:
 
 Actual result:
 
-- 
+- Not yet manually verified.
 
-Status: Not run / Pass / Fail / Blocked
+Status: Not run
 
 Notes:
 
-- 
+- Manual execution required.
 
-## 8. App Restart And Startup Repair
+## 9. App Restart And Startup Repair
 
 Preconditions:
 
@@ -221,7 +229,7 @@ Preconditions:
 
 Steps performed:
 
-- 
+- Not yet manually executed.
 
 Expected result:
 
@@ -232,15 +240,15 @@ Expected result:
 
 Actual result:
 
-- 
+- Not yet manually verified.
 
-Status: Not run / Pass / Fail / Blocked
+Status: Not run
 
 Notes:
 
-- 
+- Manual execution required.
 
-## 9. UI Wording Checks
+## 10. UI Wording Checks
 
 Preconditions:
 
@@ -248,7 +256,7 @@ Preconditions:
 
 Steps performed:
 
-- 
+- Not yet manually executed.
 
 Expected result:
 
@@ -259,15 +267,15 @@ Expected result:
 
 Actual result:
 
-- 
+- Not yet manually verified.
 
-Status: Not run / Pass / Fail / Blocked
+Status: Not run
 
 Notes:
 
-- 
+- Manual execution required.
 
-## 10. Regression Checks
+## 11. Regression Checks
 
 Preconditions:
 
@@ -275,7 +283,7 @@ Preconditions:
 
 Steps performed:
 
-- 
+- Not yet manually executed.
 
 Expected result:
 
@@ -288,15 +296,15 @@ Expected result:
 
 Actual result:
 
-- 
+- Not yet manually verified.
 
-Status: Not run / Pass / Fail / Blocked
+Status: Not run
 
 Notes:
 
-- 
+- Manual execution required.
 
-## 11. Automated Checks
+## 12. Automated Checks
 
 Preconditions:
 
@@ -305,9 +313,9 @@ Preconditions:
 
 Steps performed:
 
-- [ ] `npm run lint`
-- [ ] `npm run typecheck`
-- [ ] `npm test`
+- [x] `npm run lint`
+- [x] `npm run typecheck`
+- [x] `npm test`
 
 Expected result:
 
@@ -317,15 +325,28 @@ Expected result:
 
 Actual result:
 
-- 
+- Automated baseline captured: lint passed with 0 errors and 2 existing documented warnings; typecheck passed; tests passed 311/311.
+- Manual UI/device checks are still pending.
 
-Status: Not run / Pass / Fail / Blocked
+Status: Pass
 
 Notes:
 
-- 
+- Automated checks passed.
+- This does not replace manual UI/device verification.
 
-## 12. Evidence To Capture
+## 13. Manual Evidence Still Needed
+
+- Safe screenshots or notes for no-backup setup.
+- Safe screenshots or notes for staged-only backup selection.
+- Safe notes for ineligible backup handling.
+- Safe notes for eligible same-install import success.
+- Safe notes for commit failure handling.
+- Restart/startup repair notes.
+
+Do not paste secrets, recovery keys, master keys, plaintext backup contents, ciphertext blobs, backup file contents, raw storage values, full metadata JSON, or real record contents into this record.
+
+## 14. Evidence To Capture
 
 Capture:
 
@@ -350,7 +371,7 @@ Do not capture or paste:
 - raw storage values
 - secret-bearing logs
 
-## 13. Known Out Of Scope
+## 15. Known Out Of Scope
 
 Do not mark these as failed because they are not implemented by Prompt 079:
 
@@ -362,10 +383,14 @@ Do not mark these as failed because they are not implemented by Prompt 079:
 - vault-root-key migration
 - server honeytoken reissue
 
-## 14. Failure Handling Notes
+## 16. Failure Handling Notes
 
 - Do not continue testing from a partially failed setup/import state unless startup repair has been verified.
 - Do not reuse failed staged backup state unless the documented flow explicitly allows it.
 - Record safe error wording only.
 - Do not preserve or paste secret-bearing logs.
 - If a failure leaves uncertainty about durable state, restart the app and verify startup repair before running the next case.
+
+## 17. Do Not Claim Release Readiness Yet
+
+Until manual UI/device checks are executed and recorded, this feature should be treated as implemented and automated-test passing, but not manually release-verified.
