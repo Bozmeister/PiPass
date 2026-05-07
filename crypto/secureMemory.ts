@@ -1,5 +1,3 @@
-import * as ExpoCrypto from "expo-crypto";
-
 export function wipeBuffer(buffer: Uint8Array): void {
   for (let i = 0; i < buffer.length; i++) {
     buffer[i] = 0;
@@ -31,6 +29,7 @@ export function bytesToHex(bytes: Uint8Array): string {
 }
 
 export function generateRandomBytes(length: number): Uint8Array {
+  const ExpoCrypto = require("expo-crypto") as typeof import("expo-crypto");
   return ExpoCrypto.getRandomBytes(length);
 }
 
