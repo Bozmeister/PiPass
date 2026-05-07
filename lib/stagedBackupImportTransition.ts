@@ -31,7 +31,7 @@ const SAFE_WARNING_HONEYTOKEN =
 const SAFE_WARNING_GENERIC =
   "Backup has a non-blocking warning that should be reviewed before import.";
 const SAFE_WARNING_REVIEW =
-  "Backup has a warning that should be reviewed before records can be added.";
+  "Backup has a warning that should be reviewed before record commit.";
 
 export function determineStagedBackupImportTransition(
   input: StagedBackupImportTransitionInput,
@@ -69,7 +69,7 @@ export function determineStagedBackupImportTransition(
       false,
       false,
       "Backup checked only",
-      "Backup records are staged in memory and will not be added to this vault in this setup step.",
+      "Backup records are staged in memory only. No backup records have been written.",
       warnings,
     );
   }
@@ -80,8 +80,8 @@ export function determineStagedBackupImportTransition(
       true,
       true,
       false,
-      "Backup ready to import",
-      "Backup records are ready to be added after recovery confirmation. No records have been added yet.",
+      "Backup ready for commit",
+      "Backup records are ready for recovery-confirmed commit. No backup records have been written.",
       warnings,
     );
   }
@@ -93,7 +93,7 @@ export function determineStagedBackupImportTransition(
       false,
       false,
       "Setup without backup",
-      "Backup import was dismissed. Setup can continue without adding backup records.",
+      "Backup import was dismissed. Setup can continue without backup records.",
       warnings,
     );
   }
@@ -103,8 +103,8 @@ export function determineStagedBackupImportTransition(
     false,
     false,
     true,
-    "Backup cannot be added",
-    "This backup is not ready to add to the vault. Clear or dismiss it to continue setup without backup records.",
+    "Backup cannot be committed",
+    "This backup is not ready for vault commit. Clear or dismiss it to continue setup without backup records.",
     warnings,
   );
 }
