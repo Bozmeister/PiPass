@@ -2,6 +2,8 @@
 
 This record starts manual verification tracking for the Prompt 079 recovery-gated staged backup import work.
 
+Use `docs/STAGED_BACKUP_IMPORT_LOCAL_TEST_PLAN.md#4-first-manual-run-order` for the recommended first manual run order.
+
 This record is documentation only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, package files, or TypeScript config.
 
 Manual UI/device verification has not been executed in this record. Do not treat this feature as manually release-verified until those checks are run and recorded.
