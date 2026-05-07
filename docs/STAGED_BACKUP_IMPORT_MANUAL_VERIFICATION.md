@@ -6,6 +6,8 @@ Use this checklist before merging or release-testing the Prompt 079 recovery-gat
 
 Record manual run results in `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION_RESULTS.md` after using this checklist. The initial Prompt 083 verification record is `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION_RECORD.md`.
 
+Use `docs/STAGED_BACKUP_IMPORT_FIXTURE_MATRIX.md` for safe fixture labels, fixture purposes, and expected outcomes.
+
 Prompt 079 supports only the first same-install case:
 
 - schema: `pipass-backup`
