@@ -140,6 +140,16 @@ export function getBackupVerifierFromMetadata(metadata: unknown): BackupVerifier
   return parseBackupVerifier(metadata.verifier);
 }
 
+export function extractBackupVerifierFromStagedBackup(
+  stagedBackup: { metadata: Record<string, unknown> } | null | undefined,
+): BackupVerifierParseResult {
+  if (!stagedBackup) {
+    return verifierError("missing-verifier", "Staged backup is not available.", "stagedBackup");
+  }
+
+  return getBackupVerifierFromMetadata(stagedBackup.metadata);
+}
+
 export async function verifyBackupSentinel(
   input: VerifyBackupSentinelInput,
 ): Promise<BackupSentinelVerificationResult> {

@@ -300,6 +300,32 @@ export function classifyBackupCompatibility(
   };
 }
 
+export interface BuildBackupCompatibilityContextInput {
+  setupMetadata: {
+    masterSalt: string;
+    kdfMetadata: KdfMetadata;
+  };
+  deviceUUID?: string | null;
+  deviceUUIDPresent?: boolean;
+}
+
+export function buildBackupCompatibilityContextFromSetup(
+  input: BuildBackupCompatibilityContextInput,
+): BackupCompatibilityContext {
+  const deviceUUIDPresent = input.deviceUUIDPresent ?? (!!input.deviceUUID && input.deviceUUID.length > 0);
+  const deviceBinding: "deviceUUID:v1" | string = deviceUUIDPresent
+    ? "deviceUUID:v1"
+    : "unknown";
+
+  return {
+    format: PIPASS_BACKUP_FORMAT_ENCRYPTED_LOCAL_RECORDS,
+    kdfMetadata: input.setupMetadata.kdfMetadata,
+    masterSaltPresent: input.setupMetadata.masterSalt.length > 0,
+    deviceBinding,
+    deviceUUIDPresent,
+  };
+}
+
 function parseInput(input: unknown): { ok: true; value: unknown } | { ok: false; error: BackupParseError } {
   if (typeof input !== "string") {
     return { ok: true, value: input };

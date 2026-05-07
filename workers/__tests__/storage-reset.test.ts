@@ -17,6 +17,7 @@ import { logoutCurrentSession } from "../../lib/logout";
 import {
   classifyBackupCompatibility,
   parsePipassBackup,
+  buildBackupCompatibilityContextFromSetup,
   type BackupCompatibilityContext,
   type BackupStageResult,
 } from "../../lib/backupSchema";
@@ -29,6 +30,7 @@ import {
   isBackupVerifier,
   parseBackupVerifier,
   verifyBackupSentinel,
+  extractBackupVerifierFromStagedBackup,
 } from "../../lib/backupVerifier";
 import {
   executeSetupImportCommitPlan,
@@ -63,7 +65,10 @@ import { decideStagedBackupCommitGate } from "../../lib/stagedBackupCommitGate";
 import { computeStagedBackupPreflightStatus } from "../../lib/stagedBackupBridgeStatus";
 import { determineStagedBackupImportTransition } from "../../lib/stagedBackupImportTransition";
 import { determineStagedBackupImportCommitEligibility } from "../../lib/stagedBackupImportEligibility";
-import { prepareSetupImportCommitFromRuntimeState } from "../../lib/runtimeSetupImportCommit";
+import {
+  prepareSetupImportCommitFromRuntimeState,
+  prepareStagedBackupImportEligibilityInput,
+} from "../../lib/runtimeSetupImportCommit";
 import { setPlatformStorageDriverForTests } from "../../lib/platformStorage";
 import type { KdfMetadata } from "../../crypto/kdfMetadata";
 import type { PlatformStorageDriver } from "../../lib/platformStorage";
@@ -4392,4 +4397,208 @@ test("startup repair confirmation output contains no stored values", async () =>
   assert.equal(serialized.includes(secretValue), false);
   assert.equal(serialized.includes("STORED_SECRET_VALUE"), false);
   assert.equal(serialized.includes("CIPHERTEXT_SECRET"), false);
+});
+
+// ============================================================================
+// PROMPT 080: Staged backup compatibility context and verifier prep helpers
+// ============================================================================
+
+test("build backup compatibility context from setup state with device UUID", () => {
+  const context = buildBackupCompatibilityContextFromSetup({
+    setupMetadata: {
+      masterSalt: "master-salt-placeholder",
+      kdfMetadata: testArgon2idMetadata(),
+    },
+    deviceUUID: "device-uuid-placeholder",
+    deviceUUIDPresent: true,
+  });
+
+  assert.equal(context.format, "encrypted-local-records");
+  assert.equal(context.masterSaltPresent, true);
+  assert.equal(context.deviceBinding, "deviceUUID:v1");
+  assert.equal(context.deviceUUIDPresent, true);
+  assert.deepEqual(context.kdfMetadata, testArgon2idMetadata());
+});
+
+test("build backup compatibility context from setup state without device UUID", () => {
+  const context = buildBackupCompatibilityContextFromSetup({
+    setupMetadata: {
+      masterSalt: "master-salt-placeholder",
+      kdfMetadata: testArgon2idMetadata(),
+    },
+    deviceUUIDPresent: false,
+  });
+
+  assert.equal(context.format, "encrypted-local-records");
+  assert.equal(context.masterSaltPresent, true);
+  assert.equal(context.deviceBinding, "unknown");
+  assert.equal(context.deviceUUIDPresent, false);
+});
+
+test("build backup compatibility context detects empty master salt", () => {
+  const context = buildBackupCompatibilityContextFromSetup({
+    setupMetadata: {
+      masterSalt: "",
+      kdfMetadata: testArgon2idMetadata(),
+    },
+    deviceUUIDPresent: true,
+  });
+
+  assert.equal(context.masterSaltPresent, false);
+});
+
+test("extract backup verifier from staged backup metadata", () => {
+  const verifier = validBackupVerifierFixture();
+  const stagedBackup = stagedBackupWithCompatibility(null);
+  stagedBackup.metadata.verifier = verifier;
+
+  const result = extractBackupVerifierFromStagedBackup(stagedBackup);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error("expected backup verifier extraction success");
+  }
+  assert.equal(result.verifier.derivation, "entry-v1");
+  assert.equal(result.verifier.recordId, verifier.recordId);
+});
+
+test("extract backup verifier returns error when verifier missing", () => {
+  const stagedBackup = stagedBackupWithCompatibility(null);
+
+  const result = extractBackupVerifierFromStagedBackup(stagedBackup);
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup verifier extraction failure");
+  }
+  assert.equal(result.error.code, "missing-verifier");
+});
+
+test("extract backup verifier returns error when staged backup is null", () => {
+  const result = extractBackupVerifierFromStagedBackup(null);
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup verifier extraction failure");
+  }
+  assert.equal(result.error.code, "missing-verifier");
+});
+
+test("prepare staged backup import eligibility with feature flag enabled", () => {
+  const input = prepareStagedBackupImportEligibilityInput({
+    stagedBackup: stagedBackupWithCompatibility(),
+    compatibilityStatus: "compatible",
+    verifierStatus: "missing",
+    sentinelStatus: "not-needed",
+    decryptabilityStatus: "passed",
+    enableFeatureFlagForSameInstall: true,
+  });
+
+  assert.equal(input.stagedBackupPresent, true);
+  assert.equal(input.stagedBackupFormat, "encrypted-local-records");
+  assert.equal(input.compatibilityStatus, "compatible");
+  assert.equal(input.featureFlagEnabled, true);
+  assert.equal(input.options?.blockHoneytokenWarnings, true);
+});
+
+test("prepare staged backup import eligibility with feature flag disabled", () => {
+  const input = prepareStagedBackupImportEligibilityInput({
+    stagedBackup: stagedBackupWithCompatibility(),
+    compatibilityStatus: "compatible",
+    enableFeatureFlagForSameInstall: false,
+  });
+
+  assert.equal(input.featureFlagEnabled, false);
+});
+
+test("staged backup eligibility transitions from feature-disabled to eligible when flag enabled and gates pass", () => {
+  const disabledResult = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ featureFlagEnabled: false }),
+  );
+  const enabledResult = determineStagedBackupImportCommitEligibility(
+    eligibleImportCommitInput({ featureFlagEnabled: true }),
+  );
+
+  assert.equal(disabledResult.status, "not-yet-enabled");
+  assert.equal(disabledResult.importCommitEnabled, false);
+  assert.equal(enabledResult.status, "eligible");
+  assert.equal(enabledResult.importCommitEnabled, true);
+});
+
+test("backup compatibility with missing device UUID fails when required", () => {
+  const backup = stagedBackupWithCompatibility(
+    compatibilityMetadata({ requiresSameDeviceUUID: true }),
+  );
+  const result = classifyBackupCompatibility(
+    backup,
+    localCompatibilityContext({ deviceUUIDPresent: false }),
+  );
+
+  assert.equal(result.status, "incompatible");
+  assert.equal(result.reason, "required-device-uuid-missing");
+});
+
+test("staged backup commit plan does not write initialized marker in prep phase only", () => {
+  const result = buildSetupImportCommitPlan({
+    setupMetadata: commitSetupMetadataFixture(),
+  });
+
+  assert.equal(result.ok, true);
+  const operations = result.plan.operations.filter(
+    (op) => op.category === "initialized-marker",
+  );
+  assert.equal(operations.length, 1);
+  assert.deepEqual(operations[0].key, SETUP_IMPORT_STORAGE_KEYS.vaultInitialized);
+});
+
+test("staged backup helper functions do not write platform storage", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+
+  const context = buildBackupCompatibilityContextFromSetup({
+    setupMetadata: {
+      masterSalt: "prep-master-salt-placeholder",
+      kdfMetadata: testArgon2idMetadata(),
+    },
+    deviceUUIDPresent: true,
+  });
+
+  const stagedBackup = stagedBackupWithCompatibility(null);
+  stagedBackup.metadata.verifier = validBackupVerifierFixture();
+  const verifier = extractBackupVerifierFromStagedBackup(stagedBackup);
+
+  const eligibilityInput = prepareStagedBackupImportEligibilityInput({
+    stagedBackup,
+    compatibilityStatus: "compatible",
+    verifierStatus: verifier.ok ? "valid" : "missing",
+    enableFeatureFlagForSameInstall: true,
+  });
+
+  assert.equal(storage.items.size, 0);
+  assert.deepEqual(context.format, "encrypted-local-records");
+  assert.equal(verifier.ok, true);
+  assert.equal(eligibilityInput.featureFlagEnabled, true);
+});
+
+test("staged backup prepare does not publish active shares in this phase", async () => {
+  const calls: string[] = [];
+  const result = await prepareSetupImportCommitFromRuntimeState({
+    setupMetadata: commitSetupMetadataFixture(),
+    stagedBackup: stagedBackupWithCompatibility(),
+    eligibilityInput: eligibleImportCommitInput(),
+    dependencies: commitOrchestrationDependencies(calls, {
+      buildSharedVaultBlob: () => {
+        calls.push("shared-vault");
+        return {
+          encryptedBlob: "shared-vault-blob-placeholder",
+          version: 1,
+          updatedAt: 1234567890,
+        };
+      },
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.activeSharesPublished, false);
+  assert.deepEqual(calls.includes("shared-vault"), true);
 });

@@ -150,3 +150,40 @@ function isKnownSafeWarning(warning: string): boolean {
       "encrypted-local-records backups are staged only and require a future compatibility or rekey flow before commit"
   );
 }
+
+export interface PrepareStagedBackupEligibilityInput {
+  stagedBackup?: BackupStageResult | null;
+  compatibilityStatus?: "compatible" | "incompatible" | "unknown" | "missing";
+  verifierStatus?: "missing" | "valid" | "invalid";
+  sentinelStatus?: "not-needed" | "passed" | "failed" | "not-run";
+  decryptabilityStatus?: "passed" | "failed" | "not-run";
+  warningKinds?: string[];
+  userConfirmedImportIntent?: boolean;
+  userDismissedImport?: boolean;
+  enableFeatureFlagForSameInstall?: boolean;
+}
+
+export function prepareStagedBackupImportEligibilityInput(
+  input: PrepareStagedBackupEligibilityInput,
+): StagedBackupImportCommitEligibilityInput {
+  const stagedBackupPresent = !!input.stagedBackup;
+  const stagedBackupFormat = stagedBackupPresent ? input.stagedBackup!.format : undefined;
+
+  return {
+    stagedBackupPresent,
+    stagedBackupFormat,
+    compatibilityStatus: input.compatibilityStatus ?? "missing",
+    verifierStatus: input.verifierStatus ?? "missing",
+    sentinelStatus: input.sentinelStatus ?? "not-needed",
+    decryptabilityStatus: input.decryptabilityStatus ?? "not-run",
+    warningKinds: input.warningKinds,
+    userConfirmedImportIntent: input.userConfirmedImportIntent,
+    userDismissedImport: input.userDismissedImport,
+    featureFlagEnabled: input.enableFeatureFlagForSameInstall ?? false,
+    options: {
+      blockHoneytokenWarnings: true,
+      requireVerifier: false,
+      requireExplicitImportIntent: false,
+    },
+  };
+}
