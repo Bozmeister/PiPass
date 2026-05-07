@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-This checklist defines the conditions that must be true before PiPass enables the first real staged backup record commit during first-time setup.
+This checklist defines the conditions and current status for PiPass staged backup record commit during first-time setup.
 
 This is documentation-only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, or package scripts.
 
@@ -12,7 +12,23 @@ Prompt 078 implementation note: `prepareSetupImportCommitFromRuntimeState()` now
 
 Prompt 079 implementation note: app-root recovery confirmation now uses `prepareRuntimeStagedBackupCommitContext()` plus `prepareSetupImportCommitFromRuntimeState()` to commit the first supported staged backup case: schema `pipass-backup`, version `1`, format `encrypted-local-records`, same-install/same-key-path only. Ineligible staged backups fail closed before the staged commit path; no backup records, notes, indexes, or shared vault blob are written unless all runtime gates pass. Active shares are still published only after the full setup/import commit succeeds.
 
-## 2. Current Runtime State
+## 2. Current Status
+
+- Prompt 079 runtime first-commit wiring is complete for the first supported case only.
+- Prompt 080 manual verification checklist is complete in `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md`.
+- Prompt 081 manual verification results template is complete in `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION_RESULTS.md`.
+- The implementation remains limited to same-install schema `pipass-backup`, version `1`, format `encrypted-local-records` backups.
+- Portable restore, cross-device restore, plaintext import, password rotation, profile changes, vault-root-key migration, and server honeytoken reissue remain out of scope.
+- Release readiness still requires manual verification to be completed and recorded.
+
+## 3. Related Docs
+
+- `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md` - Prompt 080 manual verification checklist.
+- `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION_RESULTS.md` - Prompt 081 fillable verification results template.
+- `docs/STAGED_BACKUP_BRIDGE_POLICY.md` - checked-only bridge policy for pre-confirmation and ineligible backups.
+- `docs/STAGED_BACKUP_IMPORT_TRANSITION_DESIGN.md` - transition and UI wording policy for checked, ready, blocked, and committed states.
+
+## 4. Current Runtime State
 
 Current behavior is mixed by eligibility:
 
@@ -27,7 +43,7 @@ Current behavior is mixed by eligibility:
 
 The checked-only bridge remains the setup-screen source-boundary behavior before recovery confirmation and for backups that do not pass the first supported import gates.
 
-## 3. First Supported Import Scope
+## 5. First Supported Import Scope
 
 The first runtime record-commit implementation may support only:
 
@@ -47,7 +63,7 @@ Out of scope:
 - vault-root-key migration
 - vault format changes
 
-## 4. Enabling Condition For `importCommitEnabled`
+## 6. Enabling Condition For `importCommitEnabled`
 
 Runtime may flip `importCommitEnabled` from `false` to `true` only inside the first-time setup path after all of these are available:
 
@@ -62,7 +78,7 @@ Runtime may flip `importCommitEnabled` from `false` to `true` only inside the fi
 
 Until these are all true, keep `importCommitEnabled: false` and keep checked-only copy.
 
-## 5. Required Gate Order
+## 7. Required Gate Order
 
 Required runtime order:
 
@@ -80,7 +96,7 @@ Required runtime order:
 
 No backup record write may happen before recovery confirmation.
 
-## 6. Verifier Policy
+## 8. Verifier Policy
 
 Missing verifier:
 
@@ -100,7 +116,7 @@ Valid verifier:
 - sentinel failure blocks import
 - sentinel success is not enough by itself; full decryptability is still required
 
-## 7. Decryptability Policy
+## 9. Decryptability Policy
 
 `verifyStagedBackupDecryptability()` must check:
 
@@ -115,7 +131,7 @@ If any entry or secure note fails:
 - UI shows safe failure copy only
 - no record ids, contents, ciphertext, plaintext, salts, hashes, or metadata JSON are shown
 
-## 8. Honeytoken Warning Policy
+## 10. Honeytoken Warning Policy
 
 Use the current conservative gate default:
 
@@ -126,7 +142,7 @@ Use the current conservative gate default:
 
 If warnings block import, the user may continue setup-only only after clearing or dismissing the staged backup.
 
-## 9. Setup-Only Continuation Policy
+## 11. Setup-Only Continuation Policy
 
 If any import gate fails:
 
@@ -138,7 +154,7 @@ If any import gate fails:
 
 Recommended first implementation: require clearing or explicit dismissal before the setup submit path continues.
 
-## 10. Durable Write Allowlist
+## 12. Durable Write Allowlist
 
 During a successful setup/import commit, durable writes may include only:
 
@@ -157,7 +173,7 @@ During a successful setup/import commit, durable writes may include only:
 
 Every write must be planned by `buildSetupImportCommitPlan()` and executed by `executeSetupImportCommitPlan()` through injected storage.
 
-## 11. Durable Write Denylist
+## 13. Durable Write Denylist
 
 The staged backup commit must not write or delete:
 
@@ -178,7 +194,7 @@ The staged backup commit must not write or delete:
 
 Do not call `saveEntry()`, `saveSecureNote()`, or `syncSharedVaultBlob()` for staged import commit.
 
-## 12. Required Write Order
+## 14. Required Write Order
 
 The commit plan must remain deterministic:
 
@@ -193,7 +209,7 @@ The commit plan must remain deterministic:
 
 `pipass_vault_initialized` being last is non-negotiable.
 
-## 13. Rollback And Failure Handling
+## 15. Rollback And Failure Handling
 
 On pre-commit gate failure:
 
@@ -219,7 +235,7 @@ On rollback failure:
 - do not claim setup/import success
 - rely on startup repair detection for partial local state
 
-## 14. Active Share Publication
+## 16. Active Share Publication
 
 Active shares may be published only after:
 
@@ -230,7 +246,7 @@ Active shares may be published only after:
 
 If commit fails, wipe pending shares according to the existing setup failure policy.
 
-## 15. UI Wording Requirements
+## 17. UI Wording Requirements
 
 Before gates pass:
 
@@ -252,9 +268,9 @@ Never say "imported", "restored", or "added" before commit success.
 
 Never show secrets, ciphertext, plaintext, salts, hashes, metadata JSON, `deviceUUID`, recovery key, master key, raw backup values, record titles, usernames, secure note labels, or real record ids.
 
-## 16. Required Automated Tests
+## 18. Required Automated Tests
 
-Before runtime record commit is allowed, tests must prove:
+Automated coverage should continue to prove:
 
 - `importCommitEnabled` remains false until every required gate passes
 - unsupported schema/version/format cannot enable import commit
@@ -282,7 +298,7 @@ Before runtime record commit is allowed, tests must prove:
 
 Existing parser/stager, compatibility, verifier, sentinel, decryptability, transition, bridge, orchestrator, commit-plan, executor, startup repair, setup, KDF, server, and storage tests must continue to pass.
 
-## 17. Required Manual Tests
+## 19. Required Manual Tests
 
 Use `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md` for the step-by-step Prompt 080 manual verification pass.
 
@@ -307,7 +323,7 @@ Manual verification must cover:
 
 Manual logs and screenshots must not include real backups, passwords, recovery keys, salts, hashes, encrypted blobs, metadata JSON, `deviceUUID`, or record contents.
 
-## 18. Implementation Prompt Sequence
+## 20. Implementation Prompt Sequence
 
 Recommended sequence:
 
@@ -315,10 +331,12 @@ Recommended sequence:
 2. Prompt 078: add app-root setup/import commit orchestration tests with staged backup present, still injected and no UI commit.
 3. Prompt 079: wire real staged backup commit behind recovery confirmation for same-install backups only.
 4. Prompt 080: add manual verification for real staged backup import commit.
+5. Prompt 081: add a fillable manual verification results template.
+6. Prompt 082: update staged backup status and documentation index.
 
 Keep these separate from portable restore, cross-device restore, server honeytoken reissue, password rotation, vault-root-key migration, KDF changes, route/schema changes, and vault format changes.
 
-## 19. Open Decisions
+## 21. Open Decisions
 
 - Is explicit import intent required as a checkbox/button, or is visible ready-for-commit copy enough?
 - Should missing verifier show a non-blocking warning even when decryptability passes?

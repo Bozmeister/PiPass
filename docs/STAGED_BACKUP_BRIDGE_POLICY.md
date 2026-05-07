@@ -28,7 +28,7 @@ Prompt 079 implementation note: the checked-only bridge is narrowed, not fully r
 
 ## 3. User Trust Risk
 
-The main risk is user misunderstanding. If PiPass says or implies that a backup was restored, a user may believe their old entries and secure notes are safely available in the new vault even though record commit is not enabled yet.
+The main risk is user misunderstanding. If PiPass says or implies that a backup was restored before durable commit succeeds, a user may believe their old entries and secure notes are safely available in the new vault when they are not.
 
 The temporary bridge must therefore avoid these claims:
 
@@ -49,15 +49,15 @@ The product should favor a slightly awkward but honest message over smoother cop
 
 ## 4. Recommended Temporary Behavior
 
-First-time setup may complete while a backup is staged, but only under this temporary condition:
+First-time setup may complete while a backup is staged, but only when the current UI/state makes the import outcome explicit:
 
 - visible copy clearly says the backup was validated or staged, not imported
-- visible copy clearly says import commit is not enabled yet
-- setup completion writes setup-only state
-- staged backup records are not written
-- staged backup memory is cleared after setup success
+- visible copy clearly says no backup records have been written before recovery confirmation
+- setup completion writes setup-only state when no eligible import is attached
+- eligible same-install backups write staged records only after recovery-confirmed commit success
+- staged backup memory is cleared after setup/import success or recovery-confirmed commit failure
 
-Setup should not be blocked solely because a backup is staged under the current copy. Blocking setup until the user clears the backup would be stricter, but it would also make the temporary bridge feel broken when the UI already says import commit is future work.
+Setup should not silently imply import will happen while continuing setup-only. If a staged backup is ineligible or warning-blocked, setup-only continuation should be allowed only when the UI/state clearly says no backup records will be imported, or after the user clears/dismisses the staged backup according to the active policy.
 
 If future copy becomes less explicit, the safer fallback is to block setup until the user clears the staged backup.
 
@@ -165,4 +165,4 @@ Until then, this policy remains the guardrail for the pre-confirmation UX and fo
 - Should the setup button show a secondary reminder when a backup is staged?
 - Should manual verification require checking app-root staged memory clearance through every auth/reset path before staged import commit is enabled?
 - Should bridge behavior vary between web and native if the file picker makes staged state feel more like a completed restore?
-- Which prompt should explicitly remove this bridge policy once record commit is wired?
+- Which prompt should explicitly remove this bridge policy once every supported backup class has explicit import/dismiss controls?
