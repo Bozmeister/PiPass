@@ -16,6 +16,7 @@ This plan is documentation only. It does not change runtime code, tests, UI, sto
 - Do not use real personal vault secrets.
 - Do not paste recovery keys, master passwords, plaintext entries, ciphertext blobs, backup file contents, raw storage values, or screenshots containing secrets into docs, issues, chat, or commit messages.
 - Make sure the tester understands nuclear reset and destroy-all-data behavior before testing.
+- Use `docs/STAGED_BACKUP_IMPORT_FIXTURE_MATRIX.md` to choose fixture labels and expected safe outcomes.
 
 ## 3. Recommended Environment
 
@@ -87,6 +88,7 @@ Do not record:
 ### 4. Ineligible backup handling
 
 Use unsupported, cross-device, incompatible, invalid, decryptability-failing, sentinel-failing, or warning-bearing fixtures where available.
+Use fixture labels from `docs/STAGED_BACKUP_IMPORT_FIXTURE_MATRIX.md`.
 
 Record:
 
@@ -106,6 +108,7 @@ Do not record:
 ### 5. Eligible same-install backup success
 
 Run this only with a fake eligible same-install backup.
+Use supported success fixture labels from `docs/STAGED_BACKUP_IMPORT_FIXTURE_MATRIX.md`.
 
 Record:
 
