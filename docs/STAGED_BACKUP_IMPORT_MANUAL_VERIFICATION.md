@@ -4,6 +4,8 @@
 
 Use this checklist before merging or release-testing the Prompt 079 recovery-gated staged backup import work.
 
+Record manual run results in `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION_RESULTS.md`.
+
 Prompt 079 supports only the first same-install case:
 
 - schema: `pipass-backup`
