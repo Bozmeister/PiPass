@@ -284,6 +284,8 @@ Existing parser/stager, compatibility, verifier, sentinel, decryptability, trans
 
 ## 17. Required Manual Tests
 
+Use `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md` for the step-by-step Prompt 080 manual verification pass.
+
 Manual verification must cover:
 
 - no-backup setup still works
