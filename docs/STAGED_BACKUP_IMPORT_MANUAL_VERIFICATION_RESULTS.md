@@ -1,6 +1,6 @@
 # Staged Backup Import Manual Verification Results
 
-Use this template while running `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md`.
+Use this template while running `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md`. The checklist defines the manual cases; this file records the results.
 
 This results log is documentation only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, package files, or TypeScript config.
 

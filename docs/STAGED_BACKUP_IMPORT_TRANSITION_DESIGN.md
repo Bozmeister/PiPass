@@ -27,7 +27,7 @@ Current behavior:
 - ineligible staged backups fail closed or require clear/dismiss according to the existing gate/eligibility policy
 - recovery confirmation commits setup-only durable state
 
-This bridge remains correct until PiPass can prove a staged backup is importable and can include those records in the atomic setup/import commit plan.
+This bridge remains correct for pre-confirmation states and backups outside the first supported same-install import path. Eligible same-install backups now use the recovery-confirmed setup/import commit plan.
 
 ## 3. User Trust Risk
 
@@ -235,7 +235,7 @@ Avoid:
 
 Remove the checked-only bridge state only when:
 
-- runtime record commit is enabled behind recovery confirmation
+- runtime record commit is available behind recovery confirmation for every supported backup class
 - gate pass/fail states are visible and safe
 - passable backup copy says "ready for recovery-confirmed commit"
 - blocked backup copy tells the user to clear/dismiss before setup-only continuation
@@ -244,11 +244,11 @@ Remove the checked-only bridge state only when:
 - source-boundary guard still prevents old immediate write helpers from returning
 - manual verification covers both setup-only and setup-plus-import paths
 
-`docs/STAGED_BACKUP_BRIDGE_POLICY.md` should be retired or rewritten at that point. `docs/STAGED_BACKUP_BRIDGE_PREFLIGHT_VERIFICATION.md` should be replaced with real staged import commit verification.
+`docs/STAGED_BACKUP_BRIDGE_POLICY.md` should be retired or rewritten at that point.
 
 ## 13. Test Plan
 
-Before runtime wiring, add tests for:
+Runtime wiring now exists for the first same-install case. Ongoing tests should continue to cover:
 
 - checked-only copy remains until gates pass
 - ready-for-commit copy appears only when gate decision allows `commit-staged-backup`
@@ -274,18 +274,17 @@ Existing parser/stager, compatibility, verifier, sentinel, decryptability, gate-
 
 ## 14. Implementation Prompt Sequence
 
-Recommended future sequence:
+Historical and current sequence:
 
-1. Add a pure transition/status helper that maps bridge status plus gate decision to checked-only, ready-to-import status, blocked-import, or setup-only-dismissed.
-2. Add tests for UI-safe copy state transitions.
-3. Wire compatibility classification into first-time setup preparation using injected dependencies, still no record commit.
-4. Wire verifier/sentinel/decryptability pre-recovery gates, still no record commit.
-5. Add explicit clear/dismiss/import intent state for staged backup.
-6. Include staged backup records in `prepareAndExecuteSetupImportCommit()` only when gates pass and import intent is confirmed.
-7. Build shared vault blob once for staged entries during commit orchestration.
-8. Update recovery confirmation success/failure copy.
-9. Add manual verification for setup-plus-import.
-10. Retire the checked-only bridge policy.
+1. Added pure transition/status helpers for checked-only, ready, blocked, dismissed, and committed states.
+2. Added tests for UI-safe copy state transitions.
+3. Wired compatibility, verifier, sentinel, decryptability, and warning gates into the staged setup/import path.
+4. Included staged backup records in the recovery-confirmed setup/import commit only when gates pass.
+5. Built the shared vault blob for staged entries during commit orchestration.
+6. Updated recovery confirmation success/failure handling to avoid publishing shares before full commit success.
+7. Added manual verification for setup-plus-import.
+8. Added a manual verification results template.
+9. Keep the checked-only bridge policy for pre-confirmation and ineligible-backup states until every supported backup class has explicit import/dismiss controls.
 
 Keep these prompts separate from cross-device import, vault-root-key migration, plaintext import, password rotation, profile changes, KDF changes, server auth changes, route changes, schema changes, and vault format changes.
 
