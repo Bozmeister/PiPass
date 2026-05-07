@@ -2,29 +2,29 @@
 
 ## 1. Purpose
 
-This document defines the temporary staged-backup bridge policy before staged backup record commit is enabled.
+This document defines the staged-backup bridge policy for the setup-screen checked-only boundary and for backups that are not eligible for the first recovery-confirmed record commit.
 
 This is design-only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, or package scripts.
 
-## 2. Current Temporary Staged-Backup State
+## 2. Current Staged-Backup State
 
-Current behavior after Prompts 059, 060, 062, 063, 064, and 065:
+Current behavior after Prompt 079:
 
 - a user can select a backup on the first-time setup screen
 - `SeedSetupScreen` validates the file with the strict backup parser
-- no imported entries, secure notes, indexes, or shared vault blob are written
+- no imported entries, secure notes, indexes, or shared vault blob are written by selection or setup-screen parsing
 - a safe in-screen summary shows counts and generic warnings only
 - staged backup data is held in React memory through app-root state
-- first-time setup can still complete
-- recovery confirmation commits setup-only state
-- staged backup records are not committed
-- UI copy says import commit will be enabled in a future step
+- first-time setup without an eligible staged backup can still complete as setup-only when the UI/state clearly says no backup records have been written
+- recovery confirmation commits setup-only state when no backup is staged or import is not eligible/enabled
+- recovery confirmation may commit staged records only for eligible same-install schema `pipass-backup`, version `1`, format `encrypted-local-records` backups
+- UI copy before commit success still avoids restored/imported claims
 
-Prompt 067 implementation note: the first-time setup backup surface now uses "Backup File Check" / "Backup checked only" language and explicitly says staged records are held in memory only and will not be added to the vault in this setup step.
+Prompt 067 implementation note: the first-time setup backup surface now uses "Backup File Check" / "Backup checked only" language and explicitly says staged records are held in memory only.
 
-Prompt 071 implementation note: app root now computes a safe runtime staged-backup preflight/bridge status from the in-memory staged backup. The status can report whether gates would currently allow records, but runtime commit remains disabled and the setup screen still says records will not be added to the vault in this setup step.
+Prompt 071 implementation note: app root computes a safe runtime staged-backup preflight/bridge status from the in-memory staged backup. The setup screen still says no backup records have been written before recovery confirmation.
 
-This bridge exists only to remove the old immediate-write import risk before the final staged import commit flow is ready.
+Prompt 079 implementation note: the checked-only bridge is narrowed, not fully retired. It remains the source-boundary guard before recovery confirmation and for non-eligible backups. Eligible same-install backups now pass through the runtime adapter, eligibility helper, commit gate, setup/import plan, and executor only after recovery confirmation.
 
 ## 3. User Trust Risk
 
@@ -42,9 +42,8 @@ The bridge may say:
 
 - the backup was checked or validated
 - counts were staged in memory
-- no records have been imported yet
-- import commit will be enabled in a future step
-- records will not be added to the vault in this setup step
+- no backup records have been written
+- eligible backups can commit only after recovery confirmation
 
 The product should favor a slightly awkward but honest message over smoother copy that over-promises. This is one of those places where boring is brave.
 
@@ -67,7 +66,7 @@ If future copy becomes less explicit, the safer fallback is to block setup until
 Temporary bridge copy must be explicit and safe:
 
 - use "validated" or "staged in memory"
-- say "not imported yet" or "import commit will be enabled in a future step"
+- say no backup records have been written
 - show entry and secure note counts only
 - show generic compatibility warnings only
 - provide a clear way to remove the staged backup
@@ -89,9 +88,9 @@ Temporary bridge copy must not include:
 
 Suggested acceptable copy:
 
-"Backup checked: X entries, Y secure notes. Backup records are staged in memory only and will not be added to this vault in this setup step."
+"Backup checked: X entries, Y secure notes. Backup records are staged in memory only. No backup records have been written."
 
-"X entries and Y secure notes were found. Backup records are staged in memory only and will not be added to this vault in this setup step."
+"X entries and Y secure notes were found. Backup records are staged in memory only. No backup records have been written."
 
 ## 6. State Clearing Rules
 
@@ -102,7 +101,8 @@ Clear staged backup memory when:
 - the user presses the clear staged backup action
 - selected backup parsing fails
 - the user leaves the first-time setup path for auth/startup repair/reset flows
-- setup succeeds
+- setup/import succeeds
+- recovery-confirmed setup/import commit fails
 - setup/reset/auth flow explicitly abandons first-time setup
 - the app process closes or reloads
 
@@ -115,7 +115,7 @@ Do not clear durable storage because of staged backup memory alone. In particula
 - initialized marker
 - existing initialized vault data
 
-Once staged backup commit is enabled, these memory-clearing rules should be revisited so that successful setup-plus-import clears staged memory only after the commit succeeds.
+Successful setup-plus-import clears staged memory only after the durable commit succeeds. Failure clears staged memory so the next setup attempt cannot silently reuse a backup whose visible setup summary was remounted.
 
 ## 7. Manual Verification Checklist
 
@@ -123,12 +123,12 @@ Use fake, non-secret backup fixtures only.
 
 - [ ] Fresh first-time setup shows the backup select action.
 - [ ] Selecting a valid fake backup shows "checked" or "staged in memory" copy, not "restored" or "imported".
-- [ ] The staged summary says records will not be added to the vault in this setup step.
+- [ ] The staged summary says no backup records have been written.
 - [ ] The staged summary shows counts only.
 - [ ] The staged summary does not expose record contents, salts, hashes, metadata JSON, `deviceUUID`, ciphertext, or record ids.
 - [ ] Creating a vault with a staged backup still reaches recovery confirmation.
-- [ ] Recovery confirmation commits setup-only state.
-- [ ] After setup success, no backup entries or secure notes are present in the new vault.
+- [ ] Recovery confirmation commits setup-only state when no backup is selected or the backup is not eligible.
+- [ ] Eligible same-install backup records appear only after recovery-confirmed durable commit success.
 - [ ] Backup selection alone does not write `pipass_vault_<entryId>`.
 - [ ] Backup selection alone does not write `pipass_vault_index`.
 - [ ] Backup selection alone does not write `pipass_notes_index`.
@@ -141,11 +141,11 @@ Use fake, non-secret backup fixtures only.
 
 For selector-based checks, use the test IDs documented in `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md`.
 
-## 8. Future Removal Criteria
+## 8. Retirement Criteria
 
-Remove this temporary bridge policy when staged backup record commit is enabled behind recovery confirmation.
+Remove this bridge policy only when the setup-screen copy and runtime status are fully replaced by explicit import/dismiss controls for every supported backup class.
 
-The replacement behavior should require:
+The replacement behavior still must require:
 
 1. selected backup is parsed and staged in memory
 2. compatibility is classified
@@ -156,7 +156,7 @@ The replacement behavior should require:
 7. setup success copy can accurately say whether records were imported
 8. staged memory clears only after success, explicit removal, or abandoned setup
 
-The future prompt that enables staged backup record commit should update or retire this document. Until then, this policy remains the guardrail for the temporary UX.
+Until then, this policy remains the guardrail for the pre-confirmation UX and for backups outside the first supported same-install encrypted-local-record case.
 
 ## 9. Open Decisions
 

@@ -16,7 +16,7 @@ const PROFILES = [
 
 const MIN_PASSWORD_LENGTH = 8;
 const STAGED_BACKUP_BRIDGE_MESSAGE =
-  "Backup records are staged in memory only and will not be added to this vault in this setup step.";
+  "Backup records are staged in memory only. No backup records have been written.";
 
 export interface StagedBackupSummary {
   entries: number;

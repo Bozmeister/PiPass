@@ -8,21 +8,23 @@ This is design-only. It does not change runtime code, tests, UI, storage writes,
 
 Prompt 074 implementation note: `determineStagedBackupImportTransition()` now maps supplied staged-backup state and gate decisions into safe transition statuses and copy tokens without parsing, decrypting, writing storage, or wiring runtime record commit.
 
-Prompt 075 implementation note: the runtime staged-backup bridge/preflight status now derives its checked-only copy from `determineStagedBackupImportTransition()` with runtime import commit disabled. Backup records remain staged in memory only and are still not added to the setup commit plan.
+Prompt 075 implementation note: the runtime staged-backup bridge/preflight status now derives its checked-only copy from `determineStagedBackupImportTransition()` with runtime import commit disabled. Backup records remain staged in memory only until recovery confirmation.
 
-## 2. Current Checked-Only Bridge State
+Prompt 079 implementation note: recovery confirmation now enables record commit for the first supported runtime case only: eligible same-install `encrypted-local-records` backups. Before commit success, UI/result copy must still avoid "imported", "restored", or "added"; after success, app state may reflect imported records because the setup/import executor has committed entries, secure notes, indexes, the shared vault blob, setup metadata, and the initialized marker.
 
-Current temporary behavior:
+## 2. Current Transition State
+
+Current behavior:
 
 - a backup file can be selected on first-time setup
 - `SeedSetupScreen` parses and stages the backup in memory only
 - app root owns the staged backup state in memory
 - app root computes a safe bridge preflight/status value
 - UI says the backup is checked only
-- UI says records will not be added to this vault in this setup step
-- setup can complete as setup-only
-- staged backup records are not committed
-- no backup entries, secure notes, indexes, or shared vault blobs are written
+- no backup records are written before recovery confirmation
+- setup can complete as setup-only when no backup is staged or the staged backup is safely not imported
+- eligible same-install encrypted-local-record backups are committed only during the recovery-confirmed setup/import commit
+- ineligible staged backups fail closed or require clear/dismiss according to the existing gate/eligibility policy
 - recovery confirmation commits setup-only durable state
 
 This bridge remains correct until PiPass can prove a staged backup is importable and can include those records in the atomic setup/import commit plan.
@@ -32,16 +34,16 @@ This bridge remains correct until PiPass can prove a staged backup is importable
 The transition risk is over-promising. Users must never confuse:
 
 - "backup checked"
-- "backup ready to import after recovery confirmation"
+- "backup ready for recovery-confirmed commit"
 - "backup imported"
 
-PiPass should not say "restored" or "imported" until after the durable setup/import commit succeeds. Before commit, the strongest safe phrase is "ready to import after recovery confirmation."
+PiPass should not say "restored", "imported", or "added" until after the durable setup/import commit succeeds. Before commit, the strongest safe phrase is "ready for recovery-confirmed commit."
 
 If any import gate has not run or has failed, the UI must stay in checked-only or blocked-import wording.
 
-## 4. Conditions For Ready To Import
+## 4. Conditions For Ready Commit
 
-The UI may say a staged backup will be imported only when all of these are true:
+The UI may say a staged backup is ready for recovery-confirmed commit only when all of these are true:
 
 1. Runtime staged backup record commit is actually enabled.
 2. The backup was parsed and staged with the strict backup helpers.
@@ -59,7 +61,7 @@ The UI may say a staged backup will be imported only when all of these are true:
 14. The setup/import orchestrator gate decision allows `commit-staged-backup`.
 15. The app has enough prepared setup metadata to build an atomic setup/import commit plan.
 
-Until all conditions are true, UI must not say the backup will be imported.
+Until all conditions are true, UI must not say the backup will be imported, restored, or added.
 
 ## 5. UI Wording Policy
 
@@ -67,14 +69,14 @@ Before gates pass:
 
 - "Backup checked only."
 - "Backup records are staged in memory only."
-- "Records will not be added to this vault in this setup step."
+- "No backup records have been written."
 - "Clear this backup to create a new empty vault."
 
 After all gates pass and runtime import commit is enabled:
 
-- "Backup ready to import after recovery confirmation."
-- "X entries and Y secure notes will be added when setup is confirmed."
-- "No records have been imported yet."
+- "Backup ready for recovery-confirmed commit."
+- "X entries and Y secure notes are ready for the recovery-confirmed commit."
+- "No backup records have been written."
 
 After full setup/import commit succeeds:
 
@@ -105,13 +107,13 @@ Acceptable UX:
 
 - selecting a valid backup stages it
 - gates run after setup preparation
-- if gates pass, show "Backup ready to import after recovery confirmation"
+- if gates pass, show "Backup ready for recovery-confirmed commit"
 - provide a clear "Import this backup during setup" checked state or confirmation step
 - recovery confirmation remains the final durable commit action
 
 This prevents a user from accidentally selecting a backup, forgetting it is attached, and creating a vault with imported records they did not intend to commit.
 
-If the product chooses not to add a separate import confirmation, the setup screen must still show an unmistakable ready-to-import state before the recovery modal appears.
+If the product chooses not to add a separate import confirmation, the setup screen must still show an unmistakable ready-for-commit state before the recovery modal appears.
 
 ## 7. Setup-Only Continuation Policy
 
@@ -121,7 +123,7 @@ Recommended policy:
 
 - setup-only continuation is allowed only after the user clears or explicitly dismisses the staged backup
 - do not silently continue as setup-only while a staged backup remains attached
-- if the user dismisses import, show copy that no backup records will be added
+- if the user dismisses import, show copy that no backup records have been written and setup will continue without backup records
 - clearing or dismissing the staged backup must clear app-root staged backup memory
 
 This is stricter than the current bridge. The bridge allows setup-only continuation with attached checked-only backup because record commit is not enabled. Once real import commit exists, an attached backup has stronger meaning and should require clear user choice.
@@ -218,7 +220,7 @@ Safe copy examples:
 
 - "This encrypted backup can only be imported on the same local setup that created it."
 - "PiPass cannot prove this encrypted backup matches this setup."
-- "No records were added. You can clear this backup and create an empty vault."
+- "No backup records were written. You can clear this backup and create an empty vault."
 
 Avoid:
 
@@ -235,7 +237,7 @@ Remove the checked-only bridge state only when:
 
 - runtime record commit is enabled behind recovery confirmation
 - gate pass/fail states are visible and safe
-- passable backup copy says "ready to import after recovery confirmation"
+- passable backup copy says "ready for recovery-confirmed commit"
 - blocked backup copy tells the user to clear/dismiss before setup-only continuation
 - setup-only success copy does not imply backup import
 - setup-plus-import success copy says import happened only after commit success
@@ -249,8 +251,8 @@ Remove the checked-only bridge state only when:
 Before runtime wiring, add tests for:
 
 - checked-only copy remains until gates pass
-- ready-to-import copy appears only when gate decision allows `commit-staged-backup`
-- no "restored" or "imported" copy appears before commit success
+- ready-for-commit copy appears only when gate decision allows `commit-staged-backup`
+- no "restored", "imported", or "added" copy appears before commit success
 - unknown compatibility blocks import
 - incompatible compatibility blocks import
 - decryptability failure blocks import
@@ -274,7 +276,7 @@ Existing parser/stager, compatibility, verifier, sentinel, decryptability, gate-
 
 Recommended future sequence:
 
-1. Add a pure transition/status helper that maps bridge status plus gate decision to checked-only, ready-to-import, blocked-import, or setup-only-dismissed.
+1. Add a pure transition/status helper that maps bridge status plus gate decision to checked-only, ready-to-import status, blocked-import, or setup-only-dismissed.
 2. Add tests for UI-safe copy state transitions.
 3. Wire compatibility classification into first-time setup preparation using injected dependencies, still no record commit.
 4. Wire verifier/sentinel/decryptability pre-recovery gates, still no record commit.
@@ -289,7 +291,7 @@ Keep these prompts separate from cross-device import, vault-root-key migration, 
 
 ## 15. Open Decisions
 
-- Should ready-to-import require a separate checkbox or confirmation button before recovery confirmation?
+- Should ready-for-commit state require a separate checkbox or confirmation button before recovery confirmation?
 - Should setup-only continuation require clearing the staged backup, or is an explicit "continue without importing" dismissal enough?
 - Should missing verifier show a warning even when decryptability passes?
 - Should missing verifier eventually become blocking after enough backups include sentinels?

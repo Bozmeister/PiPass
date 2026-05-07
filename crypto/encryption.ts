@@ -1,4 +1,3 @@
-import * as ExpoCrypto from "expo-crypto";
 import CryptoJS from "crypto-js";
 import { hexToBytes, wipeBuffer } from "./secureMemory";
 
@@ -28,6 +27,7 @@ function deriveHmacKey(encKey: string): string {
 }
 
 export function encryptData(plaintext: string, keyHex: string): string {
+  const ExpoCrypto = require("expo-crypto") as typeof import("expo-crypto");
   const ivBytes = ExpoCrypto.getRandomBytes(IV_BYTES);
   const ivHex = Array.from(ivBytes)
     .map((b) => b.toString(16).padStart(2, "0"))

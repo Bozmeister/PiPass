@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import Module from "node:module";
 import test from "node:test";
+import CryptoJS from "crypto-js";
+import {
+  hexToBytes,
+  type KeyShares,
+  bytesToHex,
+  splitKeyIntoShares,
+  wipeShares,
+} from "../../crypto/secureMemory";
+import { decryptData, encryptData } from "../../crypto/encryption";
+import { deriveEntryKey } from "../../crypto/hkdf";
+import { generateSaltHex } from "../../crypto/hkdf";
 import {
   buildArgon2idKdfMetadata,
   buildPbkdf2KdfMetadata,
@@ -46,6 +58,7 @@ import {
   SETUP_IMPORT_STORAGE_KEYS,
   type SetupImportCommitPlan,
 } from "../../lib/setupImportCommitPlan";
+import { getSharedVaultBlob } from "../sharedVaultStorage";
 import {
   buildSetupImportRepairPlan,
   classifySetupImportLocalState,
@@ -66,6 +79,7 @@ import { computeStagedBackupPreflightStatus } from "../../lib/stagedBackupBridge
 import { determineStagedBackupImportTransition } from "../../lib/stagedBackupImportTransition";
 import { determineStagedBackupImportCommitEligibility } from "../../lib/stagedBackupImportEligibility";
 import {
+  prepareRuntimeStagedBackupCommitContext,
   prepareSetupImportCommitFromRuntimeState,
   prepareStagedBackupImportEligibilityInput,
 } from "../../lib/runtimeSetupImportCommit";
@@ -332,6 +346,72 @@ function stagedBackupFixture(overrides: Record<string, unknown> = {}): BackupSta
 
   assert.equal(result.ok, true);
   return result.backup;
+}
+
+function decryptableStagedBackupFixture(masterKeyHex: string): {
+  backup: BackupStageResult;
+  cleanup: () => void;
+} {
+  const shares = keySharesForHex(masterKeyHex);
+  const entrySalt = "a".repeat(32);
+  const noteSalt = "b".repeat(32);
+  const entryKey = deriveEntryKey(masterKeyHex, "entry-a", entrySalt);
+  const noteKey = deriveEntryKey(masterKeyHex, "note-a", noteSalt);
+  const entry = {
+    id: "entry-a",
+    title: "encrypted-title-placeholder",
+    username: "encrypted-username-placeholder",
+    encryptedPassword: legacyEncryptData("PLAINTEXT_SECRET", entryKey),
+    encryptedTitle: legacyEncryptData("TITLE_SECRET", entryKey),
+    encryptedUsername: legacyEncryptData("USER_SECRET", entryKey),
+    encryptedUrl: legacyEncryptData("https://example.test", entryKey),
+    url: "encrypted-url-display-placeholder",
+    notes: legacyEncryptData("notes", entryKey),
+    salt: entrySalt,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const note = {
+    id: "note-a",
+    label: "encrypted-label-placeholder",
+    encryptedLabel: legacyEncryptData("Note", noteKey),
+    encryptedContent: legacyEncryptData("content", noteKey),
+    salt: noteSalt,
+    createdAt: 3,
+    updatedAt: 4,
+  };
+  const backup = stagedBackupFixture({
+    entries: [entry],
+    secureNotes: [note],
+    metadata: {
+      app: "PiPass",
+      compatibility: compatibilityMetadata(),
+    },
+  });
+
+  return {
+    backup,
+    cleanup: () => wipeShares(shares),
+  };
+}
+
+function keySharesForHex(masterKeyHex: string): KeyShares {
+  const keyBytes = hexToBytes(masterKeyHex);
+  return {
+    shareA: new Uint8Array(keyBytes.length),
+    shareB: keyBytes,
+  };
+}
+
+function legacyEncryptData(plaintext: string, keyHex: string): string {
+  const ivHex = "0".repeat(32);
+  const encrypted = CryptoJS.AES.encrypt(plaintext, CryptoJS.enc.Hex.parse(keyHex), {
+    iv: CryptoJS.enc.Hex.parse(ivHex),
+    mode: CryptoJS.mode.CBC,
+    padding: CryptoJS.pad.Pkcs7,
+  });
+
+  return `${ivHex}:${encrypted.ciphertext.toString(CryptoJS.enc.Hex)}`;
 }
 
 function localCompatibilityContext(overrides: Record<string, unknown> = {}) {
@@ -1885,10 +1965,10 @@ test("runtime staged backup preflight uses checked-only transition when commit i
   assert.equal(status.gateReason, "allowed");
   assert.equal(
     status.safeMessage,
-    "Backup records are staged in memory and will not be added to this vault in this setup step.",
+    "Backup records are staged in memory only. No backup records have been written.",
   );
-  assert.equal(status.safeMessage.includes("will not be added"), true);
-  assert.equal(status.safeMessage.includes("this setup step"), true);
+  assert.equal(status.safeMessage.includes("written"), true);
+  assert.equal(status.safeMessage.toLowerCase().includes("added"), false);
   assert.equal(status.safeMessage.toLowerCase().includes("imported"), false);
   assert.equal(status.safeMessage.toLowerCase().includes("restored"), false);
 });
@@ -1909,7 +1989,7 @@ test("runtime staged backup preflight stays checked-only for blocked gates while
   assert.equal(status.gateReason, "incompatible");
   assert.equal(
     status.safeMessage,
-    "Backup records are staged in memory and will not be added to this vault in this setup step.",
+    "Backup records are staged in memory only. No backup records have been written.",
   );
 });
 
@@ -2013,7 +2093,7 @@ test("staged backup import transition keeps checked-only state when commit is di
   assert.equal(transition.canAttemptImport, false);
   assert.equal(
     transition.safeMessage,
-    "Backup records are staged in memory and will not be added to this vault in this setup step.",
+    "Backup records are staged in memory only. No backup records have been written.",
   );
 });
 
@@ -2081,7 +2161,7 @@ test("staged backup import transition allows setup-only after blocked import dis
   assert.equal(transition.requiresClearOrDismiss, false);
   assert.equal(
     transition.safeMessage,
-    "Backup import was dismissed. Setup can continue without adding backup records.",
+    "Backup import was dismissed. Setup can continue without backup records.",
   );
 });
 
@@ -2164,7 +2244,7 @@ test("staged backup import transition limits committed wording to committed stat
     }).toLowerCase();
     assert.equal(serialized.includes("imported"), false);
     assert.equal(serialized.includes("restored"), false);
-    assert.equal(serialized.includes("committed"), false);
+    assert.equal(serialized.includes("added"), false);
   }
 });
 
@@ -2186,7 +2266,7 @@ test("staged backup import transition preserves only safe warning text", () => {
 
   assert.deepEqual(transition.warnings, [
     "Backup has a non-blocking warning that should be reviewed before import.",
-    "Backup has a warning that should be reviewed before records can be added.",
+    "Backup has a warning that should be reviewed before record commit.",
   ]);
 });
 
@@ -2257,7 +2337,7 @@ test("staged backup import eligibility stays not-yet-enabled when feature flag i
   assert.equal(eligibility.setupOnlyAllowed, true);
   assert.equal(
     eligibility.safeMessage,
-    "Backup records are staged in memory and will not be added to this vault in this setup step.",
+    "Backup records are staged in memory only. No backup records have been written.",
   );
 });
 
@@ -2441,7 +2521,7 @@ test("staged backup import eligibility dismissal allows setup-only without impor
   assert.equal(eligibility.canAttemptImport, false);
   assert.equal(
     eligibility.safeMessage,
-    "Backup import was dismissed. Setup can continue without adding backup records.",
+    "Backup import was dismissed. Setup can continue without backup records.",
   );
 });
 
@@ -4601,4 +4681,259 @@ test("staged backup prepare does not publish active shares in this phase", async
   assert.equal(result.ok, true);
   assert.equal(result.activeSharesPublished, false);
   assert.deepEqual(calls.includes("shared-vault"), true);
+});
+
+test("runtime staged backup context with no staged backup keeps setup-only commit", async () => {
+  const masterKeyHex = "1".repeat(64);
+  const shares = keySharesForHex(masterKeyHex);
+  const storage = new CommitPlanMemoryStorage();
+
+  try {
+    const context = await prepareRuntimeStagedBackupCommitContext({
+      setupMetadata: commitSetupMetadataFixture(),
+      stagedBackup: null,
+      keyShares: shares,
+      masterKeyHex,
+      deviceUUID: "33333333-3333-4333-8333-333333333333",
+    });
+    const result = await prepareSetupImportCommitFromRuntimeState({
+      setupMetadata: commitSetupMetadataFixture(),
+      stagedBackup: null,
+      eligibilityInput: context.eligibilityInput,
+      includeCachedMasterKey: true,
+      cachedMasterKeyReference: masterKeyHex,
+      dependencies: {
+        classifyCompatibility: context.classifyCompatibility,
+        verifySentinel: context.verifySentinel,
+        verifyDecryptability: context.verifyDecryptability,
+        buildPlan: buildSetupImportCommitPlan,
+        executePlan: (plan) => executeSetupImportCommitPlan(plan, storage),
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.recordsIncluded, false);
+    assert.equal(storage.items.has("pipass_vault_entry-a"), false);
+    assert.equal(storage.items.has(SETUP_IMPORT_STORAGE_KEYS.vaultInitialized), true);
+  } finally {
+    wipeShares(shares);
+  }
+});
+
+test("runtime staged backup context blocks ineligible backup before staged commit path", async () => {
+  const masterKeyHex = "2".repeat(64);
+  const shares = keySharesForHex(masterKeyHex);
+  const stagedBackup = stagedBackupWithCompatibility(null);
+  let executeCalled = false;
+
+  try {
+    const context = await prepareRuntimeStagedBackupCommitContext({
+      setupMetadata: commitSetupMetadataFixture(),
+      stagedBackup,
+      keyShares: shares,
+      masterKeyHex,
+      deviceUUID: "33333333-3333-4333-8333-333333333333",
+    });
+    const result = await prepareSetupImportCommitFromRuntimeState({
+      setupMetadata: commitSetupMetadataFixture(),
+      stagedBackup,
+      eligibilityInput: context.eligibilityInput,
+      dependencies: {
+        classifyCompatibility: context.classifyCompatibility,
+        verifySentinel: context.verifySentinel,
+        verifyDecryptability: context.verifyDecryptability,
+        buildPlan: buildSetupImportCommitPlan,
+        executePlan: () => {
+          executeCalled = true;
+          return { success: true, operationsApplied: 0, rollbackStatus: "not-needed" };
+        },
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.stage, "eligibility");
+    assert.equal(result.recordsIncluded, false);
+    assert.equal(executeCalled, false);
+  } finally {
+    wipeShares(shares);
+  }
+});
+
+test("eligible runtime staged backup commits records notes indexes shared vault and initialized marker last", async () => {
+  const masterKeyHex = "3".repeat(64);
+  const shares = keySharesForHex(masterKeyHex);
+  const { backup, cleanup } = decryptableStagedBackupFixture(masterKeyHex);
+  const storage = new CommitPlanMemoryStorage();
+
+  try {
+    const context = await prepareRuntimeStagedBackupCommitContext({
+      setupMetadata: commitSetupMetadataFixture(),
+      stagedBackup: backup,
+      keyShares: shares,
+      masterKeyHex,
+      deviceUUID: "33333333-3333-4333-8333-333333333333",
+      now: () => 1234567890,
+    });
+    const result = await prepareSetupImportCommitFromRuntimeState({
+      setupMetadata: commitSetupMetadataFixture(),
+      stagedBackup: backup,
+      backupVerifier: context.backupVerifier,
+      eligibilityInput: context.eligibilityInput,
+      sharedVaultBlob: context.sharedVaultBlob,
+      includeCachedMasterKey: true,
+      cachedMasterKeyReference: masterKeyHex,
+      dependencies: {
+        classifyCompatibility: context.classifyCompatibility,
+        verifySentinel: context.verifySentinel,
+        verifyDecryptability: context.verifyDecryptability,
+        buildPlan: buildSetupImportCommitPlan,
+        executePlan: (plan) => executeSetupImportCommitPlan(plan, storage),
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.recordsIncluded, true);
+    assert.equal(result.activeSharesPublished, false);
+    assert.equal(storage.items.has("pipass_vault_entry-a"), true);
+    assert.deepEqual(JSON.parse(storage.items.get(SETUP_IMPORT_STORAGE_KEYS.vaultIndex) as string), ["entry-a"]);
+    assert.equal(storage.items.has("pipass_note_note-a"), true);
+    assert.deepEqual(JSON.parse(storage.items.get(SETUP_IMPORT_STORAGE_KEYS.notesIndex) as string), ["note-a"]);
+    assert.deepEqual(JSON.parse(storage.items.get(SETUP_IMPORT_STORAGE_KEYS.sharedVault) as string), {
+      encryptedBlob: JSON.stringify(backup.entries),
+      version: 1,
+      updatedAt: 1234567890,
+    });
+
+    const setCalls = storage.calls.filter((call) => call.startsWith("set:"));
+    assert.equal(setCalls.at(-1), `set:${SETUP_IMPORT_STORAGE_KEYS.vaultInitialized}`);
+  } finally {
+    cleanup();
+    wipeShares(shares);
+  }
+});
+
+test("eligible runtime staged backup commit failure does not publish shares and returns safe output", async () => {
+  const masterKeyHex = "4".repeat(64);
+  const shares = keySharesForHex(masterKeyHex);
+  const { backup, cleanup } = decryptableStagedBackupFixture(masterKeyHex);
+  const storage = new CommitPlanMemoryStorage();
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.sharedVault}#1`);
+
+  try {
+    const context = await prepareRuntimeStagedBackupCommitContext({
+      setupMetadata: commitSetupMetadataFixture(),
+      stagedBackup: backup,
+      keyShares: shares,
+      masterKeyHex,
+      deviceUUID: "33333333-3333-4333-8333-333333333333",
+    });
+    const result = await prepareSetupImportCommitFromRuntimeState({
+      setupMetadata: commitSetupMetadataFixture(),
+      stagedBackup: backup,
+      backupVerifier: context.backupVerifier,
+      eligibilityInput: context.eligibilityInput,
+      sharedVaultBlob: context.sharedVaultBlob,
+      dependencies: {
+        classifyCompatibility: context.classifyCompatibility,
+        verifySentinel: context.verifySentinel,
+        verifyDecryptability: context.verifyDecryptability,
+        buildPlan: buildSetupImportCommitPlan,
+        executePlan: (plan) => executeSetupImportCommitPlan(plan, storage),
+      },
+    });
+    const serialized = JSON.stringify(result);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.activeSharesPublished, false);
+    assert.equal(result.recordsIncluded, false);
+    if (result.commitResult && !result.commitResult.success) {
+      assert.equal(result.commitResult.failedOperation?.key, "setup-import-operation");
+      assert.equal(
+        result.commitResult.rollbackFailures?.some((failure) => failure.key.includes("entry-a")),
+        false,
+      );
+    }
+    assert.equal(serialized.includes("TITLE_SECRET"), false);
+    assert.equal(serialized.includes("PLAINTEXT_SECRET"), false);
+    assert.equal(serialized.includes("entry-a"), false);
+    assert.equal(serialized.includes("note-a"), false);
+    assert.equal(serialized.includes(masterKeyHex), false);
+  } finally {
+    cleanup();
+    wipeShares(shares);
+  }
+});
+
+test("runtime shared vault blob matches existing shared vault storage envelope", async (t) => {
+  const storage = installMemoryStorage();
+  t.after(() => setPlatformStorageDriverForTests(null));
+  const masterKeyHex = "5".repeat(64);
+  const shares = keySharesForHex(masterKeyHex);
+  const { backup, cleanup } = decryptableStagedBackupFixture(masterKeyHex);
+
+  try {
+    const context = await prepareRuntimeStagedBackupCommitContext({
+      setupMetadata: commitSetupMetadataFixture(),
+      stagedBackup: backup,
+      keyShares: shares,
+      masterKeyHex,
+      deviceUUID: "33333333-3333-4333-8333-333333333333",
+      now: () => 987654321,
+    });
+
+    assert.deepEqual(context.sharedVaultBlob, {
+      encryptedBlob: JSON.stringify(backup.entries),
+      version: 1,
+      updatedAt: 987654321,
+    });
+
+    storage.items.set(SETUP_IMPORT_STORAGE_KEYS.sharedVault, JSON.stringify(context.sharedVaultBlob));
+    assert.deepEqual(await getSharedVaultBlob(), context.sharedVaultBlob);
+  } finally {
+    cleanup();
+    wipeShares(shares);
+  }
+});
+
+test("lazy crypto loading preserves ciphertext salt and share formats", () => {
+  const moduleLoader = Module as unknown as {
+    _load: (request: string, parent: unknown, isMain: boolean) => unknown;
+  };
+  const originalLoad = moduleLoader._load;
+  moduleLoader._load = function patchedLoad(
+    request: string,
+    parent: unknown,
+    isMain: boolean,
+  ) {
+    if (request === "expo-crypto") {
+      return {
+        getRandomBytes: (length: number) => new Uint8Array(length).fill(7),
+      };
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  const keyHex = "6".repeat(64);
+  try {
+    const ciphertext = encryptData("lazy-load-round-trip", keyHex);
+    const parts = ciphertext.split(":");
+
+    assert.equal(parts.length, 3);
+    assert.equal(parts[0].length, 32);
+    assert.equal(parts[0], "07".repeat(16));
+    assert.equal(parts[2].length, 64);
+    assert.equal(decryptData(ciphertext, keyHex), "lazy-load-round-trip");
+
+    const salt = generateSaltHex(16);
+    assert.equal(salt, "07".repeat(16));
+
+    const shares = splitKeyIntoShares(keyHex);
+    try {
+      assert.equal(bytesToHex(shares.shareA), "07".repeat(32));
+      assert.equal(bytesToHex(shares.shareB).length, 64);
+    } finally {
+      wipeShares(shares);
+    }
+  } finally {
+    moduleLoader._load = originalLoad;
+  }
 });

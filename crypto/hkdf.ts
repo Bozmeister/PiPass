@@ -1,5 +1,4 @@
 import CryptoJS from "crypto-js";
-import * as ExpoCrypto from "expo-crypto";
 
 // HKDF (HMAC-based Key Derivation Function) per RFC 5869
 // Used to derive per-entry subkeys from the master key
@@ -113,6 +112,7 @@ export function deriveFractalSeed(masterKeyHex: string): { seedNumber: number; f
 }
 
 export function generateSaltHex(bytes: number = 16): string {
+  const ExpoCrypto = require("expo-crypto") as typeof import("expo-crypto");
   const saltBytes = ExpoCrypto.getRandomBytes(bytes);
   return Array.from(saltBytes)
     .map((b) => b.toString(16).padStart(2, "0"))

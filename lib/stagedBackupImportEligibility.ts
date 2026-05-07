@@ -81,7 +81,7 @@ export interface StagedBackupImportCommitEligibilityResult {
 const SAFE_WARNING_HONEYTOKEN =
   "Backup contains decoy trigger metadata that must be reviewed before import.";
 const SAFE_WARNING_GENERIC =
-  "Backup has a warning that must be reviewed before records can be added.";
+  "Backup has a warning that must be reviewed before record commit.";
 
 export function determineStagedBackupImportCommitEligibility(
   input: StagedBackupImportCommitEligibilityInput,
@@ -111,7 +111,7 @@ export function determineStagedBackupImportCommitEligibility(
       false,
       false,
       "Backup checked only",
-      "Backup records are staged in memory and will not be added to this vault in this setup step.",
+      "Backup records are staged in memory only. No backup records have been written.",
       warnings,
     );
   }
@@ -134,7 +134,7 @@ export function determineStagedBackupImportCommitEligibility(
       input.userDismissedImport !== true,
       input.userDismissedImport ? "Setup without backup" : "Confirm backup import",
       input.userDismissedImport
-        ? "Backup import was dismissed. Setup can continue without adding backup records."
+        ? "Backup import was dismissed. Setup can continue without backup records."
         : "Confirm importing this backup, or clear it to continue setup without backup records.",
       warnings,
     );
@@ -147,8 +147,8 @@ export function determineStagedBackupImportCommitEligibility(
     true,
     true,
     false,
-    "Backup ready to import",
-    "Backup records are ready to be added after recovery confirmation. No records have been added yet.",
+    "Backup ready for commit",
+    "Backup records are ready for recovery-confirmed commit. No backup records have been written.",
     warnings,
   );
 }
@@ -214,7 +214,7 @@ function blockedResult(
       false,
       false,
       "Setup without backup",
-      "Backup import was dismissed. Setup can continue without adding backup records.",
+      "Backup import was dismissed. Setup can continue without backup records.",
       warnings,
     );
   }
@@ -226,8 +226,8 @@ function blockedResult(
     false,
     false,
     true,
-    "Backup cannot be added",
-    "This backup is not ready to add to the vault. Clear or dismiss it to continue setup without backup records.",
+    "Backup cannot be committed",
+    "This backup is not ready for vault commit. Clear or dismiss it to continue setup without backup records.",
     warnings,
   );
 }

@@ -33,6 +33,10 @@ import {
   type PreparedFirstTimeVaultSetupResult,
 } from "../../lib/firstTimeSetup";
 import {
+  prepareRuntimeStagedBackupCommitContext,
+  prepareSetupImportCommitFromRuntimeState,
+} from "../../lib/runtimeSetupImportCommit";
+import {
   runIntegrityCheck,
   setTamperCallback,
   startPeriodicGuard,
@@ -56,7 +60,6 @@ import {
   SETUP_IMPORT_STORAGE_KEYS,
 } from "../../lib/setupImportCommitPlan";
 import { executeSetupImportCommitPlan } from "../../lib/setupImportCommitExecutor";
-import { prepareAndExecuteSetupImportCommit } from "../../lib/setupImportCommitOrchestrator";
 import { computeStagedBackupPreflightStatus } from "../../lib/stagedBackupBridgeStatus";
 
 const startupSnapshotDriver = {
@@ -340,42 +343,66 @@ export default function HomeScreen() {
 
           committingSetupRef.current = true;
           setCommittingSetup(true);
-          const result = await prepareAndExecuteSetupImportCommit({
-            setupMetadata: {
+          let result: Awaited<ReturnType<typeof prepareSetupImportCommitFromRuntimeState>>;
+          try {
+            const setupMetadata = {
               masterSalt: pendingSetup.salt,
               masterHash: pendingSetup.masterHash,
               securityProfile: pendingSetup.iterations,
               kdfMetadata: pendingSetup.kdfMetadata,
               recoveryKeyHash: pendingSetup.recoveryKeyHash,
-            },
-            includeCachedMasterKey: true,
-            cachedMasterKeyReference: pendingSetup.masterKeyHex,
-            dependencies: {
-              classifyCompatibility: async () => ({
-                status: "incompatible",
-                reason: "backup-commit-not-enabled",
+            };
+            const stagedCommitContext = await prepareRuntimeStagedBackupCommitContext({
+              setupMetadata,
+              stagedBackup: stagedSetupBackup?.backup ?? null,
+              keyShares: pendingSetupShares,
+              masterKeyHex: pendingSetup.masterKeyHex,
+              deviceUUID: await readPlatformItem("deviceUUID"),
+            });
+            result = await prepareSetupImportCommitFromRuntimeState({
+              setupMetadata,
+              stagedBackup: stagedSetupBackup?.backup ?? null,
+              backupVerifier: stagedCommitContext.backupVerifier,
+              eligibilityInput: stagedCommitContext.eligibilityInput,
+              sharedVaultBlob: stagedCommitContext.sharedVaultBlob,
+              includeCachedMasterKey: true,
+              cachedMasterKeyReference: pendingSetup.masterKeyHex,
+              dependencies: {
+                classifyCompatibility: stagedCommitContext.classifyCompatibility,
+                verifySentinel: stagedCommitContext.verifySentinel,
+                verifyDecryptability: stagedCommitContext.verifyDecryptability,
+                buildPlan: buildSetupImportCommitPlan,
+                executePlan: async (plan) => executeSetupImportCommitPlan(plan, setupCommitStorageDriver),
+              },
+            });
+          } catch {
+            result = {
+              ok: false,
+              stage: "eligibility",
+              reason: "runtime-commit-preparation-failed",
+              eligibility: {
+                status: "blocked",
+                reason: "decryptability-not-run",
+                importCommitEnabled: false,
+                setupOnlyAllowed: false,
+                canAttemptImport: false,
+                requiresClearOrDismiss: true,
+                safeTitle: "Setup failed",
+                safeMessage: "PiPass could not prepare setup safely.",
                 warnings: [],
-              }),
-              verifyDecryptability: async (stagedBackup) => ({
-                ok: false,
-                counts: {
-                  entriesChecked: stagedBackup.entries.length,
-                  notesChecked: stagedBackup.secureNotes.length,
-                  entriesFailed: 0,
-                  notesFailed: 0,
-                },
-                failures: [],
-              }),
-              buildPlan: buildSetupImportCommitPlan,
-              executePlan: async (plan) => executeSetupImportCommitPlan(plan, setupCommitStorageDriver),
-            },
-          });
+              },
+              recordsIncluded: false,
+              activeSharesPublished: false,
+              warnings: [],
+            };
+          }
           committingSetupRef.current = false;
           setCommittingSetup(false);
 
           if (!result.ok) {
             const message = "PiPass could not finish creating your vault safely. No vault was initialized. Please try setup again.";
             if (Platform.OS === "web") { alert(message); } else { Alert.alert("Setup Failed", message); }
+            setStagedSetupBackup(null);
             clearPendingSetupState(true);
             setVaultExists(false);
             return;
