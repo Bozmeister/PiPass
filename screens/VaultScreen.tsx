@@ -46,7 +46,7 @@ import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
 import { deriveFractalSeed, deriveFractalSeedLegacy, FractalParams, DEFAULT_FRACTAL_PARAMS } from "../crypto/hkdf";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_FOCUS } from "../styles/inputTheme";
 
-import { syncVaultToBackend } from "../lib/vaultSync";
+import { syncVaultToBackend, applyVaultImport, MergeCandidate } from "../lib/vaultSync";
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
 import DeleteEntryModal from "../components/DeleteEntryModal";
@@ -75,6 +75,10 @@ interface VaultScreenProps {
   onIterationsChange: (iterations: number) => void;
   onReset: () => void;
   reloadKey?: number;
+  // Stage 2B — set by HomeScreen when a remote import is available for the
+  // user to approve. Cleared via onMergeApplied after the user decides.
+  pendingMerge?: MergeCandidate | null;
+  onMergeApplied?: (importedSomething: boolean) => void;
 }
 
 function deriveVisualSeedFromHkdf(shares: KeyShares): { seedNumber: number; fingerprint: string; fractalParams: FractalParams } {
@@ -85,7 +89,7 @@ function deriveVisualSeedFromHkdf(shares: KeyShares): { seedNumber: number; fing
   return result;
 }
 
-export default function VaultScreen({ keyShares, iterations, locked = false, onLock, onIterationsChange, onReset, reloadKey }: VaultScreenProps) {
+export default function VaultScreen({ keyShares, iterations, locked = false, onLock, onIterationsChange, onReset, reloadKey, pendingMerge, onMergeApplied }: VaultScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   // T002 — fractal reads from this so it shifts color/glow whenever
@@ -180,6 +184,94 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       }
     })();
   }, [reloadKey]);
+
+  // Stage 2B: surface an Alert when HomeScreen detected remote-only items the
+  // user can import. Local data is never overwritten — only additive writes
+  // for ids that don't already exist locally. Conflicts and duplicates are
+  // surfaced as informational counts in the prompt body.
+  //
+  // Guards:
+  //  - keyShares must be present (need them to call syncVaultToBackend after).
+  //  - !locked: don't fire while the unlock overlay is up.
+  //  - We trigger off pendingMerge identity, so HomeScreen clearing back to
+  //    null between prompts won't re-fire the Alert.
+  useEffect(() => {
+    if (!pendingMerge || !keyShares || locked) return;
+    const candidate = pendingMerge;
+    const sharesAtPrompt = keyShares;
+
+    const totalNew = candidate.entries.length + candidate.notes.length;
+    const previewLines: string[] = [];
+    const PREVIEW_MAX = 5;
+    for (const e of candidate.entries) {
+      if (previewLines.length >= PREVIEW_MAX) break;
+      const title = (e.title || "").trim() || "(untitled entry)";
+      previewLines.push("• " + title);
+    }
+    for (const n of candidate.notes) {
+      if (previewLines.length >= PREVIEW_MAX) break;
+      const label = (n.label || "").trim() || "(untitled note)";
+      previewLines.push("• " + label);
+    }
+    const overflow = totalNew - previewLines.length;
+    if (overflow > 0) previewLines.push(`…and ${overflow} more`);
+
+    const conflictLine = candidate.conflictCount > 0
+      ? `\n${candidate.conflictCount} conflict${candidate.conflictCount === 1 ? "" : "s"} skipped (your local copy was kept).\n`
+      : "";
+
+    const message =
+      `${totalNew} new item${totalNew === 1 ? "" : "s"} found on the server:\n\n` +
+      previewLines.join("\n") +
+      "\n" +
+      conflictLine +
+      "\nImporting will only ADD these items. Your existing entries and notes will not be changed. " +
+      "Items you previously deleted may reappear until deletion sync is implemented.";
+
+    Alert.alert(
+      "Import from Cloud?",
+      message,
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+          onPress: () => {
+            onMergeApplied?.(false);
+          },
+        },
+        {
+          text: `Import ${totalNew}`,
+          style: "default",
+          onPress: async () => {
+            try {
+              const result = await applyVaultImport(
+                candidate.entries,
+                candidate.notes,
+                candidate.remoteVersion,
+                sharesAtPrompt,
+              );
+              const wrote = result.written.entries + result.written.notes;
+              if (wrote > 0) {
+                // Reload local lists immediately so the user sees what was added.
+                try {
+                  const [stored, notes] = await Promise.all([getAllEntries(), getAllSecureNotes()]);
+                  setEntries(stored);
+                  setSecureNotes(notes);
+                } catch {
+                  // Silent; the reloadKey bump in the parent is the fallback.
+                }
+              }
+              onMergeApplied?.(wrote > 0);
+            } catch {
+              // applyVaultImport never throws today, but treat as a silent no-op.
+              onMergeApplied?.(false);
+            }
+          },
+        },
+      ],
+      { cancelable: false },
+    );
+  }, [pendingMerge, keyShares, locked]);
 
   function buildFingerprintRecord(fp: string): FractalFingerprintRecord {
     return { fingerprint: fp, iterations, kdf: "argon2id", version: 1 };

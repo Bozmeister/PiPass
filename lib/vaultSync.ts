@@ -1,6 +1,13 @@
 import { getCredentials } from "./credentials";
 import { authedApiRequest } from "./query-client";
-import { getAllEntries, getAllSecureNotes, saveEntry, saveSecureNote, saveSyncVersion } from "../workers/storageWorker";
+import {
+  getAllEntries,
+  getAllSecureNotes,
+  saveEntry,
+  saveSecureNote,
+  saveSyncVersion,
+  getSyncVersion,
+} from "../workers/storageWorker";
 import { encryptData, decryptData } from "../crypto/encryption";
 import { combineShares, hexToBytes, wipeBuffer, KeyShares } from "../crypto/secureMemory";
 import { deriveSubkey } from "../crypto/hkdf";
@@ -245,4 +252,246 @@ export async function syncVaultToBackend(keyShares: KeyShares): Promise<void> {
     // Network errors, timeouts: local vault is unaffected.
     // No sensitive data is referenced here.
   }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2B: additive remote import (non-empty local vault)
+// ---------------------------------------------------------------------------
+// When the local vault already has entries/notes and the server has additional
+// items, we surface a user prompt and let them explicitly approve an import.
+// Local data is NEVER overwritten or deleted. Conflicts (same id, different
+// ciphertext or salt) are silently SKIPPED — local always wins.
+
+export type MergeStatus =
+  | "up-to-date"        // server.version <= lastSyncedVersion → nothing to do
+  | "no-remote"         // server has no blob yet
+  | "import-available"  // remote has items not present locally
+  | "no-changes"        // remote fully matches (or only has conflicts) — silent
+  | "error";            // network/decrypt/validation failure (no writes)
+
+export interface MergeCandidate {
+  entries: VaultEntry[];     // remote-only entries (id not present locally)
+  notes: SecureNote[];       // remote-only notes (id not present locally)
+  conflictCount: number;     // same-id, ciphertext/salt differs — kept local
+  duplicateCount: number;    // same-id, byte-identical — silently skipped
+  remoteVersion: number;     // server version we diffed against
+}
+
+export interface MergeResult {
+  status: MergeStatus;
+  candidate?: MergeCandidate;
+}
+
+function entriesIdentical(a: VaultEntry, b: VaultEntry): boolean {
+  return (
+    a.salt === b.salt &&
+    a.encryptedPassword === b.encryptedPassword &&
+    (a.encryptedTitle ?? "") === (b.encryptedTitle ?? "") &&
+    (a.encryptedUsername ?? "") === (b.encryptedUsername ?? "") &&
+    (a.encryptedUrl ?? "") === (b.encryptedUrl ?? "") &&
+    (a.notes ?? "") === (b.notes ?? "") &&
+    (a.encryptedAux ?? "") === (b.encryptedAux ?? "")
+  );
+}
+
+function notesIdentical(a: SecureNote, b: SecureNote): boolean {
+  return (
+    a.salt === b.salt &&
+    a.encryptedContent === b.encryptedContent &&
+    (a.encryptedLabel ?? "") === (b.encryptedLabel ?? "")
+  );
+}
+
+/**
+ * Fetches the remote blob, decrypts it, and diffs it against the local vault
+ * by entry/note id. Returns import candidates for the caller to surface in a
+ * confirmation UI. NEVER writes to local storage.
+ *
+ * Safety:
+ *  - Best-effort only: any error returns {status:"error"}.
+ *  - Decryption failure or payload validation failure → no result, no writes.
+ *  - blobKey is wiped in finally regardless of outcome.
+ *  - No secret material (blobKey, encryptedBlob, ciphertext, salts) is logged.
+ *  - Short-circuits via getSyncVersion() when the server hasn't advanced.
+ */
+export async function planVaultMerge(keyShares: KeyShares): Promise<MergeResult> {
+  const masterKeyHex = combineShares(keyShares);
+  const blobKey = deriveSubkey(masterKeyHex, BLOB_SUBKEY_INFO, BLOB_SUBKEY_SALT);
+  const masterKeyBytes = hexToBytes(masterKeyHex);
+  wipeBuffer(masterKeyBytes);
+
+  try {
+    const creds = await getCredentials();
+    if (!creds) return { status: "error" };
+
+    const lastSynced = await getSyncVersion();
+
+    const res = await authedApiRequest("GET", "/api/vault/fetch");
+    const raw = await res.json() as Record<string, unknown>;
+
+    // No blob on server, or malformed envelope → nothing to merge.
+    if (
+      typeof raw?.encryptedBlob !== "string" ||
+      !raw.encryptedBlob ||
+      typeof raw?.version !== "number" ||
+      (raw.version as number) <= 0
+    ) {
+      return { status: "no-remote" };
+    }
+
+    const remoteVersion = raw.version as number;
+
+    // Server hasn't advanced beyond our last confirmed sync → skip work.
+    if (lastSynced > 0 && remoteVersion <= lastSynced) {
+      return { status: "up-to-date" };
+    }
+
+    // Decrypt before any further work. Wrong key / corrupted blob → silent error.
+    let decryptedJson: string;
+    try {
+      decryptedJson = decryptData(raw.encryptedBlob as string, blobKey);
+    } catch {
+      if (__DEV__) console.warn("[planVaultMerge] decryption failed — wrong key or corrupted blob");
+      return { status: "error" };
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(decryptedJson);
+    } catch {
+      if (__DEV__) console.warn("[planVaultMerge] blob JSON malformed");
+      return { status: "error" };
+    }
+
+    if (!isValidRestorePayload(payload)) {
+      if (__DEV__) console.warn("[planVaultMerge] blob payload shape invalid");
+      return { status: "error" };
+    }
+
+    const { entries: remoteEntries, secureNotes: remoteNotes } = payload;
+
+    // Diff by id. Local is the source of truth — anything in local with the same
+    // id is either identical (duplicate) or different (conflict). Remote-only
+    // entries are import candidates.
+    const [localEntries, localNotes] = await Promise.all([
+      getAllEntries(),
+      getAllSecureNotes(),
+    ]);
+
+    const localEntryById = new Map<string, VaultEntry>();
+    for (const e of localEntries) localEntryById.set(e.id, e);
+    const localNoteById = new Map<string, SecureNote>();
+    for (const n of localNotes) localNoteById.set(n.id, n);
+
+    const candidateEntries: VaultEntry[] = [];
+    const candidateNotes: SecureNote[] = [];
+    let conflictCount = 0;
+    let duplicateCount = 0;
+
+    for (const remote of remoteEntries) {
+      const local = localEntryById.get(remote.id);
+      if (!local) {
+        candidateEntries.push(remote);
+      } else if (entriesIdentical(local, remote)) {
+        duplicateCount++;
+      } else {
+        conflictCount++;
+      }
+    }
+
+    for (const remote of remoteNotes) {
+      const local = localNoteById.get(remote.id);
+      if (!local) {
+        candidateNotes.push(remote);
+      } else if (notesIdentical(local, remote)) {
+        duplicateCount++;
+      } else {
+        conflictCount++;
+      }
+    }
+
+    if (candidateEntries.length === 0 && candidateNotes.length === 0) {
+      // Nothing the user needs to approve. Advance the watermark so we don't
+      // re-fetch + re-decrypt the same blob on every unlock. Conflict-only
+      // state is intentionally silent until Stage 2C ships a manual reconcile UI.
+      await saveSyncVersion(remoteVersion);
+      return { status: "no-changes" };
+    }
+
+    return {
+      status: "import-available",
+      candidate: {
+        entries: candidateEntries,
+        notes: candidateNotes,
+        conflictCount,
+        duplicateCount,
+        remoteVersion,
+      },
+    };
+  } catch {
+    // Network errors, 401 (creds already cleared), 403, 5xx, etc.
+    return { status: "error" };
+  } finally {
+    const blobKeyBytes = hexToBytes(blobKey);
+    wipeBuffer(blobKeyBytes);
+  }
+}
+
+export interface ApplyImportResult {
+  written: { entries: number; notes: number };
+}
+
+/**
+ * Persists user-approved import candidates to local storage and advances the
+ * sync watermark. Re-checks emptiness per id (Guard 2) so a manual add of the
+ * same id between plan and apply never gets clobbered.
+ *
+ * After successful local writes, fires syncVaultToBackend best-effort to push
+ * the merged state back so other devices see it. Sync failure is swallowed.
+ *
+ * Caller is responsible for triggering a UI reload (reloadKey bump).
+ */
+export async function applyVaultImport(
+  approvedEntries: VaultEntry[],
+  approvedNotes: SecureNote[],
+  remoteVersion: number,
+  keyShares: KeyShares,
+): Promise<ApplyImportResult> {
+  // Guard 2: re-check that none of the approved ids snuck into local storage
+  // between plan and apply (e.g. user added an entry while the prompt sat open).
+  const [currentEntries, currentNotes] = await Promise.all([
+    getAllEntries(),
+    getAllSecureNotes(),
+  ]);
+  const localEntryIds = new Set(currentEntries.map((e) => e.id));
+  const localNoteIds = new Set(currentNotes.map((n) => n.id));
+
+  let entriesWritten = 0;
+  let notesWritten = 0;
+
+  for (const entry of approvedEntries) {
+    if (localEntryIds.has(entry.id)) continue;
+    await saveEntry(entry);
+    entriesWritten++;
+  }
+  for (const note of approvedNotes) {
+    if (localNoteIds.has(note.id)) continue;
+    await saveSecureNote(note);
+    notesWritten++;
+  }
+
+  // Watermark only advances after the writes succeed.
+  if (Number.isInteger(remoteVersion) && remoteVersion > 0) {
+    await saveSyncVersion(remoteVersion);
+  }
+
+  // Best-effort: push the merged local state so other devices see what we just
+  // imported alongside any pre-existing local-only items. Failure is swallowed.
+  try {
+    await syncVaultToBackend(keyShares);
+  } catch {
+    // Intentional: import already succeeded locally.
+  }
+
+  return { written: { entries: entriesWritten, notes: notesWritten } };
 }

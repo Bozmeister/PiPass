@@ -21,6 +21,8 @@ import {
   destroyAllData,
   saveRecoveryKeyHash,
   storeMasterKeySecurely,
+  getAllEntries,
+  getAllSecureNotes,
 } from "../../workers/storageWorker";
 import { generateMasterSalt, hashMasterKey } from "../../crypto/keyDerivation";
 import { deriveMasterKeyShares } from "../../workers/vaultWorker";
@@ -39,7 +41,7 @@ import {
 } from "../../crypto/recoveryKey";
 import RecoveryKeyModal from "../../components/RecoveryKeyModal";
 import NuclearResetModal from "../../components/NuclearResetModal";
-import { restoreVaultFromRemote } from "../../lib/vaultSync";
+import { restoreVaultFromRemote, planVaultMerge, MergeCandidate } from "../../lib/vaultSync";
 
 export default function HomeScreen() {
   const [authenticated, setAuthenticated] = useState(false);
@@ -54,6 +56,7 @@ export default function HomeScreen() {
   const [vaultLocked, setVaultLocked] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [showUnlockNuclearReset, setShowUnlockNuclearReset] = useState(false);
+  const [pendingMerge, setPendingMerge] = useState<MergeCandidate | null>(null);
   const lockedSharesRef = useRef<KeyShares | null>(null);
   const keySharesRef = useRef<KeyShares | null>(null);
 
@@ -225,6 +228,7 @@ export default function HomeScreen() {
           onUnlocked={(shares) => setKeyShares(shares)}
           onRequestNuclearReset={() => setShowUnlockNuclearReset(true)}
           onRestore={() => setReloadKey((k) => k + 1)}
+          onMergeAvailable={(c) => setPendingMerge(c)}
         />
         <NuclearResetModal
           visible={showUnlockNuclearReset}
@@ -259,6 +263,11 @@ export default function HomeScreen() {
           iterations={iterations}
           locked={vaultLocked}
           reloadKey={reloadKey}
+          pendingMerge={pendingMerge}
+          onMergeApplied={(importedSomething) => {
+            setPendingMerge(null);
+            if (importedSomething) setReloadKey((k) => k + 1);
+          }}
           onLock={() => {
             if (keyShares) {
               lockedSharesRef.current = keyShares;
@@ -329,12 +338,13 @@ export default function HomeScreen() {
   );
 }
 
-function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset, onRestore }: {
+function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset, onRestore, onMergeAvailable }: {
   salt: string;
   iterations: number;
   onUnlocked: (shares: KeyShares) => void;
   onRequestNuclearReset: () => void;
   onRestore?: () => void;
+  onMergeAvailable?: (candidate: MergeCandidate) => void;
 }) {
   const insets = useSafeAreaInsets();
   const [password, setPassword] = useState("");
@@ -380,11 +390,26 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset, onR
             const data = await res.json() as { id?: string };
             if (data?.id) {
               await setCredentials({ userId: data.id, authHash: keyHash });
-              // Stage 2A: best-effort restore for empty local vault.
+              // Branch on local vault emptiness:
+              //   empty → Stage 2A restore (writes remote into the empty vault)
+              //   non-empty → Stage 2B merge plan (asks the user before any write)
               // shares is still valid here (wipeShares only runs on lock/reset).
-              // Returns true only when entries were actually written to storage.
-              const restored = await restoreVaultFromRemote(shares);
-              if (restored) onRestore?.();
+              const [localEntries, localNotes] = await Promise.all([
+                getAllEntries(),
+                getAllSecureNotes(),
+              ]);
+              if (localEntries.length === 0 && localNotes.length === 0) {
+                const restored = await restoreVaultFromRemote(shares);
+                if (restored) onRestore?.();
+              } else if (onMergeAvailable) {
+                const merge = await planVaultMerge(shares);
+                if (merge.status === "import-available" && merge.candidate) {
+                  onMergeAvailable(merge.candidate);
+                }
+                // Other statuses (up-to-date, no-remote, no-changes, error)
+                // are silent — local vault is unaffected and the user keeps
+                // working without any prompt.
+              }
             }
           }
         } catch {

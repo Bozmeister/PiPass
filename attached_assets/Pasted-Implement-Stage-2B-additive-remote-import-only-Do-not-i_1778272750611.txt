@@ -1,0 +1,102 @@
+Implement Stage 2B additive remote import only. Do not implement automatic merge, overwrite, or tombstones.
+
+Context:
+Regression verification passed:
+
+* TypeScript is clean.
+* Backend register/login/sync/fetch works.
+* Stage 1 upload-only sync works.
+* Stage 2A empty-vault restore works.
+* lastSyncedVersion metadata is implemented and audited.
+* Stage 2B design recommends explicit user-approved additive import only.
+
+Goal:
+When local vault is non-empty and remote has additional entries/notes, detect remote-only items and let the user explicitly import them. Never overwrite or delete local data.
+
+Required behaviour:
+
+1. After successful local unlock and backend login, fetch remote vault metadata/blob only if needed.
+2. Use getSyncVersion() to skip work when server version <= lastSyncedVersion.
+3. If no remote blob, do nothing.
+4. If local vault is empty, keep existing Stage 2A restore behaviour.
+5. If local vault is non-empty:
+
+   * decrypt remote blob using existing blob key logic.
+   * validate payload fully before any UI or storage write.
+   * compare remote entries/notes against local entries/notes by id.
+   * remote-only entries/notes become import candidates.
+   * same-id identical ciphertext/salt are treated as duplicates and skipped.
+   * same-id different ciphertext or salt are conflicts and must not be imported automatically.
+6. Show a user confirmation UI before importing remote-only candidates.
+7. UI must clearly say:
+
+   * local vault will not be overwritten
+   * only selected remote-only items will be imported
+   * conflicts are skipped
+   * deleted items may appear again until deletion sync/tombstones are implemented
+8. On user approval:
+
+   * re-check candidate IDs still do not exist locally before writing.
+   * save only approved remote-only entries/notes.
+   * saveSyncVersion(remoteVersion) only after successful local import.
+   * call syncVaultToBackend(keyShares) best-effort after import to upload the merged local state.
+   * trigger VaultScreen reload after successful import.
+9. On cancel, malformed payload, wrong key, network error, 401, 403, or 409:
+
+   * do not modify local vault.
+   * do not block unlock.
+   * do not clear local vault.
+10. Do not implement tombstones.
+11. Do not propagate deletions.
+12. Do not auto-resolve conflicts.
+13. Do not overwrite existing local entries or notes.
+
+Implementation guidance:
+
+* Prefer adding merge planning functions in lib/vaultSync.ts.
+* Prefer keeping UI simple and explicit, possibly using Alert or a small modal if already consistent with app style.
+* Keep restoreVaultFromRemote behaviour intact.
+* Keep syncVaultToBackend behaviour intact.
+* Avoid schema/database/server changes.
+
+Tests / verification:
+
+* local non-empty + remote-only entry → prompt appears, approved import writes item.
+* local non-empty + cancel → no writes.
+* same id identical ciphertext → no prompt/import.
+* same id different ciphertext → conflict counted/skipped, no overwrite.
+* remote-only secure note → import candidate.
+* malformed remote blob → no writes.
+* wrong key → no writes.
+* server version <= lastSyncedVersion → skip.
+* after import → local reload happens and best-effort sync runs.
+* TypeScript clean.
+* No secrets logged.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code.
+* Do NOT modify database schema.
+* Do NOT implement tombstones.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT make cloud sync required for local vault use.
+* Do NOT overwrite non-empty local vault data.
+* Do NOT delete local entries or notes because of remote state.
+* Do NOT log encryptedBlob, authHash, passwords, salts, recovery keys, headers, or key material.
+
+Output:
+
+* Files changed
+* Exact merge/import behaviour added
+* UI behaviour added
+* Conflict handling behaviour
+* Tests/checks run
+* Whether Stage 2C tombstones should be next or deferred
