@@ -1,0 +1,56 @@
+Run a full regression verification after the TypeScript cleanup.
+
+Context:
+The 4 pre-existing TypeScript errors have been fixed.
+npx tsc --noEmit now reports zero errors.
+Recent work added:
+
+* Stage 1 backend registration/login + upload-only sync
+* Stage 2A empty-local-vault restore
+* local sync version metadata
+* small TypeScript-only fixes
+
+Goal:
+Verify the whole app still behaves correctly before implementing Stage 2B merge.
+
+Tasks:
+
+1. Run full TypeScript check.
+2. Run available test suite.
+3. Run backend security tests if available.
+4. Confirm Expo/web bundle compiles.
+5. Confirm server starts cleanly.
+6. Verify no secrets are logged during startup or test flows.
+7. Verify backend health endpoint responds.
+8. Verify register → login → trust device → sync → fetch still works.
+9. Verify local vault still works when backend is unreachable.
+10. Verify empty-vault restore still works.
+11. Verify non-empty vault does not restore/overwrite.
+12. Verify lastSyncedVersion saves only after successful sync/restore.
+13. Verify clearVault/destroyAllData clear lastSyncedVersion as intended.
+14. Do not implement Stage 2B merge.
+15. Do not change code unless a regression is proven. If a regression is found, apply only the smallest safe fix.
+
+Critical constraints:
+
+* Do NOT modify cryptography behaviour.
+* Do NOT modify key derivation behaviour.
+* Do NOT modify encryption formats.
+* Do NOT modify auth architecture.
+* Do NOT modify vault formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify database schema.
+* Do NOT implement merge/conflict handling.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated code.
+* Do NOT log encryptedBlob, authHash, passwords, salts, recovery keys, headers, or key material.
+
+Output:
+
+* Commands/tests run
+* Pass/fail summary
+* Any regressions found
+* Any tiny fixes applied
+* Current readiness for Stage 2B implementation
