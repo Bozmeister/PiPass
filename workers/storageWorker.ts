@@ -15,6 +15,7 @@ const VAULT_INITIALIZED_KEY = "pipass_vault_initialized";
 const FRACTAL_FINGERPRINT_KEY = "pipass_fractal_fingerprint";
 const RECOVERY_KEY_HASH_KEY = "pipass_recovery_key_hash";
 const MIGRATION_DONE_KEY = "pipass_shared_migration_done";
+const SYNC_VERSION_KEY = "pipass_sync_last_version";
 
 async function getItem(key: string): Promise<string | null> {
   if (Platform.OS === "web") {
@@ -167,6 +168,7 @@ export async function clearVault(): Promise<void> {
   await deleteItem(VAULT_INDEX_KEY);
   await deleteItem(MASTER_KEY_HASH_KEY);
   await clearSharedVault();
+  await clearSyncVersion();
 }
 
 export async function saveRecoveryKeyHash(hash: string): Promise<void> {
@@ -378,5 +380,37 @@ export async function clearMasterKeySecurely(): Promise<void> {
   } catch (err) {
     if (__DEV__) console.warn("[storageWorker] clearMasterKeySecurely failed:", err);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sync version metadata (Stage 2B foundation)
+// ---------------------------------------------------------------------------
+// Tracks the server-side `version` field of the last blob we successfully
+// uploaded or restored from.  Stage 2B will use this to skip unnecessary
+// remote fetches when the server version hasn't advanced since our last sync.
+//
+// Key: pipass_sync_last_version — stored as a plain decimal integer string.
+// Semantics:
+//   0  → never synced (missing, malformed, negative, or zero on disk)
+//   N  → last confirmed server version (Unix epoch seconds)
+//
+// Cleared by: clearVault() (and therefore destroyAllData()).
+// NOT cleared by: lock, logout, or any other operation.
+
+export async function getSyncVersion(): Promise<number> {
+  const raw = await getItem(SYNC_VERSION_KEY);
+  if (raw === null) return 0;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return 0;
+  return n;
+}
+
+export async function saveSyncVersion(version: number): Promise<void> {
+  if (!Number.isInteger(version) || version <= 0) return;
+  await setItem(SYNC_VERSION_KEY, String(version));
+}
+
+export async function clearSyncVersion(): Promise<void> {
+  await deleteItem(SYNC_VERSION_KEY);
 }
 

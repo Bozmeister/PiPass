@@ -1,0 +1,65 @@
+Implement only the local sync version metadata foundation for future Stage 2B. Do not implement merge.
+
+Context:
+Stage 2B design identified a need for local lastSyncedVersion metadata:
+
+* key: pipass_sync_last_version
+* used later to avoid unnecessary remote merge work
+* should be updated after successful upload or successful empty-vault restore
+* should not affect local unlock or vault access
+
+Goal:
+Add safe local sync-version storage and wire it only to already-successful sync/restore paths.
+
+Tasks:
+
+1. Add storage helpers:
+
+   * getSyncVersion(): Promise<number>
+   * saveSyncVersion(version: number): Promise<void>
+   * clearSyncVersion(): Promise<void> if consistent with existing storage patterns
+2. Store the value as a numeric string.
+3. Validate on read:
+
+   * missing → 0
+   * malformed → 0
+   * negative → 0
+   * non-integer → 0
+4. After syncVaultToBackend receives a successful server response with a valid version, call saveSyncVersion(version).
+5. After restoreVaultFromRemote successfully restores remote data, call saveSyncVersion(remoteVersion).
+6. If sync or restore fails, do not change lastSyncedVersion.
+7. If clearVault or destroyAllData already clears local vault metadata, decide carefully whether this key should be cleared:
+
+   * destroyAllData should clear it
+   * normal lock/logout should not clear it
+   * clearVault should clear it only if it represents deleting the local vault state
+8. Add focused tests or verification where practical.
+9. Do not change remote fetch/merge behaviour.
+10. Do not implement import candidates, conflict UI, tombstones, or Stage 2B merge.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code.
+* Do NOT modify database schema.
+* Do NOT implement full two-way merge.
+* Do NOT implement tombstones.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT make cloud sync required for local vault use.
+* Do NOT log encryptedBlob, authHash, passwords, salts, recovery keys, headers, or key material.
+
+Output:
+
+* Files changed
+* Exact storage key added
+* When lastSyncedVersion is saved
+* When lastSyncedVersion is cleared
+* Tests/checks run
+* Whether this safely prepares for Stage 2B implementation later

@@ -1,6 +1,6 @@
 import { getCredentials } from "./credentials";
 import { authedApiRequest } from "./query-client";
-import { getAllEntries, getAllSecureNotes, saveEntry, saveSecureNote } from "../workers/storageWorker";
+import { getAllEntries, getAllSecureNotes, saveEntry, saveSecureNote, saveSyncVersion } from "../workers/storageWorker";
 import { encryptData, decryptData } from "../crypto/encryption";
 import { combineShares, hexToBytes, wipeBuffer, KeyShares } from "../crypto/secureMemory";
 import { deriveSubkey } from "../crypto/hkdf";
@@ -153,6 +153,11 @@ export async function restoreVaultFromRemote(keyShares: KeyShares): Promise<bool
       await saveSecureNote(note);
     }
 
+    // Record the server version we just restored from. Stage 2B will use
+    // this to detect whether the server has advanced since this restore.
+    // raw.version is already validated > 0 at this point.
+    await saveSyncVersion(raw.version as number);
+
     return true;
   } catch {
     // Network errors, 401 (authedApiRequest already cleared creds), 403
@@ -215,7 +220,23 @@ export async function syncVaultToBackend(keyShares: KeyShares): Promise<void> {
     // a same-second repeat gets 409 which the catch below swallows harmlessly.
     const version = Math.floor(Date.now() / 1000);
 
-    await authedApiRequest("POST", "/api/vault/sync", { encryptedBlob, version });
+    const syncRes = await authedApiRequest("POST", "/api/vault/sync", { encryptedBlob, version });
+
+    // Persist lastSyncedVersion only on confirmed 2xx. For 409/403 the upload
+    // did not succeed so the local version record must not advance.
+    if (syncRes.ok) {
+      try {
+        const body = await syncRes.json() as Record<string, unknown>;
+        const serverVersion =
+          typeof body?.version === "number" && body.version > 0
+            ? (body.version as number)
+            : version;
+        await saveSyncVersion(serverVersion);
+      } catch {
+        // Body unreadable — save the version we sent as a safe fallback.
+        await saveSyncVersion(version);
+      }
+    }
   } catch {
     // Intentionally empty — sync is best-effort.
     // 401: authedApiRequest already cleared credentials; next unlock will re-login.
