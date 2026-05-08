@@ -46,6 +46,7 @@ import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
 import { deriveFractalSeed, deriveFractalSeedLegacy, FractalParams, DEFAULT_FRACTAL_PARAMS } from "../crypto/hkdf";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_FOCUS } from "../styles/inputTheme";
 
+import { syncVaultToBackend } from "../lib/vaultSync";
 import AddEntryModal from "../components/AddEntryModal";
 import EntryDetailModal from "../components/EntryDetailModal";
 import DeleteEntryModal from "../components/DeleteEntryModal";
@@ -353,6 +354,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
 
     const encrypted = encryptVaultEntry(sanitized, keySharesRef.current);
     await saveEntry(encrypted);
+    syncVaultToBackend(keySharesRef.current).catch(() => {});
     const stored = await getAllEntries();
     setEntries(stored);
     setShowAddModal(false);
@@ -409,6 +411,8 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       setShowUndoSnackbar(false);
       try {
         await deleteStoredEntry(pending.id);
+        const sharesForSync = keySharesRef.current;
+        if (sharesForSync) syncVaultToBackend(sharesForSync).catch(() => {});
       } catch {
         setEntries(prev => [...prev, pending].sort((a, b) => b.createdAt - a.createdAt));
         Alert.alert("Delete Failed", "Could not permanently delete the entry. It has been restored to your vault.");
@@ -568,6 +572,9 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       // Refresh the displayed entry list (cipher blobs changed on disk).
       const freshEntries = await getAllEntries();
       setEntries(freshEntries);
+
+      // Sync the re-encrypted vault to the backend using the NEW key shares.
+      syncVaultToBackend(newShares).catch(() => {});
 
       const label = PROFILES.find(p => p.iterations === pendingProfileIterations)?.label ?? "custom";
       const count = reEncryptedEntries.length;
@@ -771,6 +778,9 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         onNotesChanged={async () => {
           const notes = await getAllSecureNotes();
           setSecureNotes(notes);
+          if (keySharesRef.current) {
+            syncVaultToBackend(keySharesRef.current).catch(() => {});
+          }
         }}
         onActivity={resetActivity}
       />

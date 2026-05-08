@@ -1,0 +1,90 @@
+Implement the smallest safe first stage of PiPass client-to-backend wiring: account registration/login credentials and upload-only vault backup sync.
+
+Context:
+The backend /api/auth/register, /api/auth/login, /api/vault/sync, and /api/vault/fetch endpoints already exist and were tested.
+The client currently does not call them.
+Do not implement remote fetch/merge/hydration yet.
+Do not implement password rotation.
+Do not change crypto.
+
+Goal:
+Make the app register/login with the backend and upload an encrypted vault blob after local vault mutations, while preserving local-first behaviour.
+
+Scope:
+Modify only the minimum necessary files, preferably:
+
+* screens/SeedSetupScreen.tsx
+* app/(tabs)/index.tsx
+* workers/vaultWorker.ts
+* lib/query-client.ts or lib/credentials.ts only if a small compatibility fix is required
+
+Required behaviour:
+
+1. On first vault setup:
+
+   * After local master password setup succeeds, call POST /api/auth/register using apiRequest.
+   * Send only username, authHash, salt, and iterations.
+   * Store returned user id plus the client authHash using setCredentials().
+   * If the backend is unreachable or registration fails, local vault setup must still complete.
+   * Show a safe non-secret warning that cloud backup is not connected yet.
+
+2. On unlock:
+
+   * After local password verification succeeds, call POST /api/auth/login using apiRequest.
+   * Store returned user id plus the client authHash using setCredentials().
+   * If login fails because the account does not exist, do not block local unlock.
+   * If backend is unreachable, do not block local unlock.
+   * Do not call /api/vault/fetch yet.
+   * Do not hydrate local vault from remote yet.
+
+3. On vault mutation:
+
+   * After saveEntry, updateEntry, deleteEntry, secure note save/update/delete, and clearVault local writes succeed, build the current full encrypted vault blob.
+   * POST it to /api/vault/sync using authedApiRequest.
+   * Sync must be best-effort only.
+   * Network failure must not throw into the UI or roll back local writes.
+   * If credentials are missing, skip sync safely.
+   * If server returns 403 untrusted device, skip sync safely and surface a safe optional warning if a UI path already exists.
+   * If server returns 401, clear credentials through existing helper behaviour and skip sync.
+   * Do not log encryptedBlob, authHash, headers, passwords, salts, recovery keys, or key material.
+
+4. Version handling:
+
+   * Use the existing local shared vault blob version if available.
+   * If no local version exists, start at version 1.
+   * Do not overwrite local vault data based on server data in this prompt.
+   * Do not implement conflict resolution yet.
+
+5. Tests / verification:
+
+   * Add or update focused tests where practical.
+   * Verify register/login calls work.
+   * Verify local vault still works offline.
+   * Verify local mutation does not fail when sync fails.
+   * Verify no secrets are logged.
+   * Verify the app compiles.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code unless a tiny client compatibility bug proves it is required.
+* Do NOT modify database schema.
+* Do NOT implement remote fetch/merge/hydration.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT make cloud sync required for local vault use.
+* Local vault must remain usable even if Neon/backend is down.
+
+Output:
+
+* Files changed
+* Exact behaviour added
+* Any failures or skipped cases
+* Manual test steps
+* Whether this is ready for the later fetch/merge prompt

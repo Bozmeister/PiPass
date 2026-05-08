@@ -7,6 +7,8 @@ import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_ERR
 import AuthScreen from "../../screens/AuthScreen";
 import SeedSetupScreen from "../../screens/SeedSetupScreen";
 import VaultScreen from "../../screens/VaultScreen";
+import { apiRequest } from "../../lib/query-client";
+import { setCredentials } from "../../lib/credentials";
 import {
   isVaultInitialized,
   setVaultInitialized,
@@ -159,6 +161,29 @@ export default function HomeScreen() {
         setPendingSetupShares(shares);
         setPendingRecoveryRawHex(rawKey);
         setPendingRecoveryKey(formatRecoveryKey(rawKey));
+
+        // Best-effort backend registration — local vault setup completes regardless.
+        // Username = SHA-256(salt): deterministic, unique per vault, re-derivable,
+        // and contains no plaintext identity information.
+        (async () => {
+          try {
+            const username = hashMasterKey(salt);
+            const res = await apiRequest("POST", "/api/auth/register", {
+              username,
+              authHash: keyHash,
+              salt,
+              iterations: validIters,
+            });
+            if (res.ok) {
+              const data = await res.json() as { id?: string };
+              if (data?.id) {
+                await setCredentials({ userId: data.id, authHash: keyHash });
+              }
+            }
+          } catch {
+            // Backend unreachable — vault operates in local-only mode.
+          }
+        })();
       }} />
     );
   }
@@ -335,6 +360,27 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
 
       await storeMasterKeySecurely(keyHex);
       onUnlocked(shares);
+
+      // Best-effort backend login — local vault access is already granted above.
+      // Fire-and-forget: errors (network, wrong authHash, unregistered account) are
+      // swallowed so the user is never blocked by backend availability.
+      (async () => {
+        try {
+          const username = hashMasterKey(salt);
+          const res = await apiRequest("POST", "/api/auth/login", {
+            username,
+            authHash: keyHash,
+          });
+          if (res.ok) {
+            const data = await res.json() as { id?: string };
+            if (data?.id) {
+              await setCredentials({ userId: data.id, authHash: keyHash });
+            }
+          }
+        } catch {
+          // Backend unreachable — vault remains usable in local-only mode.
+        }
+      })();
     } catch (err) {
       setError("Failed to derive key. Please try again.");
     }
