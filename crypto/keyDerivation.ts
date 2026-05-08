@@ -16,7 +16,7 @@ async function loadArgon2(): Promise<((params: any) => Promise<Uint8Array>) | nu
   if (argon2idFn) return argon2idFn;
   try {
     const mod = await import("hash-wasm");
-    argon2idFn = mod.argon2id;
+    argon2idFn = mod.argon2id as unknown as (params: any) => Promise<Uint8Array>;
     return argon2idFn;
   } catch {
     argon2LoadFailed = true;

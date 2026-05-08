@@ -9,7 +9,8 @@ interface FaviconImageProps {
   size?: number;
 }
 
-const CACHE_DIR = FileSystem.cacheDirectory + "favicons/";
+const CACHE_DIR =
+  (FileSystem as unknown as { cacheDirectory: string }).cacheDirectory + "favicons/";
 
 function sanitizeFilename(domain: string): string {
   return domain.replace(/[^a-zA-Z0-9.-]/g, "_");

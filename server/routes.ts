@@ -1311,7 +1311,7 @@ function checkSessionBindingDrift(
       // with a giant UA can't bloat the audit row past sensible
       // bounds. captureUserAgent already caps at 512; this is a
       // tighter limit specifically for the metadata field.
-      userAgent: `previous=${storedUa.slice(0, 80)}; current=${currentUa.slice(0, 80)}; sessionId=${session.id.slice(0, 8)}`,
+      userAgent: `previous=${storedUa.slice(0, 80)}; current=${(currentUa ?? "").slice(0, 80)}; sessionId=${session.id.slice(0, 8)}`,
     });
   }
 }
