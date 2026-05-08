@@ -6,13 +6,13 @@ Use `docs/STAGED_BACKUP_IMPORT_LOCAL_TEST_PLAN.md#4-first-manual-run-order` for 
 
 This record is documentation only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, package files, or TypeScript config.
 
-Manual UI/device verification has not been executed in this record. Do not treat this feature as manually release-verified until those checks are run and recorded.
+Manual UI/device verification has not been executed in this record. Prompt 087 records the current automated baseline only. Do not treat this feature as manually release-verified until manual checks are run and recorded.
 
 ## 1. Status
 
-- Verification date: 2026-05-07
+- Verification date: 2026-05-08
 - Tester: TODO
-- Branch or commit: `docs/prompt-083-staged-backup-verification-record` / `19e5d53`
+- Branch or commit: `docs/prompt-087-record-automated-verification-baseline` / `2aeb696`
 - Platform: TODO
 - Build type: TODO
 - Test data source: TODO
@@ -20,11 +20,11 @@ Manual UI/device verification has not been executed in this record. Do not treat
 
 ## 2. Automated Baseline Captured
 
-- `npm run lint`: passed with 0 errors and 2 existing documented warnings.
+- `npm run lint`: passed with 0 errors and 2 existing documented React hook warnings.
 - `npm run typecheck`: passed.
 - `npm test`: passed 311/311.
 
-These are automated checks only. They do not replace manual UI/device verification from `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md`.
+These are automated checks only. They do not replace manual local UI/device verification from `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md`. Release readiness is not claimed until manual verification is executed and recorded.
 
 ## 3. Baseline Setup With No Backup
 
@@ -335,7 +335,8 @@ Status: Pass
 Notes:
 
 - Automated checks passed.
-- This does not replace manual UI/device verification.
+- This automated baseline does not replace manual local UI/device verification.
+- Release readiness is not claimed until manual verification is executed and recorded.
 
 ## 13. Manual Evidence Still Needed
 
