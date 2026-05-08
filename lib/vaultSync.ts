@@ -51,10 +51,13 @@ export async function syncVaultToBackend(keyShares: KeyShares): Promise<void> {
       wipeBuffer(masterKeyBytes);
     }
 
-    // Use Date.now() as a monotonically increasing version.
-    // The server upserts only when the new version exceeds the stored one,
-    // so a stale or duplicate sync simply returns 409 — which we catch below.
-    const version = Date.now();
+    // Use Unix epoch in SECONDS as version. PostgreSQL INTEGER is a signed 32-bit
+    // column (max 2,147,483,647 — overflows in 2038). Date.now() returns
+    // milliseconds (~1.7 trillion) which exceeds this and causes a 400 "Invalid version".
+    // Dividing by 1000 gives ~1.778 billion seconds which fits until 2038.
+    // Monotonically increasing: syncs are always at least 1 second apart in practice;
+    // a same-second repeat gets 409 which the catch below swallows harmlessly.
+    const version = Math.floor(Date.now() / 1000);
 
     await authedApiRequest("POST", "/api/vault/sync", { encryptedBlob, version });
   } catch {

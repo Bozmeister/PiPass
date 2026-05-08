@@ -1,0 +1,81 @@
+Audit the newly implemented Stage 1 client-to-backend vault sync wiring before adding fetch/merge.
+
+Context:
+Stage 1 was just implemented:
+
+* lib/vaultSync.ts was added.
+* app/(tabs)/index.tsx now registers/logs in with the backend in the background.
+* screens/VaultScreen.tsx now calls syncVaultToBackend after vault mutations.
+* Remote fetch/merge/hydration is intentionally not implemented yet.
+
+Goal:
+Verify that Stage 1 is safe, stable, and actually works before implementing remote restore or merge.
+
+Important concern:
+The implementation derives the backend username as SHA-256(masterSalt). Audit whether this is safe and stable:
+
+* Does masterSalt persist across normal lock/unlock?
+* Does masterSalt persist across app restart?
+* Does security profile change alter masterSalt?
+* Does nuclear reset correctly create a new identity?
+* Could interrupted setup create duplicate backend accounts?
+* Could missing/corrupt salt strand server credentials?
+* Is this compatible with future password rotation?
+
+Tasks:
+
+1. Inspect the exact Stage 1 changes.
+2. Verify all changed files compile.
+3. Verify backend registration call shape matches server schema.
+4. Verify backend login call shape matches server schema.
+5. Verify setCredentials() receives the correct userId and authHash.
+6. Verify syncVaultToBackend never logs secrets.
+7. Verify syncVaultToBackend catches all network/auth/version/device-trust errors.
+8. Verify syncVaultToBackend cannot break local vault saves.
+9. Verify the uploaded encrypted blob contains no plaintext entry titles, usernames, URLs, secure note labels, or notes.
+10. Verify version handling does not accidentally cause permanent 409 conflicts.
+11. Verify sync is called after:
+
+    * add entry
+    * update entry
+    * confirmed delete after undo window
+    * secure note save/update/delete
+    * profile change re-encryption
+12. Verify sync is not called before local writes succeed.
+13. Run a live manual or automated test if possible:
+
+    * create new vault
+    * register/login backend silently
+    * add entry
+    * trust device if needed
+    * confirm /api/vault/sync writes a blob to Neon
+    * confirm local vault still works if backend is unreachable
+14. Do not implement fetch/merge yet.
+15. Do not implement fixes unless they are tiny, clearly necessary correctness fixes. Report anything larger first.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code unless a tiny compatibility bug is proven.
+* Do NOT modify database schema.
+* Do NOT implement remote fetch/merge/hydration.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT make cloud sync required for local vault use.
+* Do NOT log authHash, encryptedBlob, passwords, salts, recovery keys, headers, or key material.
+
+Output:
+
+* Files inspected
+* Whether Stage 1 is safe
+* Whether SHA-256(masterSalt) is acceptable for temporary backend username identity
+* Any bugs found
+* Any tiny fixes applied
+* Whether upload-only sync is actually writing to Neon
+* Whether we are ready for the later fetch/merge prompt
