@@ -1,0 +1,106 @@
+Condense replit.md into a compact current-state guide. Do not change runtime code.
+
+Context:
+PiPass has reached a stable pause point:
+
+* GitHub and Replit were synced.
+* TypeScript is clean.
+* Neon/PostgreSQL backend is working.
+* Stage 1 upload-only sync is implemented and audited.
+* Stage 2A empty-vault remote restore is implemented and audited.
+* Stage 2B additive remote import is implemented and audited.
+* Tombstones/deletion sync are deliberately deferred.
+* Autofill is no longer part of PiPass.
+* replit.md is approaching ~10k tokens and should be trimmed so future agent tasks load less stale context.
+
+Goal:
+Reduce replit.md context bloat while preserving the information future Replit agents actually need.
+
+Tasks:
+
+1. Read the current replit.md.
+2. Replace verbose historical sections with compact summaries.
+3. Preserve the current source-of-truth architecture:
+
+   * Expo / React Native frontend
+   * local-first vault storage
+   * client-side encryption
+   * Neon/PostgreSQL backend
+   * Express API
+   * zero-knowledge server model
+   * Stage 1 upload-only sync
+   * Stage 2A empty-vault restore
+   * Stage 2B additive import
+   * lastSyncedVersion metadata
+4. Preserve critical security invariants:
+
+   * server never sees plaintext vault data
+   * server never sees plaintext master password
+   * do not change crypto casually
+   * local vault must work offline
+   * remote sync/restore/import must never block unlock
+   * non-empty local vault must never be overwritten automatically
+   * local data must never be deleted because of remote state
+5. Remove or sharply condense obsolete/low-value material:
+
+   * old Autofill references
+   * excessive fractal lore
+   * repeated Stage 1/2A/2B implementation history
+   * duplicated design notes
+   * stale “future maybe” sections that are not active next steps
+6. Keep a concise “Current Sync State” section:
+
+   * Stage 1: upload encrypted blob after local mutations
+   * Stage 2A: restore remote blob only into empty local vault
+   * Stage 2B: user-approved additive import only
+   * Stage 2C tombstones: deferred
+7. Keep a concise “Do Not Touch Without Explicit Prompt” section:
+
+   * crypto
+   * key derivation
+   * encryption formats
+   * auth architecture
+   * vault formats
+   * recovery flows
+   * biometric logic
+   * database schema
+   * deletion/tombstone semantics
+8. Keep a concise “Known Deferred Work” section:
+
+   * tombstones/deletion sync
+   * manual conflict-resolution UI
+   * password rotation
+   * vault-root-key migration
+   * real-device testing checklist
+9. Do not delete important current commands or environment notes.
+10. Do not modify any files except replit.md unless there is a separate docs archive file already used for this purpose.
+11. Do not change app code.
+12. Do not change tests.
+13. Do not change package scripts.
+14. Do not change server code.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify auth logic.
+* Do NOT modify vault formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code.
+* Do NOT modify database schema.
+* Do NOT implement tombstones.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor code.
+* Do NOT run broad code optimization.
+
+Output:
+
+* Original approximate replit.md size
+* New approximate replit.md size
+* Sections condensed
+* Sections removed
+* Current invariants preserved
+* Confirmation that only documentation changed
