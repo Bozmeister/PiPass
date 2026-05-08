@@ -1,0 +1,60 @@
+Audit the current PiPass Replit project for Neon/PostgreSQL readiness only.
+
+Context:
+PiPass no longer uses Autofill. Ignore all old Autofill-related code, plugins, Android services, extension paths, and Autofill documentation unless they block builds directly.
+
+Goals:
+
+1. Confirm server/db.ts reads DATABASE_URL and uses PostgreSQL through Drizzle/node-postgres.
+2. Confirm there is no in-memory database fallback.
+3. Confirm drizzle.config.ts uses the same DATABASE_URL.
+4. Confirm npm run db:push can target the configured Neon database.
+5. Confirm server startup fails safely if DATABASE_URL is missing.
+6. Confirm no database URL, credentials, auth headers, authHash values, encrypted blobs, salts, recovery keys, or secrets are logged.
+7. Confirm the existing encrypted vault sync/fetch flow remains compatible with Neon/PostgreSQL.
+8. Verify all current auth + vault endpoints still work correctly against Neon.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify auth architecture.
+* Do NOT modify password rotation design.
+* Do NOT modify vault formats.
+* Do NOT modify recovery flows.
+* Do NOT modify security boundaries.
+* Do NOT modify biometric logic.
+* Do NOT modify secure storage behavior.
+* Do NOT invent new crypto primitives.
+* Do NOT simplify or replace existing security logic.
+* Do NOT refactor unrelated systems.
+* Do NOT remove security checks.
+* Do NOT change UI or styling unless required for a build/runtime fix.
+* Do NOT add new features.
+
+Allowed changes:
+
+* Minimal database connection fixes only.
+* Minimal environment/config fixes only.
+* Minimal server startup fixes only.
+* Minimal migration/config fixes only.
+* Small type fixes only if required for Neon compatibility.
+
+Output:
+
+* Files inspected
+* Risks found
+* Exact minimal changes made
+* Commands required to verify Neon connection in Replit
+* Manual verification steps for:
+
+  * register
+  * login
+  * vault sync
+  * vault fetch
+  * logout/login persistence
+  * invalid credential rejection
+
+Success criteria:
+PiPass must continue functioning exactly as it does now, but using Neon/PostgreSQL reliably and safely with no crypto or security regressions.
