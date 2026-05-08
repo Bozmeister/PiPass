@@ -1,0 +1,76 @@
+Run the manual sync checklist as far as possible in Replit web mode and record evidence. Do not change code unless a checklist-blocking bug is proven.
+
+Context:
+docs/MANUAL_SYNC_TEST_CHECKLIST.md was created.
+The current app has:
+
+* Stage 1 upload-only sync
+* Stage 2A empty-vault restore
+* Stage 2B additive import
+* Neon/PostgreSQL backend
+* TypeScript clean
+* Tombstones deferred
+
+Goal:
+Execute the checklist in Replit web mode where practical and record results.
+
+Tasks:
+
+1. Open docs/MANUAL_SYNC_TEST_CHECKLIST.md and follow the scenarios that can be tested in Replit web mode.
+2. Use a dedicated test vault and fake passwords only.
+3. Capture pass/fail evidence for:
+
+   * first-run setup
+   * lock/unlock
+   * add entry
+   * delete with undo
+   * secure notes if accessible in web mode
+   * backend register/login
+   * upload sync
+   * empty-vault restore if practical
+   * additive import if practical
+   * offline/backend unreachable behaviour if practical
+   * app restart persistence
+4. Record results in a new file:
+   docs/MANUAL_SYNC_TEST_RESULTS_2026-05-08.md
+5. Include:
+
+   * tested scenarios
+   * skipped scenarios and why
+   * commands used
+   * screenshots or descriptions of visible UI states if screenshots are not practical
+   * backend/API evidence
+   * Neon/version evidence if practical
+   * any bugs found
+6. If a bug is found:
+
+   * stop and report it first if it risks data loss, lockout, or secret leakage
+   * only apply a tiny fix if it is clearly safe and required to continue testing
+7. Do not implement new features.
+8. Do not implement tombstones.
+9. Do not implement password rotation.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify auth logic.
+* Do NOT modify vault formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code unless a tiny checklist-blocking bug is proven.
+* Do NOT modify database schema.
+* Do NOT refactor code.
+* Do NOT add Autofill back.
+* Do NOT log encryptedBlob, authHash, passwords, salts, recovery keys, headers, or key material.
+* Do NOT use real passwords or real personal data.
+
+Output:
+
+* Results file path
+* Scenarios passed
+* Scenarios skipped
+* Bugs found
+* Any tiny fixes applied
+* Current readiness for real-device testing
