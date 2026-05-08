@@ -1,0 +1,78 @@
+Create a manual real-device/web testing checklist for the current PiPass sync implementation. Do not change code.
+
+Context:
+PiPass is now at a stable checkpoint:
+
+* TypeScript clean
+* Replit/GitHub synced
+* replit.md condensed
+* Neon backend working
+* Stage 1 upload-only sync implemented
+* Stage 2A empty-vault restore implemented
+* Stage 2B additive remote import implemented
+* Tombstones/deletion sync deferred
+
+Goal:
+Create a practical manual testing checklist that I can follow to prove the current app works end-to-end.
+
+Testing areas:
+
+1. First-run setup
+2. Local vault unlock/lock
+3. Add entry
+4. Delete entry with undo window
+5. Secure notes save/delete
+6. Backend registration/login
+7. Device trust behaviour
+8. Upload-only sync to Neon
+9. Empty-vault restore from Neon
+10. Additive import from remote backup
+11. Conflict behaviour
+12. Offline behaviour
+13. Backend unreachable behaviour
+14. Nuclear reset
+15. App restart persistence
+
+Checklist requirements:
+
+* Provide step-by-step user actions.
+* Provide expected app behaviour.
+* Provide expected backend/API behaviour where relevant.
+* Include what should NOT happen.
+* Include simple evidence to collect:
+
+  * screenshots
+  * terminal command outputs
+  * visible UI states
+  * Neon row/version checks if practical
+* Include a pass/fail table.
+* Include a “stop immediately if this happens” section for data-loss risks.
+
+Important:
+Do not implement code.
+Do not modify docs unless creating a dedicated checklist file is appropriate.
+If creating a file, create docs/MANUAL_SYNC_TEST_CHECKLIST.md only.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify auth logic.
+* Do NOT modify vault formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code.
+* Do NOT modify database schema.
+* Do NOT implement tombstones.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor code.
+* Do NOT run broad code optimization.
+
+Output:
+
+* Checklist file path if created
+* Summary of test scenarios
+* Any risks that require special care
+* Confirmation that no runtime code changed
