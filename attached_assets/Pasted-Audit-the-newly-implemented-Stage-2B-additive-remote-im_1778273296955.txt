@@ -1,0 +1,81 @@
+Audit the newly implemented Stage 2B additive remote import feature. Do not implement new features.
+
+Context:
+Stage 2B has just been implemented:
+
+* lib/vaultSync.ts added planVaultMerge() and applyVaultImport()
+* app/(tabs)/index.tsx now branches after backend login:
+
+  * empty local vault → Stage 2A restore
+  * non-empty local vault → Stage 2B merge planning
+* screens/VaultScreen.tsx now shows an Alert with remote-only candidates and conflict count
+* Approval calls applyVaultImport and reloads the vault
+* Tombstones are not implemented
+* Automatic overwrite/delete is forbidden
+
+Goal:
+Prove Stage 2B cannot overwrite or delete local data, cannot silently import conflicts, and does not block normal vault access.
+
+Tasks:
+
+1. Inspect all Stage 2B code changes.
+2. Verify planVaultMerge() never writes local storage.
+3. Verify applyVaultImport() only writes remote-only approved entries/notes.
+4. Verify applyVaultImport() re-checks candidate IDs immediately before writing.
+5. Verify same-id different ciphertext or salt is counted as conflict and never imported.
+6. Verify same-id identical ciphertext/salt is treated as duplicate and does not prompt unnecessarily.
+7. Verify remote-only entries and notes are shown to the user before import.
+8. Verify cancel/close does not write anything.
+9. Verify malformed remote blob causes no writes.
+10. Verify wrong key/decryption failure causes no writes.
+11. Verify 401, 403, 409, offline, and network errors do not block unlock.
+12. Verify lastSyncedVersion behaviour:
+
+    * skips planning when serverVersion <= lastSyncedVersion
+    * saves version after successful import
+    * does not advance on conflict-only state unless that is explicitly justified
+13. Verify syncVaultToBackend is called only after successful import.
+14. Verify VaultScreen reload happens only after successful import.
+15. Verify no encryptedBlob, authHash, passwords, salts, recovery keys, headers, or key material are logged.
+16. Verify TypeScript remains clean.
+17. Run practical tests where possible:
+
+    * non-empty local vault + remote-only entry → prompt → approve → imported
+    * non-empty local vault + remote-only entry → cancel → no import
+    * same ID conflict → no overwrite
+    * duplicate remote/local → no prompt or write
+    * remote-only secure note → import candidate
+    * malformed blob → no write
+    * wrong key → no write
+18. Apply only tiny correctness fixes if a bug is proven.
+19. Do not implement tombstones.
+20. Do not implement password rotation.
+21. Do not modify server/database/schema.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code.
+* Do NOT modify database schema.
+* Do NOT implement tombstones.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT make cloud sync required for local vault use.
+* Do NOT overwrite local entries or notes.
+* Do NOT delete local entries or notes because of remote state.
+* Do NOT log secrets.
+
+Output:
+
+* Files inspected
+* Stage 2B safety verdict
+* Bugs found
+* Tiny fixes applied, if any
+* Test results
+* Whether Stage 2C tombstones should be next or deferred

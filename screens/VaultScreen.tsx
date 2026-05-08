@@ -198,7 +198,6 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   useEffect(() => {
     if (!pendingMerge || !keyShares || locked) return;
     const candidate = pendingMerge;
-    const sharesAtPrompt = keyShares;
 
     const totalNew = candidate.entries.length + candidate.notes.length;
     const previewLines: string[] = [];
@@ -243,12 +242,21 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
           text: `Import ${totalNew}`,
           style: "default",
           onPress: async () => {
+            // Re-read keyShares at apply time. If the user locked the vault
+            // while the Alert was open, the shares we captured at prompt time
+            // may have been wiped by the lock→re-unlock cycle, which would
+            // make syncVaultToBackend push a garbage-encrypted blob.
+            const sharesNow = keySharesRef.current;
+            if (!sharesNow) {
+              onMergeApplied?.(false);
+              return;
+            }
             try {
               const result = await applyVaultImport(
                 candidate.entries,
                 candidate.notes,
                 candidate.remoteVersion,
-                sharesAtPrompt,
+                sharesNow,
               );
               const wrote = result.written.entries + result.written.notes;
               if (wrote > 0) {
