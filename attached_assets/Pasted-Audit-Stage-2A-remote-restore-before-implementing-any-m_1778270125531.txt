@@ -1,0 +1,67 @@
+Audit Stage 2A remote restore before implementing any merge or conflict handling.
+
+Context:
+Stage 2A was just implemented:
+
+* lib/vaultSync.ts now has restoreVaultFromRemote(keyShares)
+* app/(tabs)/index.tsx calls restoreVaultFromRemote after successful backend login/setCredentials
+* screens/VaultScreen.tsx supports reloadKey to reload entries/notes after restore
+* Restore is intended only for empty local vaults
+* Full merge/conflict handling is intentionally not implemented
+
+Goal:
+Prove Stage 2A is safe, correct, and does not overwrite existing local data.
+
+Tasks:
+
+1. Inspect all Stage 2A changes.
+2. Verify restoreVaultFromRemote uses the exact same blob key derivation strategy as syncVaultToBackend.
+3. Verify blobKey and sensitive buffers are wiped in all success/failure paths.
+4. Verify restore returns false and writes nothing if local entries or notes already exist.
+5. Verify the second emptiness check prevents races before writing.
+6. Verify response validation rejects malformed /api/vault/fetch responses.
+7. Verify decrypted payload validation happens before any local write.
+8. Verify malformed entries/notes are rejected before writing anything.
+9. Verify wrong password/key causes no local writes.
+10. Verify 401, 403, 409, offline, and network errors do not block unlock.
+11. Verify reloadKey reloads entries/notes only after a successful restore.
+12. Verify the re-lock overlay omission of onRestore is safe.
+13. Run compile/type checks for changed files.
+14. Run a live or scripted restore test if practical:
+
+    * create/upload remote vault blob
+    * clear local entries/notes while preserving account/salt/hash credentials if possible
+    * unlock
+    * confirm restore into empty vault
+    * confirm non-empty local vault refuses remote import
+15. Do not implement merge.
+16. Do not implement conflict resolution.
+17. Do not implement password rotation.
+18. Apply only tiny correctness fixes if a bug is proven; report larger risks first.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats except validation of existing payload shape.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code unless a tiny compatibility bug is proven.
+* Do NOT modify database schema.
+* Do NOT implement full two-way merge.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT make cloud restore required for unlock.
+* Do NOT overwrite non-empty local vault data.
+* Do NOT log encryptedBlob, authHash, passwords, salts, recovery keys, headers, or key material.
+
+Output:
+
+* Files inspected
+* Whether Stage 2A is safe
+* Any bugs found
+* Any tiny fixes applied
+* Live/manual test results
+* Whether PiPass is ready for a future Stage 2B merge design prompt

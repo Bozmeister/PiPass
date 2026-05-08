@@ -139,8 +139,13 @@ export async function restoreVaultFromRemote(keyShares: KeyShares): Promise<bool
     ]);
     if (checkEntries.length > 0 || checkNotes.length > 0) return false;
 
-    // Write validated entries and notes to local storage.
     const { entries, secureNotes } = payload;
+
+    // If the remote vault is also empty there is nothing to restore.
+    // Return false so the caller doesn't fire a spurious UI reload.
+    if (entries.length === 0 && secureNotes.length === 0) return false;
+
+    // Write validated entries and notes to local storage.
     for (const entry of entries) {
       await saveEntry(entry);
     }
