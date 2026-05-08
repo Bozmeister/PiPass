@@ -164,10 +164,36 @@ export default function HomeScreen() {
   }
 
   if (!keyShares && !vaultLocked) {
+    if (!masterSalt) {
+      return (
+        <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000", padding: 32 }}>
+          <Ionicons name="warning-outline" size={56} color="#ef4444" />
+          <Text style={{ color: "#ef4444", fontSize: 20, fontWeight: "bold" as const, marginTop: 20, textAlign: "center" }}>
+            Vault Metadata Corrupted
+          </Text>
+          <Text style={{ color: "#aaa", fontSize: 14, marginTop: 12, textAlign: "center", lineHeight: 20 }}>
+            A previous operation was interrupted and left the vault in an inconsistent state. Your vault must be reset to continue.
+          </Text>
+          <Pressable
+            onPress={async () => {
+              try {
+                await destroyAllData();
+              } catch {}
+              setVaultExists(false);
+              setMasterSaltState(null);
+            }}
+            style={{ marginTop: 32, backgroundColor: "#7f1d1d", paddingVertical: 14, paddingHorizontal: 28, borderRadius: 10 }}
+          >
+            <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" as const }}>Reset Vault</Text>
+          </Pressable>
+        </View>
+      );
+    }
+
     return (
       <>
         <UnlockScreen
-          salt={masterSalt!}
+          salt={masterSalt}
           iterations={iterations}
           onUnlocked={(shares) => setKeyShares(shares)}
           onRequestNuclearReset={() => setShowUnlockNuclearReset(true)}

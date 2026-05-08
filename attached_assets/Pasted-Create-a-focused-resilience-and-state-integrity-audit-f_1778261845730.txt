@@ -1,0 +1,98 @@
+Create a focused resilience and state-integrity audit for the current PiPass implementation.
+
+Context:
+PiPass is now confirmed working correctly with Neon/PostgreSQL.
+Do not redesign architecture.
+Do not add new features.
+Do not implement password rotation yet.
+Do not implement vault-root-key migration yet.
+
+Goal:
+Audit whether PiPass can safely survive interrupted operations, stale state, partial writes, app restarts, and sync conflicts without corrupting vault access or causing lockout.
+
+Focus areas:
+
+1. Local/server state consistency
+2. Vault sync conflict handling
+3. Interrupted writes
+4. Lock/unlock integrity
+5. Session invalidation handling
+6. Shared vault blob consistency
+7. SecureStore/cache consistency
+8. Recovery from stale or partially-written local metadata
+9. Version monotonicity during sync
+10. Safe rollback behavior
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify auth architecture.
+* Do NOT modify password rotation design.
+* Do NOT modify vault formats.
+* Do NOT modify recovery flows.
+* Do NOT modify database schema unless absolutely required for a real corruption bug.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT simplify security checks.
+* Do NOT invent new crypto primitives.
+* Do NOT rewrite working code for style reasons.
+
+Audit tasks:
+
+1. Trace every path that mutates:
+
+   * pipass_master_hash
+   * pipass_master_salt
+   * pipass_security_profile
+   * pipass_master_key
+   * pipass_shared_vault
+   * local vault entries
+   * secure notes
+   * pipass.auth.*
+   * active key shares
+   * server vault version
+
+2. Identify any operation where:
+
+   * local state commits before server success
+   * server state commits before local success
+   * app termination could strand partial state
+   * stale cached data could overwrite newer data
+   * lock/unlock could race with writes
+   * failed sync could leave inconsistent local metadata
+
+3. Verify whether all critical writes are:
+
+   * atomic where possible
+   * staged where needed
+   * rollback-safe
+   * version-checked
+   * recoverable after interruption
+
+4. Verify whether app restart after interruption:
+
+   * safely resumes
+   * safely rolls back
+   * safely blocks unsafe unlock
+   * never silently corrupts vault state
+
+5. Produce:
+
+   * a ranked list of real integrity risks
+   * exact runtime scenarios
+   * minimal fixes only
+   * no speculative redesigns
+
+Output format:
+
+* Confirmed safe flows
+* Confirmed risky flows
+* Severity ranking
+* Exact files/functions involved
+* Minimal recommended fixes
+* Suggested test cases only
+
+Success criteria:
+PiPass should behave predictably and safely during crashes, interruptions, stale sync conflicts, and partial failures without weakening security boundaries or risking vault corruption.

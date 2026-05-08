@@ -21,6 +21,7 @@ import {
 import { 
   getAllEntries, 
   saveEntry, 
+  updateEntry,
   deleteEntry as deleteStoredEntry, 
   destroyAllData, 
   saveSecureNote,
@@ -501,22 +502,59 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   async function confirmProfileChange() {
     if (!pendingProfileIterations || !profilePassword.trim()) return;
 
+    const oldShares = keySharesRef.current;
+    if (!oldShares) {
+      Alert.alert("Migration Failed", "Vault is not unlocked. Lock and unlock the vault, then try again.");
+      return;
+    }
+
     setMigrating(true);
     try {
       const salt = await getMasterSalt();
       if (!salt) throw new Error("No salt found");
 
+      // Step 1: Derive the new master key from the supplied password +
+      // existing salt + new iterations. A wrong password is detected in
+      // step 2 when the re-encrypt attempt fails MAC verification.
       const newShares = await deriveMasterKeyShares(profilePassword, salt, pendingProfileIterations);
       const newKeyHex = combineShares(newShares);
       const newKeyHash = hashMasterKey(newKeyHex);
 
+      // Step 2: Re-encrypt every entry and every secure note in memory
+      // using the old key (oldShares) → new key (newShares). This will
+      // throw if the password was wrong (MAC check fails on first entry).
+      // No storage writes happen until ALL re-encryptions succeed.
+      const existingEntries = await getAllEntries();
+      const existingNotes = await getAllSecureNotes();
+      const reEncryptedEntries = existingEntries.map(entry =>
+        reEncryptEntry(entry, oldShares, newShares)
+      );
+      const reEncryptedNotes = existingNotes.map(note =>
+        reEncryptSecureNote(note, oldShares, newShares)
+      );
+
+      // Step 3: Write all re-encrypted blobs. IDs and index are unchanged;
+      // only the cipher content changes. Use updateEntry (not saveEntry) so
+      // the vault index is not touched.
+      for (const entry of reEncryptedEntries) {
+        await updateEntry(entry);
+      }
+      for (const note of reEncryptedNotes) {
+        await saveSecureNote(note);
+      }
+
+      // Step 4: Commit new key metadata AFTER all blobs are safely written.
+      // If the process is interrupted here the blobs are already encrypted
+      // with the new key, so committing the key hash is safe.
       await saveMasterKeyHash(newKeyHash);
       await onIterationsChange(pendingProfileIterations);
-      await storeMasterKeySecurely(newKeyHex);
 
       const newKeyBytes = hexToBytes(newKeyHex);
       wipeBuffer(newKeyBytes);
 
+      await storeMasterKeySecurely(newKeyHex);
+
+      // Step 5: Update in-memory state.
       keySharesRef.current = newShares;
       // Mirror the rotated shares into the cross-screen holder so
       // the honeytoken management screen continues to work after
@@ -527,11 +565,20 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       await saveFractalFingerprint({ fingerprint: newFractal.fingerprint, iterations: pendingProfileIterations, kdf: "argon2id", version: 1 });
       setFractalTampered(false);
 
+      // Refresh the displayed entry list (cipher blobs changed on disk).
+      const freshEntries = await getAllEntries();
+      setEntries(freshEntries);
+
+      const label = PROFILES.find(p => p.iterations === pendingProfileIterations)?.label ?? "custom";
+      const count = reEncryptedEntries.length;
       setPendingProfileIterations(null);
       setProfilePassword("");
-      Alert.alert("Profile Updated", `Now using ${PROFILES.find(p => p.iterations === pendingProfileIterations)?.label || "custom"} profile.`);
+      Alert.alert(
+        "Profile Updated",
+        `Now using ${label} profile. ${count} ${count === 1 ? "entry" : "entries"} re-encrypted.`
+      );
     } catch (err) {
-      Alert.alert("Migration Failed", "Incorrect password or key derivation error. Settings remain unchanged.");
+      Alert.alert("Migration Failed", "Incorrect password or migration error. No settings were changed.");
     }
     setMigrating(false);
   }
