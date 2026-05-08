@@ -1,0 +1,77 @@
+Design Stage 2B conflict-aware remote merge for PiPass, but do not implement it yet.
+
+Context:
+Stage 1 upload-only sync is implemented and audited.
+Stage 2A empty-local-vault remote restore is implemented and audited.
+Remote blobs are encrypted and reaching Neon.
+Empty-vault restore is safe.
+Full merge/conflict handling has not been implemented.
+
+Goal:
+Produce a cautious design for syncing non-empty local vaults with remote vault blobs without data loss.
+
+Design requirements:
+
+1. Never overwrite non-empty local vault automatically.
+2. Never delete local entries because they are missing remotely.
+3. Never delete remote entries because they are missing locally unless a confirmed tombstone/delete design exists.
+4. Prefer additive import first:
+
+   * local-only entries remain
+   * remote-only entries may be imported only if safe
+   * exact duplicate IDs should be compared carefully
+5. Define how to compare entries safely:
+
+   * by id
+   * by encrypted payload shape
+   * by updatedAt if available and trustworthy
+   * avoid decrypting more than needed unless already unlocked
+6. Define conflict handling for same entry id with different ciphertext.
+7. Define secure notes merge separately from vault entries.
+8. Define how tombstones/deletions should eventually work.
+9. Define how version numbers should be stored locally.
+10. Define how sync should behave after merge:
+
+    * whether to upload merged blob
+    * when to avoid upload
+    * how to handle 409
+11. Define UI wording for:
+
+    * remote backup found
+    * import available
+    * conflict detected
+    * no automatic overwrite
+12. Define test cases before implementation.
+
+Important:
+This is design-only. Do not modify files.
+Do not implement merge.
+Do not change code.
+Do not change schema.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code.
+* Do NOT modify database schema.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT make cloud sync required for local vault use.
+* Do NOT allow automatic overwrite of non-empty local vaults.
+* Do NOT log encryptedBlob, authHash, passwords, salts, recovery keys, headers, or key material.
+
+Output:
+
+* Recommended Stage 2B merge policy
+* Data-loss risks
+* Required local metadata, if any
+* Whether schema changes are needed or avoidable
+* Suggested implementation stages
+* Suggested tests
+* Clear recommendation: implement now, defer, or implement additive-only subset first
