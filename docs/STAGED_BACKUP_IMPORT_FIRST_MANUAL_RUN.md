@@ -29,6 +29,7 @@ Prompt 079 remains limited to same-install `pipass-backup` version `1` backups w
 - Do not paste screenshots containing secrets.
 - Record safe labels and observations only.
 - Do not mark release-ready from this sheet.
+- Use `docs/STAGED_BACKUP_IMPORT_STORAGE_INSPECTION_GUIDE.md` for key-name-only storage inspection.
 
 ## 4. Flow A: Baseline Setup With No Backup
 

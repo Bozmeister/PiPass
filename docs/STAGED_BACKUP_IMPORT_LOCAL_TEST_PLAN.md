@@ -25,6 +25,7 @@ This plan is documentation only. It does not change runtime code, tests, UI, sto
 - Throwaway entries and secure notes only.
 - Separate unsupported, invalid, incompatible, or warning-bearing backup samples if available.
 - A safe storage inspection method or dev harness that reports key presence/order without printing raw values.
+- Use `docs/STAGED_BACKUP_IMPORT_STORAGE_INSPECTION_GUIDE.md` before recording storage observations.
 
 ## 4. First Manual Run Order
 
@@ -79,6 +80,7 @@ Record:
 - fixture label only
 - safe UI wording summary
 - safe storage key-presence summary showing no records, indexes, shared vault blob, cached master key, or initialized marker were written before recovery confirmation
+- storage observations guided by `docs/STAGED_BACKUP_IMPORT_STORAGE_INSPECTION_GUIDE.md`
 
 Do not record:
 
