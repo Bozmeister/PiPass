@@ -8,6 +8,8 @@ It covers only storage key presence or absence and safe state labels during the 
 
 This guide is documentation only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, package files, TypeScript config, or app behavior.
 
+Use `docs/STAGED_BACKUP_IMPORT_FIRST_RUN_EVIDENCE_CHECKLIST.md` before capturing screenshots, terminal summaries, or storage observations for the first manual run.
+
 ## 2. Strict Privacy Warning
 
 - Do not copy, paste, screenshot, or record storage values.
@@ -152,5 +154,6 @@ Use this guide while filling:
 - `docs/STAGED_BACKUP_IMPORT_FIRST_MANUAL_RUN.md`
 - `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION_RECORD.md`
 - `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION_RESULTS.md`
+- `docs/STAGED_BACKUP_IMPORT_FIRST_RUN_EVIDENCE_CHECKLIST.md`
 
 Record safe observations only. Do not paste raw storage values, backup contents, ciphertext, recovery keys, master keys, salts, hashes, full metadata JSON, auth/session values, device identifiers, or screenshots containing sensitive values.

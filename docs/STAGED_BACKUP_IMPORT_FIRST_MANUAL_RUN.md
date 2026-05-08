@@ -30,6 +30,7 @@ Prompt 079 remains limited to same-install `pipass-backup` version `1` backups w
 - Record safe labels and observations only.
 - Do not mark release-ready from this sheet.
 - Use `docs/STAGED_BACKUP_IMPORT_STORAGE_INSPECTION_GUIDE.md` for key-name-only storage inspection.
+- Use `docs/STAGED_BACKUP_IMPORT_FIRST_RUN_EVIDENCE_CHECKLIST.md` before capturing evidence.
 
 ## 4. Flow A: Baseline Setup With No Backup
 
@@ -72,6 +73,7 @@ Safe evidence to capture:
 - Safe summary that no backup was selected.
 - Safe summary that recovery confirmation appeared before durable setup completion.
 - Safe summary of unlock-after-restart result.
+- Follow `docs/STAGED_BACKUP_IMPORT_FIRST_RUN_EVIDENCE_CHECKLIST.md`.
 
 Notes:
 
@@ -122,6 +124,7 @@ Safe evidence to capture:
 - Safe UI wording summary.
 - Safe storage key-presence summary without values.
 - Whether recovery confirmation remained required.
+- Follow `docs/STAGED_BACKUP_IMPORT_FIRST_RUN_EVIDENCE_CHECKLIST.md`.
 
 Notes:
 

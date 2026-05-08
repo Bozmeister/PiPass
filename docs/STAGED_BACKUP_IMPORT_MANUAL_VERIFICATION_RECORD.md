@@ -8,6 +8,8 @@ Use `docs/STAGED_BACKUP_IMPORT_FIRST_MANUAL_RUN.md` to execute and record the fi
 
 Use `docs/STAGED_BACKUP_IMPORT_STORAGE_INSPECTION_GUIDE.md` for key-name-only storage inspection. Do not record storage values.
 
+Use `docs/STAGED_BACKUP_IMPORT_FIRST_RUN_EVIDENCE_CHECKLIST.md` before capturing evidence for Flow A or Flow B.
+
 This record is documentation only. It does not change runtime code, tests, UI, storage writes, setup flow, recovery confirmation, crypto/KDF behavior, server code, routes, schemas, password rotation, profile changes, vault formats, package files, or TypeScript config.
 
 Manual UI/device verification has not been executed in this record. Prompt 087 records the current automated baseline only. Do not treat this feature as manually release-verified until manual checks are run and recorded.
