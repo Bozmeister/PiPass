@@ -74,6 +74,7 @@ interface VaultScreenProps {
   onLock: () => void;
   onIterationsChange: (iterations: number) => void;
   onReset: () => void;
+  reloadKey?: number;
 }
 
 function deriveVisualSeedFromHkdf(shares: KeyShares): { seedNumber: number; fingerprint: string; fractalParams: FractalParams } {
@@ -84,7 +85,7 @@ function deriveVisualSeedFromHkdf(shares: KeyShares): { seedNumber: number; fing
   return result;
 }
 
-export default function VaultScreen({ keyShares, iterations, locked = false, onLock, onIterationsChange, onReset }: VaultScreenProps) {
+export default function VaultScreen({ keyShares, iterations, locked = false, onLock, onIterationsChange, onReset, reloadKey }: VaultScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   // T002 — fractal reads from this so it shifts color/glow whenever
@@ -162,6 +163,23 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   useEffect(() => {
     verifyFractalFingerprint(fractalFingerprint);
   }, []);
+
+  // Stage 2A: signal from HomeScreen that a remote restore just wrote new
+  // entries and notes to local storage. Reload both lists so the vault
+  // reflects the restored data without requiring a full remount.
+  // Skipped on the initial render (reloadKey === 0 or undefined).
+  useEffect(() => {
+    if (!reloadKey) return;
+    (async () => {
+      try {
+        const [stored, notes] = await Promise.all([getAllEntries(), getAllSecureNotes()]);
+        setEntries(stored);
+        setSecureNotes(notes);
+      } catch {
+        // Silent: non-fatal; the user can pull-to-refresh or wait for next focus.
+      }
+    })();
+  }, [reloadKey]);
 
   function buildFingerprintRecord(fp: string): FractalFingerprintRecord {
     return { fingerprint: fp, iterations, kdf: "argon2id", version: 1 };

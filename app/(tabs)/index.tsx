@@ -39,6 +39,7 @@ import {
 } from "../../crypto/recoveryKey";
 import RecoveryKeyModal from "../../components/RecoveryKeyModal";
 import NuclearResetModal from "../../components/NuclearResetModal";
+import { restoreVaultFromRemote } from "../../lib/vaultSync";
 
 export default function HomeScreen() {
   const [authenticated, setAuthenticated] = useState(false);
@@ -51,6 +52,7 @@ export default function HomeScreen() {
   const [pendingRecoveryRawHex, setPendingRecoveryRawHex] = useState<string>("");
   const [pendingSetupShares, setPendingSetupShares] = useState<KeyShares | null>(null);
   const [vaultLocked, setVaultLocked] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [showUnlockNuclearReset, setShowUnlockNuclearReset] = useState(false);
   const lockedSharesRef = useRef<KeyShares | null>(null);
   const keySharesRef = useRef<KeyShares | null>(null);
@@ -222,6 +224,7 @@ export default function HomeScreen() {
           iterations={iterations}
           onUnlocked={(shares) => setKeyShares(shares)}
           onRequestNuclearReset={() => setShowUnlockNuclearReset(true)}
+          onRestore={() => setReloadKey((k) => k + 1)}
         />
         <NuclearResetModal
           visible={showUnlockNuclearReset}
@@ -255,6 +258,7 @@ export default function HomeScreen() {
           keyShares={keyShares}
           iterations={iterations}
           locked={vaultLocked}
+          reloadKey={reloadKey}
           onLock={() => {
             if (keyShares) {
               lockedSharesRef.current = keyShares;
@@ -325,11 +329,12 @@ export default function HomeScreen() {
   );
 }
 
-function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
+function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset, onRestore }: {
   salt: string;
   iterations: number;
   onUnlocked: (shares: KeyShares) => void;
   onRequestNuclearReset: () => void;
+  onRestore?: () => void;
 }) {
   const insets = useSafeAreaInsets();
   const [password, setPassword] = useState("");
@@ -375,6 +380,11 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
             const data = await res.json() as { id?: string };
             if (data?.id) {
               await setCredentials({ userId: data.id, authHash: keyHash });
+              // Stage 2A: best-effort restore for empty local vault.
+              // shares is still valid here (wipeShares only runs on lock/reset).
+              // Returns true only when entries were actually written to storage.
+              const restored = await restoreVaultFromRemote(shares);
+              if (restored) onRestore?.();
             }
           }
         } catch {

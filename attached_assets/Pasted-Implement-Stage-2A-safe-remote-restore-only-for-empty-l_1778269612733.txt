@@ -1,0 +1,78 @@
+Implement Stage 2A: safe remote restore only for empty local vaults.
+
+Context:
+Stage 1 upload-only sync is now implemented and audited.
+The encrypted vault blob is confirmed reaching Neon.
+Do not implement full two-way merge yet.
+Do not overwrite an existing local vault from remote data.
+
+Goal:
+Allow PiPass to restore an encrypted remote vault blob from Neon only when the local vault is empty or newly initialized and after local unlock credentials are valid.
+
+Required behaviour:
+
+1. After successful local unlock and successful backend login, call GET /api/vault/fetch using authedApiRequest.
+2. If the response has no encryptedBlob or version <= 0, do nothing.
+3. If local vault already contains entries or secure notes, do not import or overwrite anything.
+4. If local vault is empty:
+
+   * decrypt the remote encryptedBlob using the same blob key strategy used by lib/vaultSync.ts
+   * validate the decrypted payload shape before writing anything
+   * restore entries and notes locally only after full validation succeeds
+   * write local entries/notes using existing storage helpers
+   * update any local shared vault blob/version metadata if already supported
+5. If decryption fails, validation fails, or payload is malformed:
+
+   * do not modify local vault
+   * show or log only a safe non-secret warning
+6. If backend is unreachable, credentials are missing, device is untrusted, or auth fails:
+
+   * do not block local unlock
+   * do not wipe local credentials except where existing auth helper already does so
+7. Do not perform merge/conflict resolution.
+8. Do not compare individual entry timestamps.
+9. Do not delete local data.
+10. Do not import remote data over non-empty local data.
+
+Version handling:
+
+* Preserve the server version locally if a safe local metadata field already exists.
+* If no local metadata exists, do not invent a new schema unless absolutely necessary.
+* Do not use Date.now() milliseconds for vault version.
+
+Tests / verification:
+
+* Remote blob exists + empty local vault → restores successfully.
+* Remote blob exists + non-empty local vault → does nothing.
+* Malformed blob → no local writes.
+* Wrong key/password → no local writes.
+* Backend offline → unlock still succeeds.
+* Untrusted device / 403 → unlock still succeeds.
+* No secrets logged.
+* App compiles.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats except for validation of existing payload.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify server code unless a tiny compatibility bug is proven.
+* Do NOT modify database schema.
+* Do NOT implement full two-way merge.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT make cloud restore required for local unlock.
+* Do NOT log encryptedBlob, authHash, passwords, salts, recovery keys, headers, or key material.
+
+Output:
+
+* Files changed
+* Exact restore behaviour added
+* Payload validation rules
+* Safety conditions that prevent restore
+* Manual test steps
+* Whether Stage 2B conflict-aware merge is safe to consider later

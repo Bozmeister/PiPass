@@ -1,9 +1,10 @@
 import { getCredentials } from "./credentials";
 import { authedApiRequest } from "./query-client";
-import { getAllEntries, getAllSecureNotes } from "../workers/storageWorker";
-import { encryptData } from "../crypto/encryption";
+import { getAllEntries, getAllSecureNotes, saveEntry, saveSecureNote } from "../workers/storageWorker";
+import { encryptData, decryptData } from "../crypto/encryption";
 import { combineShares, hexToBytes, wipeBuffer, KeyShares } from "../crypto/secureMemory";
 import { deriveSubkey } from "../crypto/hkdf";
+import { VaultEntry, SecureNote } from "../workers/vaultWorker";
 
 // Fixed salt for deterministic blob-key derivation.
 // 32 zero-bytes in hex — same pattern used by the fractal seed (hkdf.ts:HKDF_SALT_V1 uses
@@ -11,6 +12,156 @@ import { deriveSubkey } from "../crypto/hkdf";
 // storing any extra metadata).
 const BLOB_SUBKEY_SALT = "00".repeat(32); // 64 hex chars = 32 bytes
 const BLOB_SUBKEY_INFO = "vault-blob-sync-v1";
+
+// ---------------------------------------------------------------------------
+// Payload validation helpers (used by restoreVaultFromRemote)
+// ---------------------------------------------------------------------------
+
+function isValidVaultEntry(v: unknown): v is VaultEntry {
+  if (!v || typeof v !== "object") return false;
+  const e = v as Record<string, unknown>;
+  return (
+    typeof e.id === "string" && e.id.length > 0 &&
+    typeof e.encryptedPassword === "string" && e.encryptedPassword.length > 0 &&
+    typeof e.salt === "string" && e.salt.length > 0 &&
+    typeof e.createdAt === "number" &&
+    typeof e.updatedAt === "number"
+  );
+}
+
+function isValidSecureNote(v: unknown): v is SecureNote {
+  if (!v || typeof v !== "object") return false;
+  const n = v as Record<string, unknown>;
+  return (
+    typeof n.id === "string" && n.id.length > 0 &&
+    typeof n.encryptedContent === "string" && n.encryptedContent.length > 0 &&
+    typeof n.salt === "string" && n.salt.length > 0 &&
+    typeof n.createdAt === "number" &&
+    typeof n.updatedAt === "number"
+  );
+}
+
+function isValidRestorePayload(
+  v: unknown
+): v is { entries: VaultEntry[]; secureNotes: SecureNote[] } {
+  if (!v || typeof v !== "object") return false;
+  const p = v as Record<string, unknown>;
+  return (
+    Array.isArray(p.entries) &&
+    Array.isArray(p.secureNotes) &&
+    (p.entries as unknown[]).every(isValidVaultEntry) &&
+    (p.secureNotes as unknown[]).every(isValidSecureNote)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2A: restore from remote for empty local vaults
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches the encrypted vault blob from the backend and restores it locally,
+ * but ONLY when the local vault is completely empty (no entries, no notes).
+ *
+ * Safety guarantees:
+ *  - Best-effort only: any error is caught and returns false.
+ *  - Never touches local storage if local vault has any entries or notes.
+ *  - Double-checks emptiness before writing (race guard).
+ *  - Decryption failure → no local writes, non-secret warning in __DEV__.
+ *  - Payload validation failure → no local writes.
+ *  - No secret material (blobKey, encryptedBlob contents) is ever logged.
+ *  - blobKey is always wiped in the finally block regardless of outcome.
+ *  - Does not block the caller; caller decides whether to signal a UI reload.
+ *
+ * Returns true if entries/notes were actually written to local storage.
+ */
+export async function restoreVaultFromRemote(keyShares: KeyShares): Promise<boolean> {
+  // Derive blob subkey synchronously before any await — same strategy as
+  // syncVaultToBackend. Master key bytes exist only in this stack frame.
+  const masterKeyHex = combineShares(keyShares);
+  const blobKey = deriveSubkey(masterKeyHex, BLOB_SUBKEY_INFO, BLOB_SUBKEY_SALT);
+  const masterKeyBytes = hexToBytes(masterKeyHex);
+  wipeBuffer(masterKeyBytes);
+
+  // blobKey is the only remaining sensitive local — always wiped in finally.
+  try {
+    const creds = await getCredentials();
+    if (!creds) return false;
+
+    // Guard 1: never overwrite a non-empty local vault.
+    const [existingEntries, existingNotes] = await Promise.all([
+      getAllEntries(),
+      getAllSecureNotes(),
+    ]);
+    if (existingEntries.length > 0 || existingNotes.length > 0) return false;
+
+    // Fetch encrypted blob from server.
+    const res = await authedApiRequest("GET", "/api/vault/fetch");
+    const raw = await res.json() as Record<string, unknown>;
+
+    if (
+      typeof raw?.encryptedBlob !== "string" ||
+      !raw.encryptedBlob ||
+      typeof raw?.version !== "number" ||
+      (raw.version as number) <= 0
+    ) {
+      return false;
+    }
+
+    // Decrypt — wrong key or corrupted blob throws; we return false.
+    let decryptedJson: string;
+    try {
+      decryptedJson = decryptData(raw.encryptedBlob as string, blobKey);
+    } catch {
+      if (__DEV__) console.warn("[restoreVault] decryption failed — wrong key or corrupted blob, no local changes");
+      return false;
+    }
+
+    // Parse JSON.
+    let payload: unknown;
+    try {
+      payload = JSON.parse(decryptedJson);
+    } catch {
+      if (__DEV__) console.warn("[restoreVault] blob JSON malformed — no local changes");
+      return false;
+    }
+
+    // Validate payload shape before touching storage.
+    if (!isValidRestorePayload(payload)) {
+      if (__DEV__) console.warn("[restoreVault] blob payload shape invalid — no local changes");
+      return false;
+    }
+
+    // Guard 2: re-check emptiness before any write (race between this async
+    // path and a manual entry add that could happen in the tiny window above).
+    const [checkEntries, checkNotes] = await Promise.all([
+      getAllEntries(),
+      getAllSecureNotes(),
+    ]);
+    if (checkEntries.length > 0 || checkNotes.length > 0) return false;
+
+    // Write validated entries and notes to local storage.
+    const { entries, secureNotes } = payload;
+    for (const entry of entries) {
+      await saveEntry(entry);
+    }
+    for (const note of secureNotes) {
+      await saveSecureNote(note);
+    }
+
+    return true;
+  } catch {
+    // Network errors, 401 (authedApiRequest already cleared creds), 403
+    // (untrusted device), or any unexpected exception — local vault untouched.
+    return false;
+  } finally {
+    const blobKeyBytes = hexToBytes(blobKey);
+    wipeBuffer(blobKeyBytes);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Upload sync
+// ---------------------------------------------------------------------------
 
 /**
  * Builds a fully encrypted vault blob from the current local vault state and
