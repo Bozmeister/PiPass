@@ -14,7 +14,7 @@ Manual UI/device verification has not been executed in this record. Prompt 087 r
 
 - Verification date: 2026-05-08
 - Tester: TODO
-- Branch or commit: `docs/prompt-087-record-automated-verification-baseline` / `2aeb696`
+- Branch or commit: `docs/prompt-089-record-first-manual-run` / `efd4c9a`
 - Platform: TODO
 - Build type: TODO
 - Test data source: TODO
@@ -28,12 +28,28 @@ Manual UI/device verification has not been executed in this record. Prompt 087 r
 
 These are automated checks only. They do not replace manual local UI/device verification from `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION.md`. Release readiness is not claimed until manual verification is executed and recorded.
 
-## 3. Baseline Setup With No Backup
+## 3. Flow A: Baseline Setup With No Backup
+
+Do not record passwords, recovery keys, master keys, key shares, salts, hashes, KDF metadata JSON, device UUIDs, install ids, auth/session values, ciphertext blobs, raw backup contents, plaintext record contents, or screenshots containing secrets.
+
+Fixture label:
+
+- `no-backup`
+
+Platform:
+
+- TODO
+
+Branch or commit:
+
+- `docs/prompt-089-record-first-manual-run` / `efd4c9a`
 
 Preconditions:
 
 - Clean uninitialized local state.
 - No backup selected.
+- Safe way to restart the app after setup.
+- Safe notes location available for non-secret observations.
 
 Steps performed:
 
@@ -41,28 +57,50 @@ Steps performed:
 
 Expected result:
 
-- First-time setup reaches recovery key confirmation.
-- Durable setup state is written only after recovery confirmation.
-- Vault initializes normally.
+- First-time setup works without selecting a backup.
+- Recovery key confirmation remains the durable setup boundary.
 - No staged backup import wording appears.
+- No imported, restored, or added wording appears.
+- Vault initializes normally after recovery confirmation.
+- Normal unlock after restart is expected.
 
 Actual result:
 
 - Not yet manually verified.
 
+Evidence captured:
+
+- None yet.
+
 Status: Not run
 
 Notes:
 
-- Manual execution required.
+- Manual execution required using `docs/STAGED_BACKUP_IMPORT_FIRST_MANUAL_RUN.md`.
 
-## 4. Backup Selection Remains Staged-Only
+## 4. Flow B: Backup Selection Remains Staged-Only
+
+Do not record passwords, recovery keys, master keys, key shares, salts, hashes, KDF metadata JSON, device UUIDs, install ids, auth/session values, ciphertext blobs, raw backup contents, plaintext record contents, or screenshots containing secrets.
+
+Fixture label:
+
+- `same-install-valid-minimal`
+
+Platform:
+
+- TODO
+
+Branch or commit:
+
+- `docs/prompt-089-record-first-manual-run` / `efd4c9a`
 
 Preconditions:
 
 - Clean uninitialized local state.
 - Fake supported backup fixture is available.
-- Safe storage inspection method is available.
+- Fixture is identified only by the safe label above.
+- Safe storage inspection method or dev harness is available and does not print raw values.
+- Tester can stop before recovery confirmation.
 
 Steps performed:
 
@@ -70,19 +108,25 @@ Steps performed:
 
 Expected result:
 
-- Backup selection shows checked, staged, selected, preflight, or ready-for-commit wording only.
-- Before recovery confirmation, no entry records, secure note records, vault index, notes index, shared vault blob, cached master key, or initialized marker are written.
-- UI shows counts only and does not expose backup contents or metadata.
+- Selecting/checking a fake backup shows checked, staged, selected, preflight, or equivalent non-durable wording only.
+- No record contents are shown.
+- No staged records, notes, indexes, shared vault blob, cached master key, or initialized marker are written before recovery confirmation.
+- Recovery confirmation remains required before any durable setup/import commit.
+- No imported, restored, or added success wording appears before durable success.
 
 Actual result:
 
 - Not yet manually verified.
 
+Evidence captured:
+
+- None yet.
+
 Status: Not run
 
 Notes:
 
-- Manual execution required.
+- Manual execution required using `docs/STAGED_BACKUP_IMPORT_FIRST_MANUAL_RUN.md`.
 
 ## 5. Unsupported Or Ineligible Backup
 
