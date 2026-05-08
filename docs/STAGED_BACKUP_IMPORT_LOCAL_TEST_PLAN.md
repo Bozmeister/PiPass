@@ -30,6 +30,8 @@ This plan is documentation only. It does not change runtime code, tests, UI, sto
 
 Use this order for the first human verification pass. Record results in `docs/STAGED_BACKUP_IMPORT_MANUAL_VERIFICATION_RECORD.md`.
 
+For the first two safest manual flows only, use `docs/STAGED_BACKUP_IMPORT_FIRST_MANUAL_RUN.md`.
+
 ### 1. Automated baseline
 
 Run:
