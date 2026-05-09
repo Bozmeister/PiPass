@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { 
   View, Text, FlatList, Pressable, Alert, Platform, 
-  ActivityIndicator, AppState, Modal, Switch, TextInput 
+  ActivityIndicator, AppState, Modal, Switch, TextInput,
+  KeyboardAvoidingView,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -57,6 +58,7 @@ import KeyprintViewer from "../components/KeyprintViewer";
 import FaviconImage from "../components/FaviconImage";
 import NuclearResetModal from "../components/NuclearResetModal";
 import FractalBackground from "../components/FractalBackground";
+import ThemedToast from "../components/ThemedToast";
 import { useSecurityState } from "../context/SecurityContext";
 
 const AUTO_LOCK_MS = 120000;
@@ -113,6 +115,11 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   const [pendingProfileIterations, setPendingProfileIterations] = useState<number | null>(null);
   const [profilePassword, setProfilePassword] = useState("");
   const [profilePasswordFocused, setProfilePasswordFocused] = useState(false);
+  const [showProfilePassword, setShowProfilePassword] = useState(false);
+  const [toast, setToast] = useState<{ message: string; key: number } | null>(null);
+  function showToast(message: string) {
+    setToast({ message, key: Date.now() });
+  }
   const [showNuclearReset, setShowNuclearReset] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -476,6 +483,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     const stored = await getAllEntries();
     setEntries(stored);
     setShowAddModal(false);
+    showToast("Entry saved");
   }
 
   async function handleSelectEntry(entry: VaultEntry) {
@@ -541,6 +549,15 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   function handleRequestDelete(entryId: string) {
     const target = entries.find(e => e.id === entryId);
     if (!target) return;
+
+    // Close the EntryDetailModal BEFORE the confirm Alert + biometric +
+    // DeleteEntryModal sequence runs. iOS only renders one <Modal> at a
+    // time; leaving the detail modal mounted while opening the delete
+    // modal causes the detail modal to flash back into view between
+    // animations (the "shows the entry then locks" symptom). Clearing
+    // selectedEntry here keeps the modal stack to a single layer.
+    setSelectedEntry(null);
+    setDecryptedEntry(null);
 
     Alert.alert(
       "Delete entry?",
@@ -642,9 +659,30 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       const salt = await getMasterSalt();
       if (!salt) throw new Error("No salt found");
 
-      // Step 1: Derive the new master key from the supplied password +
-      // existing salt + new iterations. A wrong password is detected in
-      // step 2 when the re-encrypt attempt fails MAC verification.
+      // Step 0: VERIFY the supplied password against the stored master
+      // key hash BEFORE doing any re-encryption. reEncryptEntry decrypts
+      // with oldShares (always valid since the vault is unlocked) and
+      // re-encrypts with newShares — meaning a wrong password would NOT
+      // throw during re-encryption; it would silently commit a new key
+      // hash derived from the wrong password and lock the user out. The
+      // verify step here closes that hole and produces a clear error
+      // for the user instead of a silent lockout.
+      const storedHash = await getMasterKeyHash();
+      if (!storedHash) throw new Error("No stored key hash");
+      const verifyShares = await deriveMasterKeyShares(profilePassword, salt, iterations);
+      const verifyKeyHex = combineShares(verifyShares);
+      const verifyHash = hashMasterKey(verifyKeyHex);
+      const verifyKeyBytes = hexToBytes(verifyKeyHex);
+      wipeBuffer(verifyKeyBytes);
+      wipeShares(verifyShares);
+      if (verifyHash !== storedHash) {
+        setMigrating(false);
+        Alert.alert("Incorrect password", "The master password you entered is incorrect. No settings were changed.");
+        return;
+      }
+
+      // Step 1: Derive the new master key from the (now-verified)
+      // password + existing salt + new iterations.
       const newShares = await deriveMasterKeyShares(profilePassword, salt, pendingProfileIterations);
       const newKeyHex = combineShares(newShares);
       const newKeyHash = hashMasterKey(newKeyHex);
@@ -705,10 +743,8 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       const count = reEncryptedEntries.length;
       setPendingProfileIterations(null);
       setProfilePassword("");
-      Alert.alert(
-        "Profile Updated",
-        `Now using ${label} profile. ${count} ${count === 1 ? "entry" : "entries"} re-encrypted.`
-      );
+      setShowProfilePassword(false);
+      showToast(`${label} profile active · ${count} ${count === 1 ? "entry" : "entries"} re-encrypted`);
     } catch (err) {
       Alert.alert("Migration Failed", "Incorrect password or migration error. No settings were changed.");
     }
@@ -922,9 +958,18 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
                 hitSlop={16}
                 accessibilityRole="button"
                 accessibilityLabel="Close settings"
-                style={{ padding: 6, borderRadius: 18, backgroundColor: "#1f1f1f" }}
+                testID="settings-done-button"
+                style={({ pressed }) => ({
+                  flexDirection: "row",
+                  alignItems: "center",
+                  paddingVertical: 8,
+                  paddingHorizontal: 14,
+                  borderRadius: 20,
+                  backgroundColor: pressed ? "#3a8f43" : "#4CAF50",
+                })}
               >
-                <Ionicons name="close" size={26} color="#fff" />
+                <Ionicons name="checkmark" size={18} color="#fff" style={{ marginRight: 4 }} />
+                <Text style={{ color: "#fff", fontSize: 15, fontWeight: "700" as const }}>Done</Text>
               </Pressable>
             </View>
 
@@ -997,53 +1042,82 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       </Modal>
 
       <Modal visible={pendingProfileIterations !== null} animationType="fade" transparent>
-        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.9)", justifyContent: "center", alignItems: "center", padding: 24 }}>
-          <View style={{ backgroundColor: "#111", borderRadius: 16, padding: 24, width: "100%", maxWidth: 400 }}>
-            <Text style={{ color: "#fff", fontSize: 20, fontWeight: "bold" as const, marginBottom: 8 }}>
-              Confirm Password
-            </Text>
-            <Text style={{ color: "#aaa", fontSize: 14, marginBottom: 20 }}>
-              Enter your master password to change the security profile. Your key will be re-derived with the new settings.
-            </Text>
-            <TextInput
-              value={profilePassword}
-              onChangeText={setProfilePassword}
-              placeholder="Master password"
-              placeholderTextColor={INPUT_PLACEHOLDER}
-              secureTextEntry
-              autoCapitalize="none"
-              autoCorrect={false}
-              autoComplete="off"
-              textContentType="none"
-              onFocus={() => setProfilePasswordFocused(true)}
-              onBlur={() => setProfilePasswordFocused(false)}
-              style={{ color: INPUT_TEXT, fontSize: 16, padding: 14, backgroundColor: INPUT_BG, borderRadius: 8, borderWidth: 1, borderColor: profilePasswordFocused ? INPUT_BORDER_FOCUS : INPUT_BORDER, marginBottom: 16 }}
-              testID="profile-password-input"
-            />
-            {migrating && (
-              <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 16 }}>
-                <ActivityIndicator color="#4CAF50" />
-                <Text style={{ color: "#aaa", marginLeft: 12, fontSize: 14 }}>Re-deriving key...</Text>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          keyboardVerticalOffset={0}
+        >
+          <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.9)", justifyContent: "center", alignItems: "center", padding: 24 }}>
+            <View style={{ backgroundColor: "#111", borderRadius: 16, padding: 24, width: "100%", maxWidth: 400 }}>
+              <Text style={{ color: "#fff", fontSize: 20, fontWeight: "bold" as const, marginBottom: 8 }}>
+                Confirm Password
+              </Text>
+              <Text style={{ color: "#aaa", fontSize: 14, marginBottom: 20 }}>
+                Enter your master password to change the security profile. Your key will be re-derived with the new settings.
+              </Text>
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  backgroundColor: INPUT_BG,
+                  borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: profilePasswordFocused ? INPUT_BORDER_FOCUS : INPUT_BORDER,
+                  marginBottom: 16,
+                  paddingRight: 6,
+                }}
+              >
+                <TextInput
+                  value={profilePassword}
+                  onChangeText={setProfilePassword}
+                  placeholder="Master password"
+                  placeholderTextColor={INPUT_PLACEHOLDER}
+                  secureTextEntry={!showProfilePassword}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  autoComplete="off"
+                  textContentType="none"
+                  onFocus={() => setProfilePasswordFocused(true)}
+                  onBlur={() => setProfilePasswordFocused(false)}
+                  style={{ flex: 1, color: INPUT_TEXT, fontSize: 16, padding: 14 }}
+                  testID="profile-password-input"
+                />
+                <Pressable
+                  onPress={() => setShowProfilePassword(v => !v)}
+                  hitSlop={10}
+                  accessibilityRole="button"
+                  accessibilityLabel={showProfilePassword ? "Hide password" : "Show password"}
+                  style={{ padding: 8 }}
+                  testID="profile-password-toggle"
+                >
+                  <Ionicons name={showProfilePassword ? "eye-off-outline" : "eye-outline"} size={20} color="#888" />
+                </Pressable>
               </View>
-            )}
-            <View style={{ flexDirection: "row", gap: 12 }}>
-              <Pressable
-                onPress={() => { setPendingProfileIterations(null); setProfilePassword(""); }}
-                disabled={migrating}
-                style={{ flex: 1, padding: 14, borderRadius: 8, backgroundColor: "#1a1a1a", alignItems: "center" }}
-              >
-                <Text style={{ color: "#aaa", fontSize: 16 }}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                onPress={confirmProfileChange}
-                disabled={!profilePassword.trim() || migrating}
-                style={{ flex: 1, padding: 14, borderRadius: 8, backgroundColor: profilePassword.trim() && !migrating ? "#4CAF50" : "#333", alignItems: "center" }}
-              >
-                <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" as const }}>Confirm</Text>
-              </Pressable>
+              {migrating && (
+                <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 16 }}>
+                  <ActivityIndicator color="#4CAF50" />
+                  <Text style={{ color: "#aaa", marginLeft: 12, fontSize: 14 }}>Re-deriving key...</Text>
+                </View>
+              )}
+              <View style={{ flexDirection: "row", gap: 12 }}>
+                <Pressable
+                  onPress={() => { setPendingProfileIterations(null); setProfilePassword(""); setShowProfilePassword(false); }}
+                  disabled={migrating}
+                  style={{ flex: 1, padding: 14, borderRadius: 8, backgroundColor: "#1a1a1a", alignItems: "center" }}
+                >
+                  <Text style={{ color: "#aaa", fontSize: 16 }}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={confirmProfileChange}
+                  disabled={!profilePassword.trim() || migrating}
+                  style={{ flex: 1, padding: 14, borderRadius: 8, backgroundColor: profilePassword.trim() && !migrating ? "#4CAF50" : "#333", alignItems: "center" }}
+                >
+                  <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" as const }}>Confirm</Text>
+                </Pressable>
+              </View>
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       <NuclearResetModal
@@ -1053,6 +1127,15 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         verifyPassword={verifyPasswordForReset}
         requireBiometric={requireFreshBiometric}
       />
+
+      {toast && (
+        <ThemedToast
+          key={toast.key}
+          visible={true}
+          message={toast.message}
+          onHide={() => setToast(null)}
+        />
+      )}
 
       {showUndoSnackbar && (
         <View

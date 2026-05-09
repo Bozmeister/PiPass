@@ -62,12 +62,8 @@ export default function AddEntryModal({ visible, onClose, onSave, onActivity }: 
       setUrl("");
       setNotes("");
       setShowGenerated(false);
-
-      if (Platform.OS === "web") {
-        alert("Entry Saved");
-      } else {
-        Alert.alert("Success", "Entry Saved");
-      }
+      // Success confirmation is shown by the parent (themed toast) after
+      // the modal dismisses — no native Alert here.
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       if (Platform.OS === "web") {

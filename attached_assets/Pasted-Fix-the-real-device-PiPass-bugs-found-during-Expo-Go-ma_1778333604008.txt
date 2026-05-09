@@ -1,0 +1,147 @@
+Fix the real-device PiPass bugs found during Expo Go manual testing. Do not add unrelated features.
+
+Context:
+Manual Expo Go testing produced these results:
+
+Passed:
+
+* Lock → unlock works.
+* Create decoy entry now works.
+* Security & Devices refresh works.
+* Add fake vault entry works.
+* Add/delete secure note works.
+
+Bugs / issues still present:
+
+1. Settings screen still has no visible way back to the main vault.
+   Current behaviour:
+
+* User taps gear/cog to open settings.
+* No visible Back / Close / Done button appears.
+* User must press “Lock Vault Now” or “Nuclear Reset” to leave settings.
+  Expected:
+* Add a clearly visible close/back button that returns to the main vault without locking, resetting, or changing state.
+* It must be visible on iPhone dark theme and have a sensible tap target.
+
+2. Security profile change prompt has UI and logic problems.
+   Current behaviour:
+
+* In settings, tapping Fortress prompts for master password.
+* iPhone keyboard obstructs the password input.
+* There is no show/hide password icon.
+* After entering the correct master password and confirming, message says “Re-deriving key…”
+* Then error appears:
+  “Migration Failed. Incorrect password or migration error. No settings were changed.”
+  Expected:
+* Password prompt should be keyboard-safe on iPhone.
+* Add show/hide password toggle if consistent with existing app style.
+* Correct master password should pass verification.
+* Security profile migration should only fail for a genuinely wrong password or real migration error.
+* Do not change crypto parameters or profile definitions.
+* Do not weaken password verification.
+* Do not update profile metadata unless re-encryption fully succeeds.
+
+3. Vault entry delete flow is broken and serious.
+   Current behaviour:
+
+* User taps three white dots on a vault entry.
+* Taps delete entry.
+* Enters iPhone PIN / biometric confirmation.
+* Confirms DELETE.
+* Instead of deleting, the app shows the entry and then the vault locks.
+  Expected:
+* Delete flow should:
+
+  * show the existing confirmation flow
+  * require biometric/PIN if currently designed
+  * require typing DELETE if currently designed
+  * delete only after confirmation
+  * show undo window if currently designed
+  * not open the entry detail screen
+  * not lock the vault unexpectedly
+* If auto-lock fires during delete flow, it must not corrupt deletion state.
+* Do not bypass existing delete safeguards.
+
+4. Native alert popups look ugly and inconsistent.
+   Current behaviour:
+
+* Decoy created popup uses default native Alert styling.
+* New vault entry success popup also uses default native Alert styling.
+* It looks like an old Windows-style message and does not match PiPass.
+  Expected:
+* Replace only success/info popups used by:
+
+  * decoy created
+  * new vault entry created
+  * similar non-critical success messages if nearby and safe
+* Use a PiPass-themed rounded rectangle message/toast/modal:
+
+  * dark translucent background
+  * rounded corners
+  * readable text
+  * around 70–85% opacity or theme-consistent transparency
+  * should fit current dark/fractal theme
+  * should not block important security confirmations unless intentionally modal
+* Do not replace destructive confirmations or security-critical prompts unless necessary.
+* Keep destructive confirmations clear and explicit.
+
+Important deferred feature:
+Do NOT implement vault search or sorting in this prompt.
+
+Tasks:
+
+1. Inspect the exact files involved:
+
+   * screens/VaultScreen.tsx
+   * AddEntryModal / EntryDetailModal / DeleteEntryModal if relevant
+   * settings screens
+   * security profile change flow
+   * decoy/honeytoken success UI
+   * any custom modal/toast components already available
+2. Reproduce or reason through each issue.
+3. Fix each bug with the smallest safe change.
+4. Verify delete flow cannot accidentally open entry details.
+5. Verify delete flow cannot unexpectedly trigger lock because of a modal/state bug.
+6. Verify profile migration uses the current password correctly.
+7. Verify no profile metadata changes until re-encryption succeeds.
+8. Verify settings close/back button is visible and functional on iPhone-sized layout.
+9. Replace only non-critical native success Alerts with themed PiPass UI.
+10. Run TypeScript.
+11. Run App Testing if available for:
+
+    * settings open/close
+    * profile prompt opens
+    * delete entry flow
+    * add entry success message
+    * decoy success message
+12. Do not implement unrelated features.
+
+Critical constraints:
+
+* Do NOT modify cryptography primitives.
+* Do NOT modify key derivation primitives.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic except minimal UI/control-flow wiring if needed for delete prompt correctness.
+* Do NOT modify database schema.
+* Do NOT weaken profile-change password verification.
+* Do NOT weaken delete safeguards.
+* Do NOT bypass biometric/PIN confirmation.
+* Do NOT make backend required for local vault use.
+* Do NOT implement search/sort.
+* Do NOT implement tombstones.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT log authHash, passwords, salts, recovery keys, session tokens, headers, encryptedBlob, userId, or key material.
+
+Output:
+
+* Root cause for each issue
+* Files changed
+* Exact fixes applied
+* TypeScript result
+* App testing result
+* Remaining manual retest steps
+* Confirmation that search/sort was deferred

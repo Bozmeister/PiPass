@@ -32,6 +32,7 @@ import {
 } from "../../../workers/vaultWorker";
 import { saveEntry, deleteEntry as deleteStoredEntry, getAllEntries } from "../../../workers/storageWorker";
 import { getActiveKeyShares } from "../../../lib/vaultSession";
+import ThemedToast from "../../../components/ThemedToast";
 
 // T003 + T006 + T008 — Decoy management screen.
 //
@@ -163,6 +164,7 @@ export default function HoneytokensScreen() {
   // independently. Same pattern as DeviceRow / PasskeyRow.
   const [pendingDisableId, setPendingDisableId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [toast, setToast] = useState<{ message: string; key: number } | null>(null);
 
   const honeytokens = honeytokensQ.data?.honeytokens ?? [];
   const activeCount = honeytokens.filter((h) => h.active).length;
@@ -227,10 +229,7 @@ export default function HoneytokensScreen() {
       await saveEntry(encrypted);
 
       await qc.invalidateQueries({ queryKey: QK_HONEYTOKENS });
-      Alert.alert(
-        "Decoy created",
-        `"${tpl.label}" is now in your vault. It looks like a normal entry — touching it raises a quiet security alert.`,
-      );
+      setToast({ message: `Decoy "${tpl.label}" added to vault`, key: Date.now() });
     } catch (err) {
       // T002 §"If vault save fails, disable/delete the honeytoken
       // metadata if possible". registeredId is non-null only after
@@ -374,6 +373,10 @@ export default function HoneytokensScreen() {
 
   // Web-only top inset — same pattern as the security dashboard.
   const topPadding = Platform.OS === "web" ? Math.max(insets.top, 67) : insets.top;
+
+  // Toast state is rendered at the screen root below — only used for
+  // non-critical success confirmations (decoy added). Errors and
+  // destructive confirmations still use Alert.alert.
   const bottomPadding = Platform.OS === "web" ? Math.max(insets.bottom, 34) : insets.bottom + 24;
 
   return (
@@ -520,6 +523,15 @@ export default function HoneytokensScreen() {
           </View>
         )}
       </ScrollView>
+
+      {toast && (
+        <ThemedToast
+          key={toast.key}
+          visible={true}
+          message={toast.message}
+          onHide={() => setToast(null)}
+        />
+      )}
     </View>
   );
 }
