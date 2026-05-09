@@ -19,9 +19,23 @@ interface SecureNotesModalProps {
   onClose: () => void;
   onNotesChanged: () => void;
   onActivity: () => void;
+  // Suppresses the parent's AppState=inactive auto-lock while a
+  // biometric prompt is on screen. Without this, iOS sends the app
+  // to "inactive" during the prompt, the vault locks, this modal
+  // unmounts, and the user gets sent back to the unlock screen and
+  // loses the selected note. Mirrors VaultScreen.handleSelectEntry.
+  onBiometricActiveChange?: (active: boolean) => void;
+  // Reads the parent's "last user activity" timestamp (ms epoch).
+  // If the user was active within RECENT_ACTIVITY_MS, the per-note
+  // biometric prompt is skipped — the vault is already unlocked
+  // and the user is demonstrably present, so requiring a second
+  // gate is friction without security benefit.
+  getLastActivityMs?: () => number;
 }
 
-export default function SecureNotesModal({ visible, notes, keyShares, onClose, onNotesChanged, onActivity }: SecureNotesModalProps) {
+const RECENT_ACTIVITY_MS = 30000;
+
+export default function SecureNotesModal({ visible, notes, keyShares, onClose, onNotesChanged, onActivity, onBiometricActiveChange, getLastActivityMs }: SecureNotesModalProps) {
   const insets = useSafeAreaInsets();
   const [view, setView] = useState<"list" | "add" | "detail">("list");
   const [label, setLabel] = useState("");
@@ -63,7 +77,13 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
     if (!label.trim() || !content.trim() || !keyShares || saving) return;
     setSaving(true);
     try {
-      const bioResult = await requireFreshBiometric();
+      onBiometricActiveChange?.(true);
+      let bioResult: boolean;
+      try {
+        bioResult = await requireFreshBiometric();
+      } finally {
+        onBiometricActiveChange?.(false);
+      }
       if (!bioResult) {
         setSaving(false);
         const msg = "Authentication required to save secure notes.";
@@ -94,11 +114,35 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
     setView("detail");
 
     try {
-      const bioResult = await requireFreshBiometric();
-      if (!bioResult) {
+      // Skip biometric step-up if the user was active within the
+      // last RECENT_ACTIVITY_MS — vault is already unlocked and
+      // the user is demonstrably present. Tapping a note IS the
+      // activity registration, so this resolves true on every
+      // normal in-session note open.
+      const lastActivity = getLastActivityMs?.() ?? 0;
+      const recentlyActive = lastActivity > 0 && Date.now() - lastActivity < RECENT_ACTIVITY_MS;
+
+      if (!recentlyActive) {
+        onBiometricActiveChange?.(true);
+        let bioResult: boolean;
+        try {
+          bioResult = await requireFreshBiometric();
+        } finally {
+          onBiometricActiveChange?.(false);
+        }
+        if (!bioResult) {
+          setDecrypting(false);
+          const msg = "Authentication required to view secure notes.";
+          if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Authentication Required", msg); }
+          return;
+        }
+      }
+
+      // Re-check keyShares after the (possibly skipped) await — if
+      // the vault locked while we were prompting, abort cleanly
+      // rather than crashing in decryptSecureNote.
+      if (!keyShares) {
         setDecrypting(false);
-        const msg = "Authentication required to view secure notes.";
-        if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Authentication Required", msg); }
         return;
       }
       const decrypted = decryptSecureNote(note, keyShares);

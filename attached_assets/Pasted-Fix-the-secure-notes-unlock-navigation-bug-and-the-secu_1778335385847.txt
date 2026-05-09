@@ -1,0 +1,113 @@
+Fix the secure notes unlock/navigation bug and the security profile migration bug found during real-device testing. Also keep the previous UI/delete/settings issues in scope if not already fixed. Do not add unrelated features.
+
+Context:
+Manual Expo Go testing found new critical secure-note issues:
+
+Secure notes current broken behaviour:
+
+1. User unlocks PiPass with master password and reaches vault entries screen.
+2. User taps the secure note icon.
+3. User taps a secure note entry.
+4. App prompts for iPhone PIN/biometric.
+5. App then asks for master password again.
+6. After entering master password, app returns to the vault entries screen instead of showing the selected secure note.
+7. When user taps secure note icon again, the originally selected note appears.
+
+This is overkill and broken navigation.
+
+Expected secure-note behaviour:
+
+1. If the vault is already unlocked and the user has been active recently, do NOT ask for the master password again.
+2. Use at most one step-up gate for secure note viewing:
+
+   * either biometric/PIN if already designed,
+   * or master password only if the vault is locked/stale.
+3. Do not require both biometric/PIN and master password for the same secure note view.
+4. Do not lose the selected note after authentication.
+5. After successful authentication, show the selected secure note content immediately.
+6. Do not send the user back to the vault list after note authentication.
+7. Implement or use a recent-activity threshold:
+
+   * if user activity was within 30 seconds, secure note should open without master password re-entry.
+   * if idle exceeds 30 seconds and the design requires step-up, use one clear authentication path.
+8. Do not weaken the main vault auto-lock behaviour.
+9. Do not store plaintext note content longer than existing design already allows.
+
+Security profile bug still present:
+
+* User cannot change security profile.
+* Correct master password still results in:
+  “Re-deriving key…”
+  then:
+  “Migration Failed. Incorrect password or migration error. No settings were changed.”
+  Expected:
+* Correct password should verify successfully.
+* Profile change should re-encrypt entries/notes safely.
+* No profile metadata should change unless re-encryption fully succeeds.
+* Do not change crypto parameters/profile definitions.
+* Do not weaken password verification.
+
+Previously reported issues that may still need fixing:
+
+1. Settings screen still has no visible back/close button.
+2. Vault entry delete flow opens the entry and locks instead of deleting.
+3. Native success alerts look ugly and should be replaced only for non-critical success messages with a PiPass-themed toast/modal.
+4. Do not replace destructive/security-critical confirmations unless necessary.
+
+Tasks:
+
+1. Inspect secure note flow:
+
+   * SecureNotesModal or equivalent
+   * VaultScreen secure note state
+   * lock/auto-lock logic
+   * biometric/PIN step-up logic
+   * master password prompt logic
+   * selected note navigation state
+2. Identify why secure note selection is lost after authentication.
+3. Fix secure notes so selected note opens immediately after required authentication.
+4. Remove redundant master-password prompt when vault is already unlocked and recently active.
+5. Add or reuse a 30-second recent-activity threshold if safe and localized.
+6. Verify secure note viewing does not bypass vault lock.
+7. Inspect and fix security profile migration failure.
+8. Verify profile change uses the correct current master password and current salt/profile/key metadata.
+9. Verify profile change re-encrypts entries and notes before committing new metadata.
+10. Verify settings close/back button exists and is visible.
+11. Verify delete entry flow does not open entry details or lock unexpectedly.
+12. Replace only non-critical success Alerts with themed UI if time/scope permits; do not let this distract from secure notes/profile/delete bugs.
+13. Run TypeScript.
+14. Run App Testing if available.
+15. Do not implement search/sort.
+16. Do not implement tombstones.
+17. Do not implement password rotation.
+
+Critical constraints:
+
+* Do NOT modify cryptography primitives.
+* Do NOT modify key derivation primitives.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats.
+* Do NOT weaken master password verification.
+* Do NOT weaken biometric/PIN gates beyond removing duplicate prompts.
+* Do NOT weaken vault auto-lock.
+* Do NOT modify recovery flows.
+* Do NOT modify database schema.
+* Do NOT make backend required for local vault use.
+* Do NOT implement search/sort.
+* Do NOT implement tombstones.
+* Do NOT implement password rotation.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT log authHash, passwords, salts, recovery keys, session tokens, headers, encryptedBlob, userId, note content, or key material.
+
+Output:
+
+* Root cause of secure note double-auth/navigation bug
+* Root cause of security profile migration failure
+* Root cause of delete/settings issues if still present
+* Files changed
+* Exact fixes applied
+* TypeScript result
+* App testing result
+* Manual retest steps
+* Any issues deliberately deferred

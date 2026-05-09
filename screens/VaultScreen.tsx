@@ -654,6 +654,18 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       return;
     }
 
+    // CRITICAL: suppress the AppState=inactive auto-lock for the
+    // duration of the migration. Argon2id derivation takes 3-8s and
+    // any momentary "inactive" state during that window (keyboard
+    // dismissal, OS notification, autofill suggestion) would fire
+    // onLock, which calls setKeyShares(null) → setActiveKeyShares(null)
+    // → wipeShares(activeShares) — and `oldShares` captured here
+    // points to the SAME object. Decrypting with a zeroed key would
+    // then fail MAC verification on the first entry and surface as
+    // "Migration Failed" even though the password was correct. This
+    // is the same isBiometricActive flag handleSelectEntry uses.
+    isBiometricActive.current = true;
+
     setMigrating(true);
     try {
       const salt = await getMasterSalt();
@@ -676,6 +688,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       wipeBuffer(verifyKeyBytes);
       wipeShares(verifyShares);
       if (verifyHash !== storedHash) {
+        isBiometricActive.current = false;
         setMigrating(false);
         Alert.alert("Incorrect password", "The master password you entered is incorrect. No settings were changed.");
         return;
@@ -746,9 +759,16 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       setShowProfilePassword(false);
       showToast(`${label} profile active · ${count} ${count === 1 ? "entry" : "entries"} re-encrypted`);
     } catch (err) {
-      Alert.alert("Migration Failed", "Incorrect password or migration error. No settings were changed.");
+      // After verify passes, any failure here is a genuine migration
+      // error (re-encrypt threw, storage write failed, etc) — NOT a
+      // password problem. Surface a distinct message so the user
+      // doesn't keep retrying their (correct) password.
+      const detail = err instanceof Error && err.message ? err.message : "Unknown error.";
+      Alert.alert("Migration Failed", `Could not re-encrypt the vault. No settings were changed.\n\nDetails: ${detail}`);
+    } finally {
+      isBiometricActive.current = false;
+      setMigrating(false);
     }
-    setMigrating(false);
   }
 
   async function verifyPasswordForReset(pw: string): Promise<boolean> {
@@ -944,6 +964,8 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
           }
         }}
         onActivity={resetActivity}
+        onBiometricActiveChange={(active) => { isBiometricActive.current = active; }}
+        getLastActivityMs={() => lastActivityRef.current}
       />
 
       <KeyprintViewer visible={showKeyprintViewer} seed={visualSeed} fractalParams={fractalParams} onClose={() => setShowKeyprintViewer(false)} />
