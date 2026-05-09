@@ -1,0 +1,83 @@
+Fix the real-device PiPass UI/security bugs found during manual Expo Go testing. Do not implement new features.
+
+Context:
+Manual real-device testing found four issues:
+
+1. Security profile selection is broken.
+   Current state: user is on “Fortress mode Recommended - 8s”.
+   Problem: tapping “Balanced” or “Deep Vault” does nothing.
+   Expected: tapping another profile should visibly select it and, if required, run the existing safe profile-change / re-encryption confirmation flow. Do not change crypto values or profile definitions.
+
+2. Settings screen has no way back to the main vault.
+   Problem: after pressing the gear icon, there is no visible Back / Close / Done option.
+   Current workaround: user must press “Lock Vault Now” or “Nuclear Reset”.
+   Expected: add a clear safe way to return to the main vault without locking, resetting, or changing state.
+
+3. “Create decoy entry” fails.
+   Error shown:
+   “Couldn't create decoy. Your session has expired. Please sign in again.”
+   Expected: investigate whether the client security API is using the correct current backend authentication/session method. Fix only the minimal session/auth wiring required so decoy creation works after a normal successful unlock/login.
+
+4. Security & Devices screen shows unclear cloud warning.
+   Problem: screen loads but always shows a red crossed-cloud icon and:
+   “Some details couldn't be loaded. Pull to refresh.”
+   Pull-to-refresh does nothing.
+   Expected:
+
+   * identify which request is failing
+   * make pull-to-refresh actually retry if appropriate
+   * improve the message so the user knows what failed, for example whether device/session/security data could not load
+   * do not reveal secrets or raw tokens
+   * do not block normal vault use
+
+Important deferred idea:
+The user later wants vault search/sort by name/alphabetical order, but DO NOT implement search or sorting in this prompt.
+
+Tasks:
+
+1. Inspect the relevant files for:
+
+   * gear/settings navigation
+   * security profile selection UI
+   * confirmProfileChange flow
+   * Create decoy entry flow
+   * components/security/api.ts or equivalent security API helper
+   * Security & Devices screen fetch/refresh logic
+   * session token / credential storage and usage
+2. Reproduce or reason through each bug.
+3. Apply the smallest safe fixes only.
+4. Verify TypeScript remains clean.
+5. Run app testing for the affected UI flows if available.
+6. Run backend/API checks only if needed to confirm session/security endpoint behaviour.
+7. Do not implement unrelated features.
+8. Do not implement search/sort.
+9. Do not implement tombstones.
+10. Do not implement password rotation.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify database schema.
+* Do NOT refactor unrelated systems.
+* Do NOT add Autofill back.
+* Do NOT change security profile crypto parameters.
+* Do NOT weaken auth/session checks.
+* Do NOT make cloud/security screens required for local vault use.
+* Do NOT log encryptedBlob, authHash, passwords, salts, recovery keys, session tokens, headers, or key material.
+* Do NOT use broad code optimization.
+
+Output:
+
+* Files inspected
+* Root cause for each of the 4 findings
+* Files changed
+* Exact fixes applied
+* TypeScript result
+* App testing result
+* Any remaining manual test steps
+* Confirmation that search/sort was deferred

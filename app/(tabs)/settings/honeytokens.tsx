@@ -128,8 +128,11 @@ function explainError(err: unknown): string {
     if (err.kind === "rate") {
       return "Too many requests. Please wait a moment and try again.";
     }
+    if (err.kind === "no-creds") {
+      return "This device isn't signed in to the backend, so decoys can't be registered. Lock and unlock your vault to retry sign-in.";
+    }
     if (err.kind === "auth") {
-      return "Your session has expired. Please sign in again.";
+      return "The backend rejected this device's credentials. Lock and unlock your vault to refresh, then try again.";
     }
   }
   return "Action failed. Please try again.";

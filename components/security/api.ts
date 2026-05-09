@@ -97,7 +97,12 @@ export type HoneytokenTriggerResponse = {
 //   - `kind: "auth"`    → user actually needs to re-login
 //   - `kind: "rate"`    → show "slow down" hint
 //   - `kind: "generic"` → fall back to "Action failed. Please try again."
-export type SecurityApiErrorKind = "step-up" | "auth" | "rate" | "generic";
+export type SecurityApiErrorKind =
+  | "step-up"
+  | "auth"
+  | "no-creds"
+  | "rate"
+  | "generic";
 export class SecurityApiError extends Error {
   kind: SecurityApiErrorKind;
   status: number;
@@ -117,7 +122,13 @@ async function securityFetch<T>(
 ): Promise<T> {
   const creds = await getCredentials();
   if (!creds) {
-    throw new SecurityApiError("auth", 401);
+    // Distinct from "auth" (server-rejected creds): the device has no
+    // backend credentials at all. The local vault may still be unlocked
+    // and fully usable — only backend-only features (security dashboard,
+    // decoys) are unavailable. The UI uses this to show an honest
+    // "not signed in to backend" message instead of the misleading
+    // "session expired" copy.
+    throw new SecurityApiError("no-creds", 401);
   }
   const url = new URL(path, getApiUrl());
   const headers: Record<string, string> = {

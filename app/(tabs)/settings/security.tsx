@@ -69,8 +69,11 @@ function explainError(err: unknown): string {
     if (err.kind === "rate") {
       return "Too many requests. Please wait a moment and try again.";
     }
+    if (err.kind === "no-creds") {
+      return "This device isn't signed in to the backend. Lock and unlock your vault to retry sign-in.";
+    }
     if (err.kind === "auth") {
-      return "Your session has expired. Please sign in again.";
+      return "The backend rejected this device's credentials. Lock and unlock your vault to refresh.";
     }
   }
   return "Action failed. Please try again.";
@@ -273,6 +276,19 @@ export default function SecurityScreen() {
   // the user can still see whichever sections did load.
   const anyError = auditQ.isError || devicesQ.isError || passkeysQ.isError;
 
+  // If every failed query failed because this device has no backend
+  // credentials, swap the generic "couldn't load" copy for an honest
+  // "not signed in to backend" message — the local vault is still
+  // unlocked and usable, only the backend-only sections are blank.
+  function isNoCredsErr(e: unknown): boolean {
+    return e instanceof SecurityApiError && e.kind === "no-creds";
+  }
+  const noCredsOnly =
+    anyError &&
+    (!auditQ.isError || isNoCredsErr(auditQ.error)) &&
+    (!devicesQ.isError || isNoCredsErr(devicesQ.error)) &&
+    (!passkeysQ.isError || isNoCredsErr(passkeysQ.error));
+
   // useMemo: stable device sort — trusted-current device most
   // recent first. Server already returns by lastSeenAt DESC; we
   // just push untrusted-but-recent above trusted-but-stale so the
@@ -326,7 +342,9 @@ export default function SecurityScreen() {
           >
             <Ionicons name="cloud-offline-outline" size={18} color="#ef4444" />
             <Text style={{ color: "#ef4444", fontSize: 13, flex: 1 }}>
-              Some details couldn't be loaded. Pull to refresh.
+              {noCredsOnly
+                ? "This device isn't signed in to the backend. Lock and unlock your vault to retry sign-in."
+                : "Some details couldn't be loaded. Pull to refresh."}
             </Text>
           </View>
         ) : null}

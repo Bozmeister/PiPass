@@ -617,6 +617,13 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   async function handleProfileChange(newIterations: number) {
     if (newIterations === iterations || !keySharesRef.current) return;
     const safeNew = Math.max(newIterations || 100000, 3);
+    // Close the Settings bottom-sheet BEFORE opening the password
+    // confirmation modal. iOS only renders one Modal at a time, so
+    // stacking a second Modal on top of an already-visible one causes
+    // the new modal to silently fail to appear — from the user's POV
+    // tapping a profile "does nothing". Sequencing the dismiss first
+    // guarantees the password prompt is the only modal on screen.
+    setShowSettings(false);
     setPendingProfileIterations(safeNew);
     setProfilePassword("");
   }
@@ -910,8 +917,14 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
           <View style={{ backgroundColor: "#111", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: insets.bottom + 20 }}>
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
               <Text style={{ color: "#fff", fontSize: 24, fontWeight: "bold" as const }}>Settings</Text>
-              <Pressable onPress={() => setShowSettings(false)}>
-                <Ionicons name="close" size={28} color="#666" />
+              <Pressable
+                onPress={() => setShowSettings(false)}
+                hitSlop={16}
+                accessibilityRole="button"
+                accessibilityLabel="Close settings"
+                style={{ padding: 6, borderRadius: 18, backgroundColor: "#1f1f1f" }}
+              >
+                <Ionicons name="close" size={26} color="#fff" />
               </Pressable>
             </View>
 
