@@ -1,0 +1,103 @@
+Investigate secure note decrypt failure on previously stored notes. Do not delete, reset, or overwrite note data.
+
+Context:
+After the recent secure-note AppState/biometric fix, manual Expo Go testing found a new issue.
+
+Current behaviour:
+
+* User unlocks PiPass successfully.
+* User opens Secure Notes.
+* User taps a previously stored secure note.
+* User enters iPhone PIN/biometric.
+* App shows:
+  “Error. Failed to decrypt note. OK”
+* After pressing OK, the screen says:
+  “Authentication required to view content”
+  and shows a “Delete note” button.
+
+Important:
+Do NOT perform nuclear reset.
+Do NOT delete existing notes.
+Do NOT overwrite note data.
+Do NOT clear secure notes.
+Do NOT change encryption formats.
+
+Goal:
+Find out whether this is:
+
+1. a secure-note decrypt/auth flow bug,
+2. corrupted note ciphertext,
+3. stale/wiped keyShares during biometric/AppState handling,
+4. profile-migration side effect,
+5. storage/index mismatch,
+6. legacy note format mismatch,
+7. or a UI state bug after decrypt failure.
+
+Tasks:
+
+1. Inspect secure note code:
+
+   * components/SecureNotesModal.tsx
+   * secure note save/read/delete helpers
+   * workers/vaultWorker.ts secure note functions
+   * screens/VaultScreen.tsx note props/state
+   * vaultSession / keyShares handling
+   * recent AppState/biometric changes
+2. Confirm whether secure note decrypt uses the same current keyShares as vault entries.
+3. Confirm keyShares are not being wiped or nulled during/after biometric prompt.
+4. Confirm the 30-second recent-activity bypass does not skip required key availability checks.
+5. Confirm previously saved notes and newly saved notes use the same encryption/decryption path.
+6. Confirm secure note metadata shape validation is correct.
+7. Confirm decrypt failure does not switch the UI into a misleading “Authentication required” state.
+8. Confirm delete button is not offered as the main next action after decrypt failure unless clearly safe.
+9. Add safe DEV-only diagnostics if needed, but do not log secrets:
+
+   * may log note id prefix only if already non-secret
+   * may log whether keyShares exist
+   * may log note field presence/shape
+   * may log error category only
+   * must NOT log note content, ciphertext, passwords, salts, keys, authHash, headers, recovery keys, or session tokens
+10. If a bug is found, apply the smallest safe fix.
+11. If old notes may be corrupted, add a non-destructive warning and leave data intact.
+12. If possible, add a safe test path:
+
+* create a new fake note
+* close/reopen notes
+* decrypt it
+* verify existing notes are not modified
+
+13. Run TypeScript.
+14. Do not implement new features.
+15. Do not implement search/sort.
+16. Do not implement tombstones.
+17. Do not implement password rotation.
+
+Critical constraints:
+
+* Do NOT perform nuclear reset.
+* Do NOT delete notes.
+* Do NOT clear note storage.
+* Do NOT overwrite existing secure notes during investigation.
+* Do NOT modify cryptography primitives.
+* Do NOT modify key derivation primitives.
+* Do NOT modify encryption formats.
+* Do NOT modify vault entry formats.
+* Do NOT weaken biometric/PIN or master password security.
+* Do NOT weaken vault auto-lock.
+* Do NOT modify recovery flows.
+* Do NOT modify database schema.
+* Do NOT make backend required for local vault use.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT log note content, encrypted note content, passwords, salts, keys, authHash, headers, session tokens, recovery keys, encryptedBlob, or userId.
+
+Output:
+
+* Root cause analysis
+* Whether existing notes look recoverable
+* Whether new notes decrypt correctly
+* Files changed
+* Exact fixes applied
+* TypeScript result
+* Manual retest steps
+* Whether nuclear reset is still unnecessary

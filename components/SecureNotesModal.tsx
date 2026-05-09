@@ -35,6 +35,19 @@ interface SecureNotesModalProps {
 
 const RECENT_ACTIVITY_MS = 30000;
 
+// Safe DEV-only error categorisation. Returns a label that contains
+// NO secret material — only the shape of the failure, useful when a
+// user reports "Failed to decrypt note" on a real device. Production
+// builds skip this entirely (gated by __DEV__ at the call site).
+function categoriseDecryptError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("Authentication failed")) return "MAC_FAIL";
+  if (msg.includes("Invalid ciphertext format")) return "FORMAT_INVALID";
+  if (msg.includes("Decryption failed")) return "DECRYPT_EMPTY";
+  if (msg.includes("undefined") || msg.includes("null")) return "MISSING_FIELD";
+  return "OTHER";
+}
+
 export default function SecureNotesModal({ visible, notes, keyShares, onClose, onNotesChanged, onActivity, onBiometricActiveChange, getLastActivityMs }: SecureNotesModalProps) {
   const insets = useSafeAreaInsets();
   const [view, setView] = useState<"list" | "add" | "detail">("list");
@@ -44,6 +57,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
   const [selectedNote, setSelectedNote] = useState<SecureNote | null>(null);
   const [decryptedNote, setDecryptedNote] = useState<DecryptedSecureNote | null>(null);
   const [decrypting, setDecrypting] = useState(false);
+  const [decryptError, setDecryptError] = useState<string | null>(null);
   const [copiedField, setCopiedField] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const clipboardTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -64,6 +78,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
     setDecryptedNote(null);
     setSaving(false);
     setDecrypting(false);
+    setDecryptError(null);
     setCopiedField(false);
   }
 
@@ -110,6 +125,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
     if (!keyShares) return;
     setSelectedNote(note);
     setDecryptedNote(null);
+    setDecryptError(null);
     setDecrypting(true);
     setView("detail");
 
@@ -148,11 +164,45 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
       const decrypted = decryptSecureNote(note, keyShares);
       setDecryptedNote(decrypted);
     } catch (err) {
+      // DEV-only diagnostics. Logs ONLY the failure category and the
+      // SHAPE of the offending note (presence flags + ciphertext
+      // segment count) — never plaintext, never ciphertext, never
+      // keys, never the note id (which can be mildly identifying).
+      // Production builds skip this entirely.
+      if (__DEV__) {
+        const category = categoriseDecryptError(err);
+        const contentParts = typeof note.encryptedContent === "string"
+          ? note.encryptedContent.split(":").length
+          : 0;
+        const labelParts = typeof note.encryptedLabel === "string"
+          ? note.encryptedLabel.split(":").length
+          : 0;
+        // eslint-disable-next-line no-console
+        console.log("[SecureNote.decrypt]", {
+          category,
+          hasKeyShares: !!keyShares,
+          hasSalt: !!note.salt,
+          hasEncryptedLabel: !!note.encryptedLabel,
+          hasEncryptedContent: !!note.encryptedContent,
+          hasPlaintextLabelFallback: !!note.label,
+          contentSegmentCount: contentParts,
+          labelSegmentCount: labelParts,
+        });
+      }
       setDecryptedNote(null);
-      const msg = "Failed to decrypt note.";
-      if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Error", msg); }
+      // Surface a clear failure state in the detail view itself
+      // (handled by the !decryptedNote && decryptError branch
+      // below) instead of an Alert + misleading "Authentication
+      // required" UI. The user keeps the note selected and can
+      // retry without re-tapping from the list.
+      setDecryptError(categoriseDecryptError(err));
     }
     setDecrypting(false);
+  }
+
+  async function handleRetryDecrypt() {
+    if (!selectedNote) return;
+    await handleSelect(selectedNote);
   }
 
   async function handleDelete(id: string) {
@@ -382,10 +432,52 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
                     <ActivityIndicator size="large" color="#4CAF50" />
                     <Text style={{ color: "#888", fontSize: 14, marginTop: 12 }}>Authenticating...</Text>
                   </View>
+                ) : !decryptedNote && decryptError ? (
+                  // Explicit decryption-failure state. Replaces the
+                  // earlier "Authentication required to view content"
+                  // placeholder, which was misleading (the user HAD
+                  // already authenticated) and dangerous when paired
+                  // with a prominent Delete button as the only next
+                  // action. Now: clear cause, explicit Retry, and the
+                  // Delete button below is hidden so the user cannot
+                  // destroy a possibly-recoverable note in one tap.
+                  <View style={{ alignItems: "center", paddingVertical: 32 }}>
+                    <Ionicons name="alert-circle" size={40} color="#fbbf24" />
+                    <Text style={{ color: "#fbbf24", fontSize: 16, fontWeight: "700", marginTop: 12 }}>
+                      Couldn&apos;t decrypt this note
+                    </Text>
+                    <Text style={{ color: "#aaa", fontSize: 13, marginTop: 8, textAlign: "center", paddingHorizontal: 12, lineHeight: 18 }}>
+                      Your data is still safely stored. This usually means the
+                      vault key briefly went out of sync. Try again — or lock
+                      and unlock the vault and reopen this note.
+                    </Text>
+                    {__DEV__ && (
+                      <Text style={{ color: "#666", fontSize: 11, marginTop: 8, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" }}>
+                        dev:{decryptError}
+                      </Text>
+                    )}
+                    <Pressable
+                      onPress={handleRetryDecrypt}
+                      style={{
+                        marginTop: 20,
+                        backgroundColor: "#4CAF50",
+                        paddingVertical: 12,
+                        paddingHorizontal: 24,
+                        borderRadius: 8,
+                      }}
+                      testID="retry-decrypt-button"
+                    >
+                      <Text style={{ color: "#fff", fontSize: 15, fontWeight: "700" }}>Try Again</Text>
+                    </Pressable>
+                  </View>
                 ) : !decryptedNote ? (
+                  // Cancelled/declined biometric — no decrypt was attempted.
+                  // Distinct from the failure state above.
                   <View style={{ alignItems: "center", paddingVertical: 40 }}>
-                    <Ionicons name="lock-closed" size={40} color="#ff6b6b" />
-                    <Text style={{ color: "#ff6b6b", fontSize: 14, marginTop: 12 }}>Authentication required to view content</Text>
+                    <Ionicons name="lock-closed" size={40} color="#888" />
+                    <Text style={{ color: "#aaa", fontSize: 14, marginTop: 12, textAlign: "center", paddingHorizontal: 12 }}>
+                      Authentication cancelled. Tap the note again to view its contents.
+                    </Text>
                   </View>
                 ) : (
                   <>
@@ -439,24 +531,31 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
                   </>
                 )}
 
-                <Pressable
-                  onPress={() => handleDelete(selectedNote.id)}
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    backgroundColor: "#1a0a0a",
-                    borderRadius: 10,
-                    padding: 14,
-                    marginTop: 8,
-                    borderWidth: 1,
-                    borderColor: "#4a1111",
-                  }}
-                  testID="delete-note-button"
-                >
-                  <Ionicons name="trash-outline" size={18} color="#ef4444" style={{ marginRight: 8 }} />
-                  <Text style={{ color: "#ef4444", fontSize: 15, fontWeight: "600" }}>Delete Note</Text>
-                </Pressable>
+                {/* Delete is hidden in the decrypt-failure state.
+                    Offering it as the only next action after a
+                    transient decrypt error invites the user to
+                    destroy a recoverable note. It re-appears once
+                    decryption succeeds. */}
+                {!decryptError && (
+                  <Pressable
+                    onPress={() => handleDelete(selectedNote.id)}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: "#1a0a0a",
+                      borderRadius: 10,
+                      padding: 14,
+                      marginTop: 8,
+                      borderWidth: 1,
+                      borderColor: "#4a1111",
+                    }}
+                    testID="delete-note-button"
+                  >
+                    <Ionicons name="trash-outline" size={18} color="#ef4444" style={{ marginRight: 8 }} />
+                    <Text style={{ color: "#ef4444", fontSize: 15, fontWeight: "600" }}>Delete Note</Text>
+                  </Pressable>
+                )}
               </ScrollView>
             )}
           </View>
