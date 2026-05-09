@@ -1,0 +1,99 @@
+Audit PiPass for standard native success/info Alert popups and replace them with a consistent PiPass-themed toast/message component. Do not change destructive or security-critical confirmations.
+
+Context:
+Manual testing showed that some success messages use the default native Alert style, which looks ugly and inconsistent with the PiPass dark/fractal theme.
+
+Examples:
+
+* “Decoy created”
+* “New vault entry created”
+* Other non-critical success/info messages that appear after normal actions
+
+Goal:
+Create or reuse a consistent PiPass-themed toast/message UI for non-critical success/info feedback.
+
+Desired toast/message style:
+
+* dark translucent rounded rectangle
+* fits PiPass dark/fractal visual theme
+* readable text
+* soft rounded corners
+* subtle shadow/glow if consistent with theme
+* opacity around 70–85% or otherwise theme-appropriate
+* does not look like a default native OS alert
+* should appear briefly and dismiss automatically where appropriate
+* should not block the user unnecessarily
+* should work on iPhone-sized screens
+
+Important:
+Only replace non-critical success/info messages.
+
+Do NOT replace:
+
+* destructive confirmations
+* delete confirmations
+* nuclear reset confirmations
+* biometric/PIN prompts
+* master password prompts
+* recovery key warnings
+* security-critical failure alerts
+* profile migration confirmation prompts
+* any alert where the user must make a serious security decision
+
+Tasks:
+
+1. Search the app for native Alert.alert usage and similar standard popups.
+2. Categorise each popup as:
+
+   * non-critical success/info message, safe to replace
+   * warning/error that should remain modal
+   * destructive/security-critical confirmation that must remain unchanged
+3. Create a reusable PiPass toast/message component if one does not already exist.
+4. Replace only safe non-critical success/info native alerts with the themed toast/message.
+5. Ensure toast messages can be triggered from:
+
+   * vault entry creation success
+   * decoy creation success
+   * secure note success messages if currently using native success alerts
+   * other nearby safe success/info actions
+6. Keep error/security/destructive alerts unchanged unless there is already a safe themed error component and replacing it does not weaken the flow.
+7. Avoid broad UI refactors.
+8. Run TypeScript.
+9. Run App Testing if available to verify:
+
+   * add entry success toast appears
+   * decoy created toast appears
+   * toast disappears correctly
+   * destructive delete confirmation still appears as a serious confirmation
+   * nuclear reset prompts are unchanged
+10. Do not implement search/sort.
+11. Do not implement tombstones.
+12. Do not implement password rotation.
+
+Critical constraints:
+
+* Do NOT modify cryptography.
+* Do NOT modify key derivation.
+* Do NOT modify encryption formats.
+* Do NOT modify auth logic.
+* Do NOT modify vault formats.
+* Do NOT modify recovery flows.
+* Do NOT modify biometric logic.
+* Do NOT modify database schema.
+* Do NOT weaken delete/nuclear reset/profile-change confirmations.
+* Do NOT replace security-critical prompts with auto-dismissing toasts.
+* Do NOT add Autofill back.
+* Do NOT refactor unrelated systems.
+* Do NOT run broad code optimization.
+* Do NOT log authHash, passwords, salts, recovery keys, session tokens, headers, encryptedBlob, note content, userId, or key material.
+
+Output:
+
+* All Alert.alert usages found
+* Which ones were replaced
+* Which ones were deliberately left unchanged and why
+* Files changed
+* Toast/message component behaviour
+* TypeScript result
+* App testing result
+* Manual retest steps

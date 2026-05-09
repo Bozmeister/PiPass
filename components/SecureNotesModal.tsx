@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { View, Text, TextInput, Pressable, Modal, ScrollView, Platform, KeyboardAvoidingView, Alert, ActivityIndicator } from "react-native";
+import ThemedToast from "./ThemedToast";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Clipboard from "expo-clipboard";
@@ -58,6 +59,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
   const [decryptedNote, setDecryptedNote] = useState<DecryptedSecureNote | null>(null);
   const [decrypting, setDecrypting] = useState(false);
   const [decryptError, setDecryptError] = useState<string | null>(null);
+  const [saveToast, setSaveToast] = useState<{ message: string; key: number } | null>(null);
   const [copiedField, setCopiedField] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const clipboardTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -79,6 +81,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
     setSaving(false);
     setDecrypting(false);
     setDecryptError(null);
+    setSaveToast(null);
     setCopiedField(false);
   }
 
@@ -111,7 +114,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
       setLabel("");
       setContent("");
       setView("list");
-      if (Platform.OS === "web") { alert("Secure note saved."); } else { Alert.alert("Saved", "Secure note encrypted and stored."); }
+      setSaveToast({ message: "Note encrypted and saved", key: Date.now() });
     } catch (err) {
       const msg = "Failed to save note.";
       if (Platform.OS === "web") { alert(msg); } else { Alert.alert("Error", msg); }
@@ -559,6 +562,21 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
               </ScrollView>
             )}
           </View>
+
+          {/* Non-critical success toast — appears after a note is saved.
+              Position:absolute inside the Modal backdrop so it floats
+              above the sheet without affecting layout. Errors, auth
+              prompts, and destructive confirmations still use Alert. */}
+          {saveToast && (
+            <ThemedToast
+              key={saveToast.key}
+              visible={true}
+              message={saveToast.message}
+              onHide={() => setSaveToast(null)}
+              iconName="checkmark-circle"
+              iconColor="#4CAF50"
+            />
+          )}
         </View>
       </KeyboardAvoidingView>
     </Modal>
