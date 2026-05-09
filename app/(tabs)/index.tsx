@@ -170,6 +170,10 @@ export default function HomeScreen() {
         // Best-effort backend registration — local vault setup completes regardless.
         // Username = SHA-256(salt): deterministic, unique per vault, re-derivable,
         // and contains no plaintext identity information.
+        // If this call fails (backend down, transient network), the unlock
+        // flow has a self-heal register fallback that re-attempts with the
+        // same deterministic inputs, so the vault is not permanently
+        // disconnected from the backend.
         (async () => {
           try {
             const username = hashMasterKey(salt);
@@ -179,14 +183,17 @@ export default function HomeScreen() {
               salt,
               iterations: validIters,
             });
-            if (res.ok) {
-              const data = await res.json() as { id?: string };
-              if (data?.id) {
-                await setCredentials({ userId: data.id, authHash: keyHash });
-              }
+            const data = await res.json() as { id?: string };
+            if (data?.id) {
+              await setCredentials({ userId: data.id, authHash: keyHash });
             }
-          } catch {
+            if (__DEV__) console.log("[auth] register: ok");
+          } catch (err) {
             // Backend unreachable — vault operates in local-only mode.
+            if (__DEV__) {
+              const status = err instanceof Error ? err.message.split(":")[0] : "error";
+              console.log("[auth] register failed:", status);
+            }
           }
         })();
       }} />
@@ -380,40 +387,93 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset, onR
       // Fire-and-forget: errors (network, wrong authHash, unregistered account) are
       // swallowed so the user is never blocked by backend availability.
       (async () => {
+        const username = hashMasterKey(salt);
+        let loginOutcome: "ok" | "unauthorized" | "error" = "error";
+        let userId: string | undefined;
+
         try {
-          const username = hashMasterKey(salt);
           const res = await apiRequest("POST", "/api/auth/login", {
             username,
             authHash: keyHash,
           });
-          if (res.ok) {
-            const data = await res.json() as { id?: string };
-            if (data?.id) {
-              await setCredentials({ userId: data.id, authHash: keyHash });
-              // Branch on local vault emptiness:
-              //   empty → Stage 2A restore (writes remote into the empty vault)
-              //   non-empty → Stage 2B merge plan (asks the user before any write)
-              // shares is still valid here (wipeShares only runs on lock/reset).
-              const [localEntries, localNotes] = await Promise.all([
-                getAllEntries(),
-                getAllSecureNotes(),
-              ]);
-              if (localEntries.length === 0 && localNotes.length === 0) {
-                const restored = await restoreVaultFromRemote(shares);
-                if (restored) onRestore?.();
-              } else if (onMergeAvailable) {
-                const merge = await planVaultMerge(shares);
-                if (merge.status === "import-available" && merge.candidate) {
-                  onMergeAvailable(merge.candidate);
-                }
-                // Other statuses (up-to-date, no-remote, no-changes, error)
-                // are silent — local vault is unaffected and the user keeps
-                // working without any prompt.
-              }
+          const data = await res.json() as { id?: string };
+          userId = data?.id;
+          loginOutcome = "ok";
+        } catch (err) {
+          // apiRequest throws "STATUS: body" on non-ok responses.
+          // 401 from /api/auth/login means the server doesn't recognize
+          // this username/authHash pair — most commonly because the
+          // ORIGINAL register call during setup failed silently
+          // (backend was down, race, etc) so no user row exists. We
+          // can self-heal because we already validated the master
+          // password against the LOCAL stored hash above, so we know
+          // this caller is the legitimate vault owner.
+          const msg = err instanceof Error ? err.message : "";
+          if (msg.startsWith("401")) loginOutcome = "unauthorized";
+        }
+
+        if (__DEV__) console.log("[auth] login:", loginOutcome);
+
+        // Self-heal: re-attempt register with the same deterministic
+        // inputs the original setup would have used. If the user
+        // genuinely exists with a different authHash, the server
+        // returns 409 and we leave creds unset (the vault still
+        // works locally; only backend-only features stay disabled).
+        if (loginOutcome === "unauthorized" && !userId) {
+          try {
+            const regRes = await apiRequest("POST", "/api/auth/register", {
+              username,
+              authHash: keyHash,
+              salt,
+              iterations,
+            });
+            const data = await regRes.json() as { id?: string };
+            userId = data?.id;
+            if (__DEV__) console.log("[auth] self-heal register: ok");
+          } catch (err) {
+            if (__DEV__) {
+              const status = err instanceof Error ? err.message.split(":")[0] : "error";
+              console.log("[auth] self-heal register failed:", status);
             }
           }
+        }
+
+        if (!userId) return;
+
+        try {
+          await setCredentials({ userId, authHash: keyHash });
         } catch {
-          // Backend unreachable — vault remains usable in local-only mode.
+          return;
+        }
+
+        // Restore/merge only after a true login (the server already
+        // had this user). After a self-heal register the server has
+        // no blob yet — nothing to restore or merge; the first
+        // syncVaultToBackend on the next mutation will seed it.
+        if (loginOutcome !== "ok") return;
+        try {
+          // Branch on local vault emptiness:
+          //   empty → Stage 2A restore (writes remote into the empty vault)
+          //   non-empty → Stage 2B merge plan (asks the user before any write)
+          // shares is still valid here (wipeShares only runs on lock/reset).
+          const [localEntries, localNotes] = await Promise.all([
+            getAllEntries(),
+            getAllSecureNotes(),
+          ]);
+          if (localEntries.length === 0 && localNotes.length === 0) {
+            const restored = await restoreVaultFromRemote(shares);
+            if (restored) onRestore?.();
+          } else if (onMergeAvailable) {
+            const merge = await planVaultMerge(shares);
+            if (merge.status === "import-available" && merge.candidate) {
+              onMergeAvailable(merge.candidate);
+            }
+            // Other statuses (up-to-date, no-remote, no-changes, error)
+            // are silent — local vault is unaffected and the user keeps
+            // working without any prompt.
+          }
+        } catch {
+          // Restore/merge failure is non-fatal — local vault is intact.
         }
       })();
     } catch (err) {
