@@ -54,8 +54,8 @@ We will update this document when we add new features that affect privacy. The c
 
 ## Contact
 Privacy questions or security reports:  
-Open an issue at https://github.com/yourusername/pipass  
-or email: security@pipass.example.com
+Open an issue at https://github.com/pipass/pipass  
+or email: security@pipass.app
 
 This policy is intentionally concise because PiPass is built to minimize the amount of data that exists in the first place.
 

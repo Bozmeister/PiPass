@@ -12,7 +12,7 @@
         "credentialsSource": "remote"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api.pipass.example.com"
+        "EXPO_PUBLIC_API_URL": "https://api.pipass.app"
       }
     },
     "preview": {

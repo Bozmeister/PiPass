@@ -73,7 +73,7 @@ const DECOY_TEMPLATES: readonly {
     label: "Old Email",
     title: "Personal Email (Old)",
     username: "me.personal",
-    url: "https://mail.example.com",
+    url: "https://mail.example-service.com",
     notes: "Pre-2022 mailbox — keep for archives",
   },
   {

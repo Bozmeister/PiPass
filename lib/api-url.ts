@@ -1,5 +1,5 @@
 /**
- * Gets the base URL for the Express API server, e.g. "http://localhost:5000".
+ * Gets the base URL for the Express API server.
  */
 export function getApiUrl(): string {
   const explicitUrl = process.env.EXPO_PUBLIC_API_URL?.trim();

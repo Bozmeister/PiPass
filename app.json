@@ -5,7 +5,7 @@
     "slug": "pipass",
     "version": "1.0.0",
     "description": "Zero-knowledge password manager with strong local encryption, biometric unlock, and optional end-to-end encrypted sync. Your passwords never leave your device in plaintext.",
-    "privacyPolicyUrl": "https://yourusername.github.io/pipass/PRIVACY_POLICY.html",
+    "privacyPolicyUrl": "https://pipass.app/privacy",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "pipass",
@@ -47,7 +47,7 @@
       [
         "expo-router",
         {
-          "origin": "https://pipass.example.com"
+          "origin": "https://pipass.app"
         }
       ],
       "expo-font",
