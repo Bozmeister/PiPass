@@ -597,7 +597,13 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     if (settingsTapTimerRef.current) clearTimeout(settingsTapTimerRef.current);
     if (settingsTapCountRef.current >= 7) {
       settingsTapCountRef.current = 0;
-      router.push("/debug");
+      if (__DEV__) {
+        router.push("/debug");
+      } else {
+        // Production: 7 taps on settings icon does nothing special.
+        // No hidden debug entry points are present in release builds.
+        setShowSettings(true);
+      }
       return;
     }
     settingsTapTimerRef.current = setTimeout(() => {

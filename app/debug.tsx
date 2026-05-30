@@ -11,6 +11,21 @@ export default function DebugScreen() {
   const webTopInset = Platform.OS === "web" ? 67 : 0;
   const webBottomInset = Platform.OS === "web" ? 34 : 0;
 
+  // Fully guard debug surface in production builds.
+  // The only way to reach this screen in release builds is via direct deep link (not exposed).
+  if (!__DEV__) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "#000", justifyContent: "center", alignItems: "center", padding: 24 }}>
+        <Text style={{ color: "#fff", fontSize: 18, textAlign: "center" }}>
+          Debug tools are disabled in production builds.
+        </Text>
+        <Pressable onPress={() => router.back()} style={{ marginTop: 24 }}>
+          <Text style={{ color: "#4CAF50", fontSize: 16 }}>Go Back</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
   return (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
       <View

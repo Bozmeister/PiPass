@@ -115,13 +115,20 @@ export function encryptVaultEntry(
 
     const result: VaultEntry = {
       id: entryId,
-      title: entry.title,
-      username: entry.username,
+      // NOTE: Plaintext title/username/url intentionally no longer stored for new entries.
+      // Only encrypted* variants are persisted. This removes metadata duplication/leakage
+      // in the encrypted blob on disk and during any future sync.
+      //
+      // SAFE MIGRATION:
+      // - Legacy entries (pre-this change) may still contain plain title/username/url.
+      // - decryptVaultEntry() already falls back to plain fields when encrypted* are absent.
+      // - Re-encrypt (password change / recovery) will produce clean entries without plain fields.
+      // - A one-time migration pass can be added later to strip remaining plain fields from old entries.
       encryptedPassword: encryptData(entry.password, entryKey),
       encryptedTitle: encryptData(entry.title, entryKey),
       encryptedUsername: encryptData(entry.username, entryKey),
       encryptedUrl: entry.url ? encryptData(entry.url, entryKey) : undefined,
-      url: entry.url,
+      // Do not store plaintext url
       notes: entry.notes ? encryptData(entry.notes, entryKey) : undefined,
       salt: entrySalt,
       createdAt: now,

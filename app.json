@@ -4,6 +4,8 @@
     "name": "PiPass",
     "slug": "pipass",
     "version": "1.0.0",
+    "description": "Zero-knowledge password manager with strong local encryption, biometric unlock, and optional end-to-end encrypted sync. Your passwords never leave your device in plaintext.",
+    "privacyPolicyUrl": "https://yourusername.github.io/pipass/PRIVACY_POLICY.html",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "pipass",
@@ -29,6 +31,8 @@
     },
     "android": {
       "package": "com.pipass.app",
+      "versionCode": 2,
+      "permissions": [],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -43,7 +47,7 @@
       [
         "expo-router",
         {
-          "origin": "https://replit.com/"
+          "origin": "https://pipass.example.com"
         }
       ],
       "expo-font",
@@ -53,6 +57,11 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "your-eas-project-id-here"
+      }
     }
   }
 }

@@ -784,19 +784,23 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
             </Pressable>
 
             <Pressable
-              onPress={() => {}}
-              style={{
-                backgroundColor: "#1a1a1a", paddingVertical: 16, borderRadius: 12,
-                alignItems: "center", width: "100%", borderWidth: 1, borderColor: "#333",
-                opacity: 0.5,
+              onPress={() => {
+                Alert.alert(
+                  "Recovery Key Unlock",
+                  "Recovery key unlock is not yet available.\n\nFor now, use 'Proceed to Secure Reset' below to create a new vault.\n\nThis will permanently delete all current data.",
+                  [{ text: "OK" }]
+                );
               }}
-              disabled
+              style={{
+                backgroundColor: "#1a0808", paddingVertical: 16, borderRadius: 12,
+                alignItems: "center", width: "100%", borderWidth: 1, borderColor: "#3a1515",
+              }}
             >
               <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                <Ionicons name="document-text-outline" size={20} color="#aaa" />
-                <Text style={{ color: "#aaa", fontSize: 16, fontWeight: "600" as const }}>Use Recovery Key</Text>
+                <Ionicons name="document-text-outline" size={20} color="#ef4444" />
+                <Text style={{ color: "#ef4444", fontSize: 16, fontWeight: "600" as const }}>Use Recovery Key (Coming Soon)</Text>
               </View>
-              <Text style={{ color: "#666", fontSize: 12, marginTop: 4 }}>Coming soon</Text>
+              <Text style={{ color: "#666", fontSize: 12, marginTop: 4 }}>Use Nuclear Reset for now</Text>
             </Pressable>
 
             <Pressable

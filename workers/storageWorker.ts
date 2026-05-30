@@ -389,17 +389,9 @@ export async function storeMasterKeySecurely(keyHex: string): Promise<void> {
     // the platform can protect it with device authentication.
     await clearMasterKeySecurely();
     if (__DEV__) {
-      try {
-        await writePlatformItem(KEYCHAIN_KEY, keyHex, {
-          keychainService: KEYCHAIN_SERVICE,
-          requireAuthentication: false,
-        });
-        console.warn(
-          "[storageWorker] stored cached master key without device auth for development only"
-        );
-      } catch (devErr) {
-        console.warn("[storageWorker] dev-only cached key store failed:", devErr);
-      }
+      console.warn(
+        "[storageWorker] biometric auth unavailable - master key cache disabled (production will never store without strong auth)"
+      );
     }
     return;
   }
@@ -417,23 +409,8 @@ export async function storeMasterKeySecurely(keyHex: string): Promise<void> {
       );
     }
     await clearMasterKeySecurely();
-    if (__DEV__) {
-      try {
-        await writePlatformItem(KEYCHAIN_KEY, keyHex, {
-          keychainService: KEYCHAIN_SERVICE,
-          requireAuthentication: false,
-        });
-        if (__DEV__) {
-          console.warn(
-            "[storageWorker] stored master key without biometric gate (development fallback)"
-          );
-        }
-      } catch (fallbackErr) {
-        if (__DEV__) {
-          console.warn("[storageWorker] fallback store also failed:", fallbackErr);
-        }
-      }
-    }
+    // No fallback store in any environment. Production must never persist
+    // the master key cache without biometric/device auth protection.
   }
 }
 
