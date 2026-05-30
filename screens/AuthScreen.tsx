@@ -1,9 +1,12 @@
 import React, { useState, useEffect } from "react";
-import { View, Text, Pressable, Platform } from "react-native";
+import { View, Text, Pressable } from "react-native";
 import * as LocalAuthentication from "expo-local-authentication";
-import * as Device from "expo-device";
 import { Ionicons } from "@expo/vector-icons";
 import PipassLoader from "../components/PipassLoader";
+import {
+  getDeviceAuthenticationStatus,
+  type DeviceAuthenticationStatus,
+} from "../crypto/biometricGate";
 
 interface AuthScreenProps {
   onAuthenticated: () => void;
@@ -12,7 +15,8 @@ interface AuthScreenProps {
 export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
-  const [biometricType, setBiometricType] = useState<string>("Biometric");
+  const [biometricType, setBiometricType] = useState<string>("Device authentication");
+  const [canUseDevBypass, setCanUseDevBypass] = useState(false);
   // T006 — show the boot loader on first mount; the loader sits on
   // top of the live AuthScreen and crossfades out, so biometric prompt
   // wiring continues underneath without delay.
@@ -27,57 +31,48 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
 
   async function checkBiometricSupport() {
     setChecking(true);
+    setCanUseDevBypass(false);
 
-    if (Platform.OS === "web") {
-      setError("Biometric authentication is not available on web. Tap to bypass for testing.");
+    const status = await getDeviceAuthenticationStatus();
+    if (!status.available) {
+      setError(messageForUnavailableAuth(status));
+      setCanUseDevBypass(status.canUseDevBypass);
       setChecking(false);
       return;
     }
 
-    const isDevice = Device.isDevice;
-    if (!isDevice) {
-      setError("Biometric authentication requires a physical device. Tap to bypass for testing.");
-      setChecking(false);
-      return;
-    }
-
-    const hasHardware = await LocalAuthentication.hasHardwareAsync();
-    if (!hasHardware) {
-      setError("No biometric hardware found. Tap to bypass for testing.");
-      setChecking(false);
-      return;
-    }
-
-    const isEnrolled = await LocalAuthentication.isEnrolledAsync();
-    if (!isEnrolled) {
-      setError("No biometrics enrolled on this device. Please set up Face ID or fingerprint in Settings.");
-      setChecking(false);
-      return;
-    }
-
-    const supportedTypes = await LocalAuthentication.supportedAuthenticationTypesAsync();
-    if (supportedTypes.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
+    if (status.supportedTypes.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
       setBiometricType("Face ID");
-    } else if (supportedTypes.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
+    } else if (status.supportedTypes.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
       setBiometricType("Fingerprint");
+    } else {
+      setBiometricType("Device passcode");
     }
 
     setChecking(false);
-    authenticate();
+    await authenticate();
   }
 
   async function authenticate() {
-    if (Platform.OS === "web") {
-      onAuthenticated();
+    const status = await getDeviceAuthenticationStatus();
+    if (!status.available) {
+      if (status.canUseDevBypass) {
+        // Development-only convenience for Expo web, simulators, and CI.
+        // Production builds fail closed here and never call onAuthenticated.
+        setCanUseDevBypass(true);
+        setError(messageForUnavailableAuth(status));
+        return;
+      }
+      setCanUseDevBypass(false);
+      setError(messageForUnavailableAuth(status));
       return;
     }
 
     try {
-      const hasHardware = await LocalAuthentication.hasHardwareAsync();
       const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: hasHardware
-          ? "Use biometrics to unlock PiPass"
-          : "Authenticate to access PiPass vault",
+        promptMessage: status.hasBiometricHardware
+          ? "Use biometrics or passcode to unlock PiPass"
+          : "Use your device passcode to unlock PiPass",
         disableDeviceFallback: false,
         fallbackLabel: "Use Passcode",
       });
@@ -96,13 +91,40 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     }
   }
 
+  function handleDevBypass() {
+    // This is intentionally limited to development builds. It keeps local
+    // Expo web/simulator testing usable without creating a production bypass.
+    if (__DEV__ && canUseDevBypass) {
+      onAuthenticated();
+    }
+  }
+
   function handleRetry() {
     setError(null);
-    if (Platform.OS === "web" || !Device.isDevice) {
-      onAuthenticated();
+    if (canUseDevBypass) {
+      handleDevBypass();
       return;
     }
-    authenticate();
+    void authenticate();
+  }
+
+  function messageForUnavailableAuth(
+    status: Extract<DeviceAuthenticationStatus, { available: false }>,
+  ): string {
+    const devSuffix = status.canUseDevBypass
+      ? " Tap to bypass for local development only."
+      : "";
+
+    if (status.reason === "web") {
+      return `PiPass requires device authentication. Web unlock is unavailable in production.${devSuffix}`;
+    }
+    if (status.reason === "not-physical-device") {
+      return `PiPass requires a physical device with secure local authentication.${devSuffix}`;
+    }
+    if (status.reason === "not-enrolled") {
+      return `Set up a device passcode, Face ID, or fingerprint before unlocking PiPass.${devSuffix}`;
+    }
+    return `PiPass could not verify secure local authentication. Restart the app and try again.${devSuffix}`;
   }
 
   // The loader sits on TOP of whatever auth UI is appropriate. While
@@ -132,7 +154,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         style={{ marginTop: 32, paddingVertical: 14, paddingHorizontal: 32, backgroundColor: "#333", borderRadius: 8 }}
       >
         <Text style={{ color: "#fff", fontSize: 16 }}>
-          {error ? "Try Again" : `Authenticate with ${biometricType}`}
+          {canUseDevBypass ? "Bypass for Local Development" : error ? "Try Again" : `Authenticate with ${biometricType}`}
         </Text>
       </Pressable>
     </View>

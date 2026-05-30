@@ -362,14 +362,16 @@ const KEYCHAIN_SERVICE = "group.com.pipass.shared";
 
 let cachedBiometricAvailable: boolean | null = null;
 
-async function isBiometricAvailable(): Promise<boolean> {
+async function isAuthenticatedKeyStorageAvailable(): Promise<boolean> {
   if (await isWebStoragePlatform()) return false;
   if (cachedBiometricAvailable !== null) return cachedBiometricAvailable;
   try {
     const LocalAuthentication = await import("expo-local-authentication");
-    const hasHardware = await LocalAuthentication.hasHardwareAsync();
-    const isEnrolled = await LocalAuthentication.isEnrolledAsync();
-    cachedBiometricAvailable = hasHardware && isEnrolled;
+    const Device = await import("expo-device");
+    const enrolledLevel = await LocalAuthentication.getEnrolledLevelAsync();
+    cachedBiometricAvailable =
+      Device.isDevice &&
+      enrolledLevel >= LocalAuthentication.SecurityLevel.SECRET;
   } catch (err) {
     if (__DEV__) console.warn("[storageWorker] biometric probe failed:", err);
     cachedBiometricAvailable = false;
@@ -380,22 +382,42 @@ async function isBiometricAvailable(): Promise<boolean> {
 export async function storeMasterKeySecurely(keyHex: string): Promise<void> {
   if (await isWebStoragePlatform()) return;
 
-  const useBiometric = await isBiometricAvailable();
+  const useAuthentication = await isAuthenticatedKeyStorageAvailable();
+  if (!useAuthentication) {
+    // The cached master key is an unlock accelerator, not required vault
+    // state. In production we fail closed by refusing to persist it unless
+    // the platform can protect it with device authentication.
+    await clearMasterKeySecurely();
+    if (__DEV__) {
+      try {
+        await writePlatformItem(KEYCHAIN_KEY, keyHex, {
+          keychainService: KEYCHAIN_SERVICE,
+          requireAuthentication: false,
+        });
+        console.warn(
+          "[storageWorker] stored cached master key without device auth for development only"
+        );
+      } catch (devErr) {
+        console.warn("[storageWorker] dev-only cached key store failed:", devErr);
+      }
+    }
+    return;
+  }
 
   try {
     await writePlatformItem(KEYCHAIN_KEY, keyHex, {
       keychainService: KEYCHAIN_SERVICE,
-      requireAuthentication: useBiometric,
+      requireAuthentication: true,
     });
   } catch (err) {
     if (__DEV__) {
       console.warn(
-        "[storageWorker] storeMasterKeySecurely with requireAuthentication=" +
-          useBiometric + " failed:",
+        "[storageWorker] storeMasterKeySecurely with requireAuthentication=true failed:",
         err
       );
     }
-    if (useBiometric) {
+    await clearMasterKeySecurely();
+    if (__DEV__) {
       try {
         await writePlatformItem(KEYCHAIN_KEY, keyHex, {
           keychainService: KEYCHAIN_SERVICE,
@@ -403,7 +425,7 @@ export async function storeMasterKeySecurely(keyHex: string): Promise<void> {
         });
         if (__DEV__) {
           console.warn(
-            "[storageWorker] stored master key without biometric gate (fallback)"
+            "[storageWorker] stored master key without biometric gate (development fallback)"
           );
         }
       } catch (fallbackErr) {
@@ -418,12 +440,23 @@ export async function storeMasterKeySecurely(keyHex: string): Promise<void> {
 export async function getMasterKeySecurely(): Promise<string | null> {
   if (await isWebStoragePlatform()) return null;
 
-  const useBiometric = await isBiometricAvailable();
+  const useAuthentication = await isAuthenticatedKeyStorageAvailable();
+  if (!useAuthentication) {
+    if (!__DEV__) return null;
+    try {
+      return await readPlatformItem(KEYCHAIN_KEY, {
+        keychainService: KEYCHAIN_SERVICE,
+        requireAuthentication: false,
+      });
+    } catch {
+      return null;
+    }
+  }
 
   try {
     return await readPlatformItem(KEYCHAIN_KEY, {
       keychainService: KEYCHAIN_SERVICE,
-      requireAuthentication: useBiometric,
+      requireAuthentication: true,
     });
   } catch (err) {
     if (__DEV__) {
