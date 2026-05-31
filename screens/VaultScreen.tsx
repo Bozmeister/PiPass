@@ -598,10 +598,9 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     if (settingsTapCountRef.current >= 7) {
       settingsTapCountRef.current = 0;
       if (__DEV__) {
-        router.push("/debug");
+        // Debug screen removed for production
       } else {
         // Production: 7 taps on settings icon does nothing special.
-        // No hidden debug entry points are present in release builds.
         setShowSettings(true);
       }
       return;
