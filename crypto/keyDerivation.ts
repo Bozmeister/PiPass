@@ -1,4 +1,5 @@
 import CryptoJS from "crypto-js";
+import { Platform } from "react-native";
 import { getDeviceUUID, clearDeviceUUID } from "./deviceUUIDStorage";
 import {
   buildArgon2idKdfMetadata,
@@ -28,6 +29,53 @@ let argon2LoadFailed = false;
 async function loadArgon2(): Promise<((params: Argon2BinaryParams) => Promise<Uint8Array>) | null> {
   if (argon2LoadFailed) return null;
   if (argon2idFn) return argon2idFn;
+
+  // Prefer native @sphereon/react-native-argon2 on Android/iOS for reliable arm64-v8a
+  // (e.g. Google Pixel) initialization. Falls back to hash-wasm, then PBKDF2.
+  if (Platform.OS !== "web") {
+    try {
+      // require ensures the module is considered for autolinking + bundled
+      const sphereon = require("@sphereon/react-native-argon2");
+      const nativeArgon = sphereon.default || sphereon;
+      if (typeof nativeArgon === "function") {
+        const adaptedNative = async (params: Argon2BinaryParams): Promise<Uint8Array> => {
+          // Reconstruct ascii-safe pw str (material = pw:deviceUUID is always ascii)
+          const pwStr = Array.from(params.password)
+            .map((b) => String.fromCharCode(b))
+            .join("");
+          // After switch to binary salt below, params.salt is 32B; hex-encode for native
+          // (native parses salt str as hex -> 32B internally, matching our wasm path)
+          const saltHexForNative = bytesToHex(params.salt);
+          const config = {
+            iterations: params.iterations,
+            memory: params.memorySize,
+            parallelism: params.parallelism,
+            hashLength: params.hashLength,
+            mode: "argon2id",
+          };
+          const res = await nativeArgon(pwStr, saltHexForNative, config);
+          const raw: string | undefined = res && res.rawHash;
+          if (!raw || typeof raw !== "string") {
+            throw new Error("Native argon2 did not return rawHash");
+          }
+          const out = new Uint8Array(raw.length / 2);
+          for (let i = 0; i < out.length; i++) {
+            out[i] = parseInt(raw.slice(i * 2, i * 2 + 2), 16);
+          }
+          return out;
+        };
+        argon2idFn = adaptedNative;
+        return argon2idFn;
+      }
+    } catch (e: any) {
+      console.error(
+        "[KDF] Native @sphereon/react-native-argon2 load/require failed (trying wasm fallback):",
+        e && (e.message || e.stack || String(e))
+      );
+    }
+  }
+
+  // WASM fallback (hash-wasm)
   try {
     const mod = await import("hash-wasm");
     argon2idFn = (params) =>
@@ -36,7 +84,8 @@ async function loadArgon2(): Promise<((params: Argon2BinaryParams) => Promise<Ui
         outputType: "binary" as const,
       });
     return argon2idFn;
-  } catch {
+  } catch (e: any) {
+    console.error("[KDF] hash-wasm argon2id load failed:", e && (e.message || e.stack || String(e)));
     argon2LoadFailed = true;
     return null;
   }
@@ -128,6 +177,17 @@ function bytesToHex(bytes: Uint8Array): string {
     .join("");
 }
 
+function hexToBytes(hex: string): Uint8Array {
+  if (!hex || hex.length % 2 !== 0) {
+    throw new Error("Invalid hex salt");
+  }
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
 function wipeBuffer(buffer: Uint8Array): void {
   buffer.fill(0);
 }
@@ -176,7 +236,7 @@ export function getArgon2idKdfParameters(
   };
 }
 
-function getPbkdf2Parameters(profileIterations: number): Pbkdf2KdfParameters {
+export function getPbkdf2Parameters(profileIterations: number): Pbkdf2KdfParameters {
   return {
     iterations: safeProfileIterations(profileIterations),
     outputBytes: 32,
@@ -195,7 +255,9 @@ export async function deriveMasterKeyWithArgon2id(
   }
 
   const material = await getKdfMaterial(password, options);
-  const salt = new TextEncoder().encode(saltHex);
+  // Use decoded 32-byte binary salt for argon2 (ensures native + wasm produce identical keys;
+  // native expects the hex string and will decode equivalently).
+  const salt = hexToBytes(saltHex);
   const passwordBytes = new TextEncoder().encode(material);
 
   try {
@@ -210,7 +272,11 @@ export async function deriveMasterKeyWithArgon2id(
     const result = bytesToHex(keyBytes);
     wipeBuffer(keyBytes);
     return result;
-  } catch {
+  } catch (err: any) {
+    console.error(
+      "[KDF] Argon2id derivation failed (exact exception):",
+      err && (err.message || err.stack || String(err))
+    );
     throw new KdfDerivationError("Argon2id derivation failed");
   } finally {
     wipeBuffer(passwordBytes);
@@ -424,7 +490,8 @@ export async function deriveMasterKey(
 
   // Mix password with device UUID so keys are device-bound
   const material = password + ":" + deviceUUID;
-  const salt = new TextEncoder().encode(saltHex);
+  // Binary salt (32 bytes) for argon2 paths; PBKDF2 continues to receive hex string.
+  const salt = hexToBytes(saltHex);
 
   const config = KDF_CONFIGS[kdfVersion];
 
@@ -458,7 +525,11 @@ export async function deriveMasterKey(
       wipeBuffer(passwordBytes);
       wipeBuffer(salt);
       return result;
-    } catch {
+    } catch (err: any) {
+      console.error(
+        "[KDF] Argon2 derivation failed (exact; falling back to PBKDF2):",
+        err && (err.message || err.stack || String(err))
+      );
       wipeBuffer(salt);
       // Fall through to PBKDF2
     }
