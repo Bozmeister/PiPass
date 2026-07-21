@@ -1,9 +1,8 @@
-
 {
   "expo": {
     "name": "PiPass",
     "slug": "pipass",
-    "version": "1.0.0",
+    "version": "1.5",
     "description": "Zero-knowledge password manager with strong local encryption, biometric unlock, and optional end-to-end encrypted sync. Your passwords never leave your device in plaintext.",
     "privacyPolicyUrl": "https://pipass.app/privacy",
     "orientation": "portrait",
@@ -17,7 +16,7 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-       "jsEngine": "jsc",
+      "jsEngine": "jsc",
       "supportsTablet": false,
       "bundleIdentifier": "com.pipass.app",
       "infoPlist": {
@@ -31,7 +30,7 @@
     },
     "android": {
       "package": "com.pipass.app",
-      "versionCode": 2,
+      "versionCode": 12,
       "permissions": [],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -52,16 +51,35 @@
       ],
       "expo-font",
       "expo-web-browser",
-      "./plugins/withFlagSecure"
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "enablePngCrunchInReleaseBuilds": true,
+            "buildArchs": ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"]
+          }
+        }
+      ],
+      "./plugins/withFlagSecure",
+      "./plugins/withNativeArgon2"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
     },
+    "install": {
+      "exclude": ["react-native-reanimated"]
+    },
     "extra": {
+      "router": {
+        "origin": "https://pipass.app"
+      },
       "eas": {
-        "projectId": "your-eas-project-id-here"
+        "projectId": "b76255a9-c6e5-4e73-998a-49b365479ee4"
       }
-    }
+    },
+    "owner": "bozmeister"
   }
 }
