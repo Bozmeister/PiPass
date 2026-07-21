@@ -14,10 +14,19 @@ expo-env.d.ts
 /android/
 *.orig.*
 *.jks
+*.keystore
 *.p8
 *.p12
 *.key
 *.mobileprovision
+*.aab
+aab/
+android/app/build/
+
+# Signing & release artifacts
+temp/
+eas-build-log.txt
+last-log.url
 
 # Metro
 .metro-health-check*
@@ -41,6 +50,9 @@ yarn-error.*
 *.tsbuildinfo
 .vercel
 .local/
-.local/
+
+# Misc
 PiPass.zip
 *.zip
+.idea/
+.easignore

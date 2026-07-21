@@ -1,24 +1,23 @@
 {
   "cli": {
-    "version": ">= 5.9.0",
-    "appVersionSource": "remote"
+    "appVersionSource": "local"
   },
   "build": {
     "production": {
       "distribution": "store",
       "android": {
-        "buildType": "app-bundle",
-        "gradleCommand": ":app:bundleRelease",
-        "credentialsSource": "remote"
+        "buildType": "app-bundle"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api.pipass.app"
+        "EXPO_PUBLIC_API_URL": "https://api.pipass.app",
+        "EXPO_USE_COMMUNITY_AUTOLINKING": "1",
+        "NPM_INSTALL_FLAGS": "--legacy-peer-deps"
       }
     },
     "preview": {
       "distribution": "internal",
-      "android": {
-        "buildType": "apk"
+      "env": {
+        "NPM_INSTALL_FLAGS": "--legacy-peer-deps"
       }
     }
   }

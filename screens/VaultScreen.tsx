@@ -433,7 +433,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         {
           text: "Delete",
           style: "destructive",
-          onPress: () => beginSecureDeleteFlow(entryId, target.title),
+          onPress: () => beginSecureDeleteFlow(entryId, target.title || "Untitled entry"),
         },
       ]
     );
