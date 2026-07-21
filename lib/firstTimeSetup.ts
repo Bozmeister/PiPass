@@ -1,9 +1,12 @@
 import {
   buildArgon2idKdfMetadata,
+  buildPbkdf2KdfMetadata,
   type KdfMetadata,
+  type Pbkdf2KdfParameters,
 } from "../crypto/kdfMetadata";
 import {
   getArgon2idKdfParameters,
+  getPbkdf2Parameters,
   type KdfVersion,
 } from "../crypto/keyDerivation";
 import type { KeyShares } from "../crypto/secureMemory";
@@ -27,6 +30,11 @@ export interface FirstTimeVaultSetupPrepareDependencies {
     password: string,
     saltHex: string,
     parameters: ReturnType<typeof getArgon2idKdfParameters>,
+  ) => Promise<string>;
+  deriveMasterKeyWithPbkdf2?: (
+    password: string,
+    saltHex: string,
+    parameters: Pbkdf2KdfParameters,
   ) => Promise<string>;
   splitKeyIntoShares: (masterKeyHex: string) => KeyShares;
   hashMasterKey: (masterKeyHex: string) => string;
@@ -68,22 +76,45 @@ export async function prepareFirstTimeVaultSetup(
   const argon2idParameters = getArgon2idKdfParameters(validIterations, kdfVersion);
 
   let masterKeyHex: string;
+  let kdfMetadata: KdfMetadata;
   try {
     masterKeyHex = await dependencies.deriveMasterKeyWithArgon2id(
       input.password,
       salt,
       argon2idParameters,
     );
-  } catch {
-    throw new FirstTimeVaultSetupError("Argon2id setup derivation failed");
+    kdfMetadata = buildArgon2idKdfMetadata(
+      validIterations,
+      argon2idParameters,
+      "setup",
+      { kdfVersion },
+    );
+  } catch (err: any) {
+    // Critical: log the exact underlying exception so root cause (e.g. native/WASM init on Pixel arm64) is visible
+    console.error(
+      "[SETUP] deriveMasterKeyWithArgon2id failed during vault creation (Create Vault). Exact underlying exception:",
+      err && (err.stack || err.message || String(err))
+    );
+    const pbDerive = dependencies.deriveMasterKeyWithPbkdf2;
+    if (!pbDerive) {
+      // Preserve legacy error for callers/tests that do not provide fallback (minimal change)
+      throw new FirstTimeVaultSetupError("Argon2id setup derivation failed");
+    }
+    console.log("[SETUP] Falling back to PBKDF2-SHA256 (Fortress/selected profile iters preserved) so vault creation never fails due to KDF engine init.");
+    const pbkdf2Parameters = getPbkdf2Parameters(validIterations);
+    masterKeyHex = await pbDerive(
+      input.password,
+      salt,
+      pbkdf2Parameters,
+    );
+    kdfMetadata = buildPbkdf2KdfMetadata(
+      validIterations,
+      pbkdf2Parameters,
+      "setup",
+      { kdfVersion },
+    );
   }
 
-  const kdfMetadata = buildArgon2idKdfMetadata(
-    validIterations,
-    argon2idParameters,
-    "setup",
-    { kdfVersion },
-  );
   const shares = dependencies.splitKeyIntoShares(masterKeyHex);
   const masterHash = dependencies.hashMasterKey(masterKeyHex);
   const rawRecoveryKeyHex = dependencies.generateRecoveryKey();
