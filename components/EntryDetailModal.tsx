@@ -120,9 +120,9 @@ export default function EntryDetailModal({
     onRequestDelete(entry.id);
   }
 
-  const displayTitle = decryptedEntry?.title || entry.title;
-  const displayUsername = decryptedEntry?.username || entry.username;
-  const displayUrl = decryptedEntry?.url || entry.url;
+  const displayTitle = decryptedEntry?.title || entry.title || "";
+  const displayUsername = decryptedEntry?.username || entry.username || "";
+  const displayUrl = decryptedEntry?.url || entry.url || "";
   const password = decryptedEntry?.password || "";
   const notes = decryptedEntry?.notes;
 

@@ -21,6 +21,7 @@ import {
 import { readPlatformItem, writePlatformItem, deletePlatformItem } from "../../lib/platformStorage";
 import {
   deriveMasterKeyWithArgon2id,
+  deriveMasterKeyWithPbkdf2,
   generateMasterSalt,
   hashMasterKey,
   planUnlockKdfDerivation,
@@ -435,6 +436,7 @@ export default function HomeScreen() {
             {
               generateMasterSalt,
               deriveMasterKeyWithArgon2id,
+              deriveMasterKeyWithPbkdf2,
               splitKeyIntoShares,
               hashMasterKey,
               generateRecoveryKey,

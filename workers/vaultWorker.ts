@@ -13,8 +13,11 @@ import {
 
 export interface VaultEntry {
   id: string;
-  title: string;
-  username: string;
+  // Legacy plaintext fields kept as optional for migration / old entries.
+  // New entries (post plaintext-dup removal) only populate the encrypted* fields.
+  // decryptVaultEntry() falls back to these when encrypted* are absent.
+  title?: string;
+  username?: string;
   encryptedPassword: string;
   encryptedTitle?: string;
   encryptedUsername?: string;
@@ -162,10 +165,10 @@ export function decryptVaultEntry(
 
     const title = entry.encryptedTitle
       ? decryptData(entry.encryptedTitle, entryKey)
-      : entry.title;
+      : (entry.title ?? "");
     const username = entry.encryptedUsername
       ? decryptData(entry.encryptedUsername, entryKey)
-      : entry.username;
+      : (entry.username ?? "");
     const url = entry.encryptedUrl
       ? decryptData(entry.encryptedUrl, entryKey)
       : entry.url;
