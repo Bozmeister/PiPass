@@ -29,13 +29,6 @@ export type CurrentUnlockKdfMetadataState =
   | { status: "invalid"; metadata: null };
 
 export interface CurrentUnlockVerificationDependencies {
-  deriveMasterKeyShares: (
-    password: string,
-    salt: string,
-    iterations: number,
-  ) => Promise<KeyShares>;
-  combineShares: (shares: KeyShares) => string;
-  hashMasterKey: (masterKeyHex: string) => string;
   getMasterKeyHash: () => Promise<string | null>;
   getKdfMetadataState: () => Promise<CurrentUnlockKdfMetadataState>;
   saveKdfMetadata: (metadata: KdfMetadata) => Promise<void>;
@@ -53,6 +46,38 @@ export interface CurrentUnlockVerificationInput {
   iterations: number;
 }
 
+/**
+ * Verifies master password against stored hash + KDF metadata only.
+ * Does not publish shares or cache the master key. Used for nuclear-reset
+ * confirmation and similar gates that must not silent-downgrade KDF.
+ */
+export async function verifyMasterPasswordWithStoredKdf(
+  input: CurrentUnlockVerificationInput,
+  dependencies: Pick<
+    CurrentUnlockVerificationDependencies,
+    "getMasterKeyHash" | "getKdfMetadataState" | "planUnlockKdfDerivation"
+  >,
+): Promise<boolean> {
+  const storedHash = await dependencies.getMasterKeyHash();
+  if (!storedHash) {
+    // Fail closed: no verifier means we cannot prove password knowledge
+    // without inventing a KDF path (silent downgrade risk).
+    return false;
+  }
+
+  const metadataState = await dependencies.getKdfMetadataState();
+  const plan = await dependencies.planUnlockKdfDerivation({
+    password: input.password,
+    saltHex: input.salt,
+    profileIterations: input.iterations,
+    storedMasterHash: storedHash,
+    existingMetadata: metadataState.metadata,
+    metadataStatus: metadataState.status as UnlockKdfMetadataStatus,
+  });
+
+  return plan.ok;
+}
+
 export async function performCurrentUnlockVerification(
   input: CurrentUnlockVerificationInput,
   dependencies: CurrentUnlockVerificationDependencies,
@@ -60,7 +85,8 @@ export async function performCurrentUnlockVerification(
   const storedHash = await dependencies.getMasterKeyHash();
 
   if (!storedHash) {
-    return performLegacyNoHashUnlock(input, dependencies);
+    // Fail closed: do not derive with an invented/weak KDF when no hash exists.
+    return { ok: false, reason: "kdf-derivation-failed" };
   }
 
   const metadataState = await dependencies.getKdfMetadataState();
@@ -96,28 +122,6 @@ export async function performCurrentUnlockVerification(
   }
 
   return warning ? { ok: true, shares, warning } : { ok: true, shares };
-}
-
-async function performLegacyNoHashUnlock(
-  input: CurrentUnlockVerificationInput,
-  dependencies: CurrentUnlockVerificationDependencies,
-): Promise<CurrentUnlockVerificationResult> {
-  const shares = await dependencies.deriveMasterKeyShares(
-    input.password,
-    input.salt,
-    input.iterations,
-  );
-  const keyHex = dependencies.combineShares(shares);
-  dependencies.hashMasterKey(keyHex);
-
-  try {
-    await dependencies.storeMasterKeySecurely(keyHex);
-  } catch (err) {
-    dependencies.wipeShares(shares);
-    throw err;
-  }
-
-  return { ok: true, shares };
 }
 
 function mapPlanFailureReason(

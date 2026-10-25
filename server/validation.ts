@@ -4,6 +4,10 @@ import {
   registerSchema,
   loginSchema,
   vaultSyncSchema,
+  vaultItemPutSchema,
+  vaultItemTombstonePutSchema,
+  vaultItemMoveSchema,
+  retrievalDeviceSchema,
   vaultRestoreSchema,
   usernameParamSchema,
   userIdHeaderSchema,
@@ -18,6 +22,10 @@ import {
   type RegisterInput,
   type LoginInput,
   type VaultSyncInput,
+  type VaultItemPutInput,
+  type VaultItemTombstonePutInput,
+  type VaultItemMoveInput,
+  type RetrievalDeviceInput,
   type TotpVerifyInput,
   type TotpLoginInput,
   type PasskeyRegisterStartInput,
@@ -31,6 +39,10 @@ export type {
   RegisterInput,
   LoginInput,
   VaultSyncInput,
+  VaultItemPutInput,
+  VaultItemTombstonePutInput,
+  VaultItemMoveInput,
+  RetrievalDeviceInput,
   TotpVerifyInput,
   TotpLoginInput,
   PasskeyRegisterStartInput,
@@ -52,6 +64,10 @@ const FIELD_LABEL: Record<string, string> = {
   encryptedBlob: "blob",
   version: "version",
   expectedPrevVersion: "expectedPrevVersion",
+  vaultKeyProof: "proof",
+  nextVaultKeyProof: "proof",
+  newLocator: "locator",
+  botId: "botId",
   // TOTP fields. Surfacing the exact name in the 400 error is fine here:
   // both `token` and `tempToken` are public request-shape concerns, not
   // sensitive values (the user already knows what they sent).
@@ -96,6 +112,24 @@ export function validateLogin(body: unknown): Result<LoginInput> {
 
 export function validateVaultSync(body: unknown): Result<VaultSyncInput> {
   return parse(body, vaultSyncSchema);
+}
+
+export function validateVaultItemPut(body: unknown): Result<VaultItemPutInput> {
+  return parse(body, vaultItemPutSchema);
+}
+
+export function validateVaultItemTombstonePut(
+  body: unknown,
+): Result<VaultItemTombstonePutInput> {
+  return parse(body, vaultItemTombstonePutSchema);
+}
+
+export function validateVaultItemMove(body: unknown): Result<VaultItemMoveInput> {
+  return parse(body, vaultItemMoveSchema);
+}
+
+export function validateRetrievalDevice(body: unknown): Result<RetrievalDeviceInput> {
+  return parse(body, retrievalDeviceSchema);
 }
 
 export function validateVaultRestore(body: unknown): Result<VaultRestoreInput> {

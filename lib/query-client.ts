@@ -62,9 +62,10 @@ export class AuthRequiredError extends Error {
  * `x-auth-hash`.
  *
  * Contract:
- *   - Reads credentials from `expo-secure-store` (Keychain/Keystore on native,
- *     localStorage on web) on EVERY call. Never caches in memory or React
- *     state — `expo-secure-store` is the only trusted credential source.
+ *   - Reads credentials from `expo-secure-store` (Keychain/Keystore) on
+ *     EVERY call. Web does not persist vault or auth material. Never caches
+ *     in memory or React state — native SecureStore is the only trusted
+ *     credential source.
  *   - If no credentials are present, throws `AuthRequiredError` BEFORE any
  *     network request is made. The server never sees the call.
  *   - Headers are guaranteed to be plain strings: `getCredentials` rejects

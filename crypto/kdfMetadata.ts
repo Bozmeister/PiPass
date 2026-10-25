@@ -6,6 +6,34 @@ export type KdfMetadataSource =
   | "profile-change"
   | "legacy-detected";
 
+/**
+ * How the master password is mixed before Argon2id/PBKDF2.
+ *
+ * - `deviceUUID:v1` — legacy: material is `password + ":" + deviceUUID`.
+ *   Required to unlock vaults created before portable KDF. The UUID lives
+ *   on the same device as the vault, so this is not extract-resistance;
+ *   it only pins the vault to that install.
+ * - `none` — current: material is the password only. Salt is the KDF salt.
+ *   New vaults and profile rekeys use this so the same password unlocks
+ *   on another device.
+ */
+export type KdfDeviceBinding = "none" | "deviceUUID:v1";
+
+export const KDF_DEVICE_BINDING_NONE: KdfDeviceBinding = "none";
+export const KDF_DEVICE_BINDING_UUID_V1: KdfDeviceBinding = "deviceUUID:v1";
+
+export function kdfUsesDeviceUuidBinding(
+  binding: KdfDeviceBinding | string | undefined,
+): boolean {
+  return binding === KDF_DEVICE_BINDING_UUID_V1;
+}
+
+export function isSupportedKdfDeviceBinding(
+  value: unknown,
+): value is KdfDeviceBinding {
+  return value === KDF_DEVICE_BINDING_NONE || value === KDF_DEVICE_BINDING_UUID_V1;
+}
+
 export interface Argon2idKdfParameters {
   memoryKiB: number;
   timeCost: number;
@@ -25,7 +53,7 @@ interface BaseKdfMetadata {
   kdfVersion: string;
   parameters: object;
   saltKey: "pipass_master_salt";
-  deviceBinding: "deviceUUID:v1";
+  deviceBinding: KdfDeviceBinding;
   createdAt: number;
   source: KdfMetadataSource;
 }
@@ -84,7 +112,7 @@ export function isValidKdfMetadata(value: unknown): value is KdfMetadata {
     typeof value.kdfVersion !== "string" ||
     value.kdfVersion.trim().length === 0 ||
     value.saltKey !== "pipass_master_salt" ||
-    value.deviceBinding !== "deviceUUID:v1" ||
+    !isSupportedKdfDeviceBinding(value.deviceBinding) ||
     !isSafePositiveInteger(value.createdAt) ||
     !isValidKdfMetadataSource(value.source)
   ) {
@@ -106,7 +134,12 @@ export function buildArgon2idKdfMetadata(
   profileIterations: number,
   parameters: Argon2idKdfParameters,
   source: KdfMetadataSource,
-  options: { kdfVersion?: string; createdAt?: number } = {},
+  options: {
+    kdfVersion?: string;
+    createdAt?: number;
+    /** Default `deviceUUID:v1` so existing-vault helpers stay compatible. */
+    deviceBinding?: KdfDeviceBinding;
+  } = {},
 ): Argon2idKdfMetadata {
   const metadata: Argon2idKdfMetadata = {
     version: 1,
@@ -115,7 +148,7 @@ export function buildArgon2idKdfMetadata(
     kdfVersion: options.kdfVersion ?? "v1",
     parameters,
     saltKey: "pipass_master_salt",
-    deviceBinding: "deviceUUID:v1",
+    deviceBinding: options.deviceBinding ?? KDF_DEVICE_BINDING_UUID_V1,
     createdAt: options.createdAt ?? Date.now(),
     source,
   };
@@ -131,7 +164,12 @@ export function buildPbkdf2KdfMetadata(
   profileIterations: number,
   parameters: Pbkdf2KdfParameters,
   source: KdfMetadataSource,
-  options: { kdfVersion?: string; createdAt?: number } = {},
+  options: {
+    kdfVersion?: string;
+    createdAt?: number;
+    /** Default `deviceUUID:v1` so existing-vault helpers stay compatible. */
+    deviceBinding?: KdfDeviceBinding;
+  } = {},
 ): Pbkdf2KdfMetadata {
   const metadata: Pbkdf2KdfMetadata = {
     version: 1,
@@ -140,7 +178,7 @@ export function buildPbkdf2KdfMetadata(
     kdfVersion: options.kdfVersion ?? "legacy-pbkdf2-v1",
     parameters,
     saltKey: "pipass_master_salt",
-    deviceBinding: "deviceUUID:v1",
+    deviceBinding: options.deviceBinding ?? KDF_DEVICE_BINDING_UUID_V1,
     createdAt: options.createdAt ?? Date.now(),
     source,
   };

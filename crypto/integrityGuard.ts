@@ -86,29 +86,14 @@ export function detectEmulator(): boolean {
 
 export function cryptoSelfTest(): boolean {
   try {
+    const { decryptData, encryptData } = require("./encryption") as typeof import("./encryption");
     const testKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const testPlain = "PiPass-integrity-check";
+    const aad = { recordId: "integrity", field: "sentinel" as const };
 
-    const iv = CryptoJS.enc.Hex.parse("00112233445566778899aabbccddeeff");
-    const key = CryptoJS.enc.Hex.parse(testKey);
-
-    const encrypted = CryptoJS.AES.encrypt(testPlain, key, {
-      iv,
-      mode: CryptoJS.mode.CBC,
-      padding: CryptoJS.pad.Pkcs7,
-    });
-
-    const decrypted = CryptoJS.AES.decrypt(encrypted, key, {
-      iv,
-      mode: CryptoJS.mode.CBC,
-      padding: CryptoJS.pad.Pkcs7,
-    });
-
-    const result = decrypted.toString(CryptoJS.enc.Utf8);
-    if (result !== testPlain) return false;
-
-    const hmac = CryptoJS.HmacSHA256("test-message", testKey).toString(CryptoJS.enc.Hex);
-    if (!hmac || hmac.length !== 64) return false;
+    const sealed = encryptData(testPlain, testKey, aad);
+    if (!sealed.startsWith("v4:")) return false;
+    if (decryptData(sealed, testKey, aad) !== testPlain) return false;
 
     const hash = CryptoJS.SHA256("test").toString(CryptoJS.enc.Hex);
     if (!hash || hash.length !== 64) return false;
@@ -129,10 +114,9 @@ export function cryptoSelfTest(): boolean {
 
 export function detectFunctionHooks(): boolean {
   try {
-    const fnStr = CryptoJS.AES.encrypt.toString();
-    if (fnStr.includes("Proxy") || fnStr.includes("native code") === false && fnStr.length < 20) {
-      return true;
-    }
+    const { encryptData } = require("./encryption") as typeof import("./encryption");
+    const fnStr = encryptData.toString();
+    if (fnStr.includes("Proxy")) return true;
 
     if (typeof (Array.prototype as any).__original_map !== "undefined") return true;
 

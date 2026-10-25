@@ -2,6 +2,7 @@ const { withAppBuildGradle, withMainActivity } = require("@expo/config-plugins")
 
 const MARKER_START = "// --- PiPass FLAG_SECURE ---";
 const MARKER_END = "// --- End PiPass FLAG_SECURE ---";
+const HELPER_NAME = "applyFlagSecureIfNeeded";
 
 function withFlagSecure(config) {
   config = withFlagSecureBuildConfig(config);
@@ -86,7 +87,8 @@ function withFlagSecureBuildConfig(config) {
     let btBody = btBlock.body;
 
     const indent = "            ";
-    const allowScreenshotsPattern = /buildConfigField\s+"boolean"\s*,\s*"ALLOW_SCREENSHOTS"\s*,\s*"(true|false)"/;
+    const allowScreenshotsPattern =
+      /buildConfigField\s+"boolean"\s*,\s*"ALLOW_SCREENSHOTS"\s*,\s*"(true|false)"/;
 
     btBody = enforceFieldInBlock(btBody, "debug", "true", allowScreenshotsPattern, indent);
     btBody = enforceFieldInBlock(btBody, "release", "false", allowScreenshotsPattern, indent);
@@ -99,64 +101,97 @@ function withFlagSecureBuildConfig(config) {
   });
 }
 
+/**
+ * Ensure MainActivity applies FLAG_SECURE in release:
+ * - onCreate (first paint)
+ * - onResume (after background / if JS cleared flags)
+ *
+ * Idempotent across prebuild runs.
+ */
 function withFlagSecureMainActivity(config) {
   return withMainActivity(config, (config) => {
     let contents = config.modResults.contents;
 
-    if (contents.includes(MARKER_START)) {
-      return config;
-    }
-
     const importLine = "import android.view.WindowManager";
     if (!contents.includes(importLine)) {
-      contents = contents.replace(
-        /^(package .+)$/m,
-        `$1\n\n${importLine}`
-      );
+      contents = contents.replace(/^(package .+)$/m, `$1\n\n${importLine}`);
     }
 
-    const flagSecureSnippet = [
-      `        ${MARKER_START}`,
+    const helperBlock = [
+      "",
+      `    ${MARKER_START}`,
+      `    private fun ${HELPER_NAME}() {`,
       "        if (!BuildConfig.ALLOW_SCREENSHOTS) {",
       "            window.setFlags(",
       "                WindowManager.LayoutParams.FLAG_SECURE,",
       "                WindowManager.LayoutParams.FLAG_SECURE",
       "            )",
       "        }",
-      `        ${MARKER_END}`,
+      "    }",
+      `    ${MARKER_END}`,
     ].join("\n");
 
-    let inserted = false;
-
-    const hasOnCreate = /override\s+fun\s+onCreate\s*\(/.test(contents);
-
-    if (hasOnCreate) {
-      const superPattern = /(super\.onCreate\s*\([^)]*\))/;
-      if (superPattern.test(contents)) {
-        contents = contents.replace(superPattern, `$1\n${flagSecureSnippet}`);
-        inserted = true;
-      } else {
-        contents = contents.replace(
-          /(override\s+fun\s+onCreate\s*\([^)]*\)\s*\{)/,
-          `$1\n${flagSecureSnippet}`
-        );
-        inserted = true;
+    if (!contents.includes(`fun ${HELPER_NAME}`)) {
+      // Prefer inserting after class open; if legacy inline FLAG_SECURE exists, still add helper.
+      if (/class\s+MainActivity[^{]*\{/.test(contents)) {
+        contents = contents.replace(/(class\s+MainActivity[^{]*\{)/, `$1${helperBlock}`);
       }
     }
 
-    if (!inserted) {
+    // onCreate: call helper after super.onCreate
+    if (/override\s+fun\s+onCreate\s*\(/.test(contents)) {
+      if (
+        !/super\.onCreate\s*\([^)]*\)[\s\S]{0,200}applyFlagSecureIfNeeded\s*\(/.test(contents)
+      ) {
+        if (/super\.onCreate\s*\([^)]*\)/.test(contents)) {
+          contents = contents.replace(
+            /(super\.onCreate\s*\([^)]*\))/,
+            `$1\n        ${HELPER_NAME}()`
+          );
+        }
+      }
+    } else {
       const onCreateBlock = [
         "",
         "    override fun onCreate(savedInstanceState: android.os.Bundle?) {",
         "        super.onCreate(savedInstanceState)",
-        flagSecureSnippet,
+        `        ${HELPER_NAME}()`,
         "    }",
       ].join("\n");
+      contents = contents.replace(/(class\s+MainActivity[^{]*\{)/, `$1${onCreateBlock}`);
+    }
 
-      contents = contents.replace(
-        /(class\s+MainActivity[^{]*\{)/,
-        `$1${onCreateBlock}`
-      );
+    // onResume: re-apply so navigation / allowScreenCaptureAsync cannot leave release captureable
+    if (/override\s+fun\s+onResume\s*\(/.test(contents)) {
+      if (
+        !/override\s+fun\s+onResume\s*\([\s\S]*?applyFlagSecureIfNeeded\s*\(/.test(contents)
+      ) {
+        if (/super\.onResume\s*\(\)/.test(contents)) {
+          contents = contents.replace(
+            /(super\.onResume\s*\(\))/,
+            `$1\n        ${HELPER_NAME}()`
+          );
+        } else {
+          contents = contents.replace(
+            /(override\s+fun\s+onResume\s*\([^)]*\)\s*\{)/,
+            `$1\n        ${HELPER_NAME}()`
+          );
+        }
+      }
+    } else {
+      const onResumeBlock = [
+        "",
+        "    override fun onResume() {",
+        "        super.onResume()",
+        `        ${HELPER_NAME}()`,
+        "    }",
+      ].join("\n");
+      // Insert before final class closing brace
+      const lastBrace = contents.lastIndexOf("}");
+      if (lastBrace !== -1) {
+        contents =
+          contents.slice(0, lastBrace) + onResumeBlock + "\n" + contents.slice(lastBrace);
+      }
     }
 
     config.modResults.contents = contents;

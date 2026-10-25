@@ -18,6 +18,10 @@ import {
   validateRegister,
   validateLogin,
   validateVaultSync,
+  validateVaultItemPut,
+  validateVaultItemTombstonePut,
+  validateVaultItemMove,
+  validateRetrievalDevice,
   validateVaultRestore,
   validateUsernameParam,
   validateAuthHeaders,
@@ -44,6 +48,33 @@ import {
   generateAuthenticationOptionsFor,
   verifyAuthenticationResponseFor,
 } from "./webauthn";
+import {
+  ANOMALY_RECENT_WINDOW_MS,
+  PASSKEY_FAILURE_THRESHOLD,
+  PASSKEY_FAILURE_WINDOW_MS,
+  RATE_LIMIT_WINDOW_MS,
+  SOFT_LOCK_DURATION_MS,
+  getSharedSecurityStore,
+  hashUsernameForIpThreat,
+  type IpThreatDetection,
+} from "./securityStore";
+import { decideVaultWriteProof } from "./vaultKeyProof";
+import {
+  acceptOpaqueItemManifest,
+  isOpaqueItemId,
+} from "./itemManifestProof";
+import { acceptOpaqueItemTombstone } from "./tombstoneProof";
+import {
+  ITEM_RECEIPT_CLIENT_LOCATOR,
+  ITEM_RECEIPT_TOMBSTONE_LOCATOR,
+  createSignedItemReceipt,
+  itemReadBody,
+} from "./itemReceipt";
+import {
+  readAuthorizationBearer,
+  retrievalTokenPublicKey,
+  verifyRetrievalToken,
+} from "./retrievalToken";
 
 // Per-route JSON parsers with explicit, route-appropriate size limits.
 // Auth bodies are small (~500 bytes max — see registerSchema/loginSchema bounds);
@@ -61,6 +92,8 @@ function jsonBody(limit: string) {
 }
 const AUTH_BODY_LIMIT = "4kb";
 const VAULT_SYNC_BODY_LIMIT = "11mb";
+// One item manifest: at most 8 v4 fields, each capped at 100_000 chars.
+const VAULT_ITEM_BODY_LIMIT = "1mb";
 // POST /api/passkeys/register/finish — the request body wraps a
 // WebAuthn RegistrationResponseJSON whose attestationObject can be
 // several kilobytes for authenticators with cert chains. The inner
@@ -76,9 +109,8 @@ function hashForComparison(value: string): Buffer {
   return createHash("sha256").update(value).digest();
 }
 
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 10;
+const securityStore = getSharedSecurityStore();
 
 // Per-user request budgets for the authenticated endpoints. These are the
 // values from the spec — change any single number here and the cap moves
@@ -88,6 +120,12 @@ const RATE_LIMIT_MAX = 10;
 const PER_USER_RATE_LIMITS = {
   vault_fetch: 60,
   vault_sync: 30,
+  vault_item_put: 30,
+  vault_item_get: 60,
+  vault_item_tombstone: 30,
+  vault_item_move: 30,
+  vault_item_replicate: 30,
+  account_delete: 5,
   vault_history: 30,
   vault_restore: 10,
   auth_sessions: 10,
@@ -194,6 +232,9 @@ const PER_USER_RATE_LIMITS = {
   honeytoken_create: 10,
   honeytoken_disable: 5,
   honeytoken_trigger: 30,
+  // POST /api/auth/retrieval-device — bind an Ed25519 public key to the
+  // current login session. 10/min matches other session-state writes.
+  retrieval_device_register: 10,
 } as const;
 type RateLimitedEndpoint = keyof typeof PER_USER_RATE_LIMITS;
 
@@ -231,16 +272,21 @@ if (RATE_LIMIT_DISABLED) {
 // RATE_LIMIT_MAX so the existing per-IP buckets on register/login/salt
 // keep their original 10/min cap untouched; the new per-endpoint buckets
 // pass an explicit cap derived from PER_USER_RATE_LIMITS.
-function isRateLimited(key: string, limit: number = RATE_LIMIT_MAX): boolean {
+//
+// Counters live in the shared security store (Redis when REDIS_URL is
+// set, process memory otherwise). If Redis is configured but
+// unreachable the store fail-closes and this returns true.
+async function isRateLimited(
+  key: string,
+  limit: number = RATE_LIMIT_MAX,
+): Promise<boolean> {
   if (RATE_LIMIT_DISABLED) return false;
-  const now = Date.now();
-  const entry = rateLimitMap.get(key);
-  if (!entry || now > entry.resetAt) {
-    rateLimitMap.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return false;
-  }
-  entry.count++;
-  return entry.count > limit;
+  const result = await securityStore.incrementRateLimit(
+    key,
+    limit,
+    RATE_LIMIT_WINDOW_MS,
+  );
+  return result.limited;
 }
 
 // Per-endpoint rate limiter for AUTHENTICATED routes. Always called
@@ -258,11 +304,11 @@ function isRateLimited(key: string, limit: number = RATE_LIMIT_MAX): boolean {
 // at the call site is single-shape; callers must NOT distinguish "user
 // vs IP triggered" or report time-to-reset (per spec — leaking that lets
 // an attacker tune their pacing).
-function checkUserRateLimit(
+async function checkUserRateLimit(
   endpoint: RateLimitedEndpoint,
   ip: string,
   userId: string,
-): boolean {
+): Promise<boolean> {
   const userCap = PER_USER_RATE_LIMITS[endpoint];
   const ipCap = userCap * PER_IP_LIMIT_MULTIPLIER;
   // User bucket FIRST: if a single account is already over its own cap,
@@ -270,13 +316,13 @@ function checkUserRateLimit(
   // Without this, a single over-quota account on a NAT could eventually
   // drag the IP cap over the line and throttle unrelated, well-behaved
   // users sharing that egress IP.
-  if (isRateLimited(`${endpoint}:uid:${userId}`, userCap)) return true;
+  if (await isRateLimited(`${endpoint}:uid:${userId}`, userCap)) return true;
   // IP bucket only fires when a request was about to be honored. The
   // cross-account abuse case ("one IP spraying via many user accounts")
   // is still caught: each spreader account's request increments IP
   // because it's individually within its per-user cap, so the IP bucket
   // accumulates the spread and saturates at the IP cap.
-  if (isRateLimited(`${endpoint}:ip:${ip}`, ipCap)) return true;
+  if (await isRateLimited(`${endpoint}:ip:${ip}`, ipCap)) return true;
   return false;
 }
 
@@ -350,17 +396,8 @@ function deterministicDummySalt(username: string): string {
   return createHash("sha256").update(DUMMY_SECRET).update(username).digest("hex");
 }
 
-if (!RATE_LIMIT_DISABLED) {
-  setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of rateLimitMap) {
-      if (now > entry.resetAt) rateLimitMap.delete(key);
-    }
-  }, 5 * 60_000);
-}
-
 // ---------------------------------------------------------------------------
-// Anomaly detection (in-memory, best-effort)
+// Anomaly detection (shared store)
 // ---------------------------------------------------------------------------
 //
 // Lightweight inline detection of two patterns, both fire-and-forget into
@@ -381,126 +418,19 @@ if (!RATE_LIMIT_DISABLED) {
 // kicks in. That gives operators visibility into "this account is
 // approaching abuse" without waiting for a hard 429.
 //
-// State is per-process and resets on restart. Multi-instance deploys
-// would need to share state via Redis to detect anomalies that span
-// instances — out of scope for this task; in-memory is the spec.
-const ANOMALY_FETCH_THRESHOLD = 30;
-const ANOMALY_SYNC_THRESHOLD = 15;
-const ANOMALY_WINDOW_MS = 60_000;
-// Drop entries that haven't been touched in 1h. Bounds memory growth
-// for long-tail inactive users while keeping anomaly state alive
-// across short pauses (typical user session).
-const ANOMALY_STATE_TTL_MS = 60 * 60_000;
-
-type AnomalyState = {
-  windowStart: number;
-  fetchCount: number;
-  syncCount: number;
-  // Dedup flags so the threshold only logs ONCE per window per action,
-  // not every additional request after crossing the line.
-  fetchAnomalyLogged: boolean;
-  syncAnomalyLogged: boolean;
-  // Same dedup discipline for ip_change_detected: emit at most one
-  // ip_change event per user per window. Without this, a flaky NAT
-  // or mobile/wifi handoff that flips A→B→A→B every few seconds would
-  // spam the audit log with a row per flip — drowning the signal that
-  // a real IP change actually means something. Resets on window roll
-  // (see new-entry init below).
-  ipChangeAnomalyLogged: boolean;
-  // Last observed IP — used purely for ip_change_detected. Persists
-  // across window rolls so a 61s gap between requests doesn't reset
-  // the IP comparison.
-  lastIp?: string;
-  // For TTL-based cleanup; updated on every recordAnomaly() call.
-  lastTouchedAt: number;
-};
-const anomalyState = new Map<string, AnomalyState>();
-
-type AnomalySignal = {
-  rateAnomalyMeta?: string;
-  ipChangeFromIp?: string;
-};
-
-// Increment the in-memory counters for `userId`+`action`, roll the
-// window if expired, and return any anomalies that just crossed their
-// threshold. PURE: never logs anything itself — the caller decides
-// whether/how to surface the signals (typically: fire-and-forget audit
-// rows). Always cheap (one Map lookup, no I/O).
-function recordAnomaly(
+// Counters live in the shared security store (Redis when REDIS_URL is
+// set). If the store is temporarily unavailable this path fail-opens
+// (returns no signal) so observability never blocks a request.
+async function recordAnomaly(
   userId: string,
   action: "vault_fetch" | "vault_sync",
   ip: string,
-): AnomalySignal {
-  const now = Date.now();
-  let entry = anomalyState.get(userId);
-  if (!entry || now - entry.windowStart > ANOMALY_WINDOW_MS) {
-    entry = {
-      windowStart: now,
-      fetchCount: 0,
-      syncCount: 0,
-      fetchAnomalyLogged: false,
-      syncAnomalyLogged: false,
-      ipChangeAnomalyLogged: false,
-      // Preserve lastIp across window rolls so an IP change is still
-      // detectable even if it happens at the boundary.
-      lastIp: entry?.lastIp,
-      lastTouchedAt: now,
-    };
-    anomalyState.set(userId, entry);
-  }
-
-  let rateAnomalyMeta: string | undefined;
-  if (action === "vault_fetch") {
-    entry.fetchCount++;
-    if (
-      entry.fetchCount > ANOMALY_FETCH_THRESHOLD &&
-      !entry.fetchAnomalyLogged
-    ) {
-      entry.fetchAnomalyLogged = true;
-      rateAnomalyMeta = `vault_fetch threshold exceeded (${entry.fetchCount} in ${ANOMALY_WINDOW_MS / 1000}s)`;
-    }
-  } else {
-    entry.syncCount++;
-    if (
-      entry.syncCount > ANOMALY_SYNC_THRESHOLD &&
-      !entry.syncAnomalyLogged
-    ) {
-      entry.syncAnomalyLogged = true;
-      rateAnomalyMeta = `vault_sync threshold exceeded (${entry.syncCount} in ${ANOMALY_WINDOW_MS / 1000}s)`;
-    }
-  }
-
-  let ipChangeFromIp: string | undefined;
-  if (entry.lastIp && entry.lastIp !== ip && !entry.ipChangeAnomalyLogged) {
-    // First IP change of this window → emit. Subsequent flips within
-    // the same window are intentionally suppressed (NAT/cell-handoff
-    // noise). entry.lastIp is still updated below so the comparison
-    // baseline keeps moving forward.
-    ipChangeFromIp = entry.lastIp;
-    entry.ipChangeAnomalyLogged = true;
-  }
-  entry.lastIp = ip;
-  entry.lastTouchedAt = now;
-
-  return { rateAnomalyMeta, ipChangeFromIp };
-}
-
-if (!RATE_LIMIT_DISABLED) {
-  // Periodic GC for anomaly state. Same cadence as the rate-limit map
-  // GC above. Without this, a server that has seen N distinct users
-  // over its lifetime keeps O(N) anomaly entries in memory forever.
-  setInterval(() => {
-    const now = Date.now();
-    for (const [k, v] of anomalyState) {
-      if (now - v.lastTouchedAt > ANOMALY_STATE_TTL_MS) {
-        anomalyState.delete(k);
-      }
-    }
-  }, 5 * 60_000);
+) {
+  return securityStore.recordAnomaly(userId, action, ip);
 }
 
 // ---------------------------------------------------------------------------
-// Passkey failure-burst tracker (in-memory)
+// Passkey failure-burst tracker (shared store)
 // ---------------------------------------------------------------------------
 //
 // EXTENDS the security model — does NOT replace or modify the existing
@@ -526,43 +456,8 @@ if (!RATE_LIMIT_DISABLED) {
 // is NOT counted here — that is its own single-event signal and is
 // escalated unconditionally at the call site (see
 // passkey_counter_replay_detected paths).
-const PASSKEY_FAILURE_THRESHOLD = 5;
-const PASSKEY_FAILURE_WINDOW_MS = 5 * 60_000;
-const PASSKEY_FAILURE_STATE_TTL_MS = 60 * 60_000;
-
-type PasskeyFailureState = {
-  windowStart: number;
-  count: number;
-  // Dedup so the burst escalation fires AT MOST once per window —
-  // additional failures past the threshold inside the same window
-  // are still counted (so the next window starts from a clean slate
-  // only after PASSKEY_FAILURE_WINDOW_MS elapses) but they don't
-  // emit additional anomaly_detected rows.
-  burstLogged: boolean;
-  lastTouchedAt: number;
-};
-const passkeyFailureState = new Map<string, PasskeyFailureState>();
-
-function recordPasskeyFailure(userId: string): { burstMeta?: string } {
-  const now = Date.now();
-  let entry = passkeyFailureState.get(userId);
-  if (!entry || now - entry.windowStart > PASSKEY_FAILURE_WINDOW_MS) {
-    entry = {
-      windowStart: now,
-      count: 0,
-      burstLogged: false,
-      lastTouchedAt: now,
-    };
-    passkeyFailureState.set(userId, entry);
-  }
-  entry.count++;
-  entry.lastTouchedAt = now;
-  let burstMeta: string | undefined;
-  if (entry.count > PASSKEY_FAILURE_THRESHOLD && !entry.burstLogged) {
-    entry.burstLogged = true;
-    burstMeta = `passkey failure threshold exceeded (${entry.count} in ${PASSKEY_FAILURE_WINDOW_MS / 1000}s)`;
-  }
-  return { burstMeta };
+async function recordPasskeyFailure(userId: string): Promise<{ burstMeta?: string }> {
+  return securityStore.recordPasskeyFailure(userId);
 }
 
 // T006 hardening: DECAY (not full-reset) the failure streak on a
@@ -583,14 +478,8 @@ function recordPasskeyFailure(userId: string): { burstMeta?: string } {
 // want to re-emit the burst audit on a count that re-crosses
 // threshold within the same window — but a fresh window naturally
 // resets it via the windowStart check in recordPasskeyFailure.
-function decayPasskeyFailures(userId: string): void {
-  const entry = passkeyFailureState.get(userId);
-  if (!entry) return;
-  entry.count = Math.max(0, entry.count - 1);
-  entry.lastTouchedAt = Date.now();
-  if (entry.count === 0) {
-    passkeyFailureState.delete(userId);
-  }
+async function decayPasskeyFailures(userId: string): Promise<void> {
+  await securityStore.decayPasskeyFailures(userId);
 }
 
 // Login-failure burst tracker (in-memory)
@@ -614,38 +503,8 @@ function decayPasskeyFailures(userId: string): void {
 // Threshold + window match the passkey side deliberately (>5 in 5min)
 // — a real user who fat-fingers their password or TOTP code converges
 // in 1–3 attempts, so the 6th failure is the right escalation point.
-const LOGIN_FAILURE_THRESHOLD = 5;
-const LOGIN_FAILURE_WINDOW_MS = 5 * 60_000;
-const LOGIN_FAILURE_STATE_TTL_MS = 60 * 60_000;
-
-type LoginFailureState = {
-  windowStart: number;
-  count: number;
-  burstLogged: boolean;
-  lastTouchedAt: number;
-};
-const loginFailureState = new Map<string, LoginFailureState>();
-
-function recordLoginFailure(userId: string): { burstMeta?: string } {
-  const now = Date.now();
-  let entry = loginFailureState.get(userId);
-  if (!entry || now - entry.windowStart > LOGIN_FAILURE_WINDOW_MS) {
-    entry = {
-      windowStart: now,
-      count: 0,
-      burstLogged: false,
-      lastTouchedAt: now,
-    };
-    loginFailureState.set(userId, entry);
-  }
-  entry.count++;
-  entry.lastTouchedAt = now;
-  let burstMeta: string | undefined;
-  if (entry.count > LOGIN_FAILURE_THRESHOLD && !entry.burstLogged) {
-    entry.burstLogged = true;
-    burstMeta = `login failure threshold exceeded (${entry.count} in ${LOGIN_FAILURE_WINDOW_MS / 1000}s)`;
-  }
-  return { burstMeta };
+async function recordLoginFailure(userId: string): Promise<{ burstMeta?: string }> {
+  return securityStore.recordLoginFailure(userId);
 }
 
 // Decay (not full-reset) on a successful login. Same reasoning as
@@ -653,14 +512,8 @@ function recordLoginFailure(userId: string): { burstMeta?: string } {
 // long failure streak with a single successful guess. The streak
 // only fully clears when count reaches zero or the 5-min window
 // rolls.
-function decayLoginFailures(userId: string): void {
-  const entry = loginFailureState.get(userId);
-  if (!entry) return;
-  entry.count = Math.max(0, entry.count - 1);
-  entry.lastTouchedAt = Date.now();
-  if (entry.count === 0) {
-    loginFailureState.delete(userId);
-  }
+async function decayLoginFailures(userId: string): Promise<void> {
+  await securityStore.decayLoginFailures(userId);
 }
 
 // =====================================================================
@@ -668,11 +521,13 @@ function decayLoginFailures(userId: string): void {
 // =====================================================================
 //
 // Per-IP behavioural tracking that turns "many failures from one
-// source" into a concrete soft-block + adaptive friction. All state
-// is process-local in-memory (a restart wipes it — fail-open, per
-// T010). No schema or crypto changes; every signal feeds the
-// EXISTING anomaly + security-level pipeline (recordSecuritySignalHit
-// + triggerSoftLock + an `ip_threat_detected` audit row).
+// source" into a concrete soft-block + adaptive friction. State lives
+// in the shared security store (Redis when REDIS_URL is set). If Redis
+// is configured but unreachable, login IP-block checks fail CLOSED
+// (treat as blocked). Detection writes fail OPEN so a store blip
+// cannot 500 an auth response. Every signal still feeds the EXISTING
+// anomaly + security-level pipeline (recordSecuritySignalHit +
+// triggerSoftLock + an `ip_threat_detected` audit row).
 //
 // Detected threat types:
 //   1. brute_force        — single user, ≥10 failures in 5 min from
@@ -727,21 +582,6 @@ function decayLoginFailures(userId: string): void {
 //     users (verified via getUserByUsername) contribute their
 //     opaque userId. Audit rows are only emitted for real userIds
 //     (a row keyed by hash would have nothing to attach it to).
-const IP_THREAT_INACTIVITY_TTL_MS = 30 * 60_000;
-const IP_THREAT_BRUTE_THRESHOLD = 10;
-const IP_THREAT_BRUTE_WINDOW_MS = 5 * 60_000;
-const IP_THREAT_STUFFING_THRESHOLD = 5;
-const IP_THREAT_STUFFING_WINDOW_MS = 10 * 60_000;
-const IP_THREAT_BLOCK_MS = 5 * 60_000;
-const IP_THREAT_TARGETS_CAP = 1000;
-const IP_THREAT_DECAY_PER_SUCCESS = 2;
-// Bound on the rolling per-IP failure-timestamp queue. Well above
-// the brute threshold (10) and decay step (2) so detection is not
-// lost even if an attacker hammers faster than the prune cadence;
-// existing only to keep the per-IP queue size constant under
-// sustained sub-threshold abuse that never trips the block.
-const IP_THREAT_FAILURE_QUEUE_CAP = 200;
-
 // Adaptive delay parameters: base preserves the existing 50-120ms
 // uniform anti-timing baseline (so legitimate users on a clean IP
 // are not slowed down) and adds 50ms per accumulated failure on
@@ -754,155 +594,26 @@ const IP_THREAT_DELAY_BASE_RANGE_MS = 71; // → uniform(50, 120)
 const IP_THREAT_DELAY_PER_FAILURE_MS = 50;
 const IP_THREAT_DELAY_CAP_MS = 2000;
 
-type IpThreatEntry = {
-  // Rolling queue of failure timestamps. Push on every recorded
-  // failure; prune timestamps older than the LONGER of the two
-  // detection windows (10 min stuffing) on every read so the queue
-  // is naturally self-trimming. Capped at IP_THREAT_FAILURE_QUEUE_CAP
-  // to bound memory under sustained sub-threshold abuse — when the
-  // cap is hit we drop the oldest (sliding-window semantics).
-  //
-  // Brute count = number of timestamps inside the 5-min brute window.
-  // Stuffing count = distinct targets in targetTimestamps inside the
-  // 10-min stuffing window (independent measure).
-  failureTimestamps: number[];
-  // Per-target last-seen timestamp. Key is either a real userId
-  // (UUID string) or a hashUsernameForIpThreat() result ("u:"-prefixed).
-  // isReal=true means the key is a real userId and contributes to
-  // audit emission; isReal=false means a hashed-username probe (still
-  // counts toward stuffing cardinality, but no audit row to emit).
-  // Capped at IP_THREAT_TARGETS_CAP distinct entries.
-  targetTimestamps: Map<string, { lastSeen: number; isReal: boolean }>;
-  lastSeenAt: number;
-  blockedUntil?: number;
-  // Per-active-block dedup: the audit + security-signal hit for each
-  // threat type fires AT MOST ONCE per active block. CRUCIALLY both
-  // flags clear inside isIpBlocked() the moment the block is observed
-  // to have lapsed — so an attacker who continues hammering after
-  // their 5-min cool-off can be re-blocked and re-alerted on the very
-  // next threshold breach. Rolling-window detection makes this safe:
-  // there is no per-entry-lifetime cap on detections, only "once per
-  // active block window".
-  bruteAlerted: boolean;
-  stuffingAlerted: boolean;
-};
-
-const ipThreatState = new Map<string, IpThreatEntry>();
-
-function hashUsernameForIpThreat(username: string): string {
-  // SHA-256, truncated to 32 hex chars (128 bits) — collision-resistant
-  // enough for cardinality measurement, short enough to cap memory
-  // even at IP_THREAT_TARGETS_CAP entries per IP. The "u:" prefix
-  // distinguishes hashed-username probes from real userIds (UUID
-  // strings) when reading the targetTimestamps map.
-  return (
-    "u:" +
-    createHash("sha256").update(username).digest("hex").slice(0, 32)
-  );
-}
-
-// Drop entries (failure timestamps + per-target last-seen) older
-// than the LONGER of the two detection windows. Keeps both rolling
-// counts (brute and stuffing) accurate without O(n) scans on the
-// hot path: timestamps are pushed monotonically, so the prune is a
-// single-pointer slice from the front.
-function pruneIpThreatEntry(entry: IpThreatEntry, now: number): void {
-  const longerWindow = Math.max(
-    IP_THREAT_BRUTE_WINDOW_MS,
-    IP_THREAT_STUFFING_WINDOW_MS,
-  );
-  const cutoff = now - longerWindow;
-  const ts = entry.failureTimestamps;
-  let drop = 0;
-  while (drop < ts.length && ts[drop] < cutoff) drop++;
-  if (drop > 0) ts.splice(0, drop);
-  for (const [key, val] of entry.targetTimestamps) {
-    if (val.lastSeen < cutoff) entry.targetTimestamps.delete(key);
-  }
-}
-
-// Number of failures inside the rolling 5-min brute window.
-// Timestamps are monotonically increasing (push-only at request
-// time), so we scan from the tail and break at the first miss.
-function ipThreatBruteCount(entry: IpThreatEntry, now: number): number {
-  const cutoff = now - IP_THREAT_BRUTE_WINDOW_MS;
-  const ts = entry.failureTimestamps;
-  let n = 0;
-  for (let i = ts.length - 1; i >= 0; i--) {
-    if (ts[i] >= cutoff) n++;
-    else break;
-  }
-  return n;
-}
-
-// Distinct-target count inside the rolling 10-min stuffing window.
-function ipThreatStuffingCount(
-  entry: IpThreatEntry,
-  now: number,
-): number {
-  const cutoff = now - IP_THREAT_STUFFING_WINDOW_MS;
-  let n = 0;
-  for (const v of entry.targetTimestamps.values()) {
-    if (v.lastSeen >= cutoff) n++;
-  }
-  return n;
-}
-
-// Real userIds touched within the LONGER detection window — used
-// when emitting per-user audit rows on a fresh block. Hashed-username
-// probes are excluded (no userId to attach a row to).
-function ipThreatRecentRealUserIds(
-  entry: IpThreatEntry,
-  now: number,
-): string[] {
-  const cutoff =
-    now - Math.max(IP_THREAT_BRUTE_WINDOW_MS, IP_THREAT_STUFFING_WINDOW_MS);
-  const out: string[] = [];
-  for (const [key, val] of entry.targetTimestamps) {
-    if (val.isReal && val.lastSeen >= cutoff) out.push(key);
-  }
-  return out;
-}
-
-function isIpBlocked(ip: string): boolean {
+async function isIpBlocked(ip: string): Promise<boolean> {
   if (!ip) return false;
   try {
-    const entry = ipThreatState.get(ip);
-    if (!entry?.blockedUntil) return false;
-    if (entry.blockedUntil > Date.now()) return true;
-    // Lazy expire. Drop the blockedUntil field AND clear the
-    // per-block dedup flags so a still-attacking IP can be
-    // re-blocked + re-alerted on the next threshold breach. Keep
-    // the rolling failure history (it self-prunes by window) so
-    // adaptive delay still applies until the 30-min GC sweep
-    // removes the entry — and so a freshly-unblocked attacker who
-    // resumes hammering re-trips the brute window almost
-    // immediately.
-    delete entry.blockedUntil;
-    entry.bruteAlerted = false;
-    entry.stuffingAlerted = false;
-    return false;
+    return await securityStore.isIpBlocked(ip);
   } catch {
-    // Fail-open per T010: anything unexpected here means we
-    // treat the IP as un-blocked rather than 500'ing the request.
-    return false;
+    // Redis backend fail-closes inside the store. A thrown error
+    // here is unexpected; fail-closed only when Redis is configured.
+    return securityStore.backend === "redis";
   }
 }
 
-function ipThreatDelayMs(ip: string): number {
+async function ipThreatDelayMs(ip: string): Promise<number> {
   const base =
     IP_THREAT_DELAY_BASE_MIN_MS +
     Math.floor(Math.random() * IP_THREAT_DELAY_BASE_RANGE_MS);
   if (!ip) return base;
   try {
-    const entry = ipThreatState.get(ip);
-    if (!entry) return base;
-    // Use the rolling count (timestamps still inside the longer
-    // window) rather than a raw counter — decay-on-success and
-    // window-prune both shrink this naturally, so a clean IP that
-    // had a burst 30 min ago doesn't keep paying the delay tax.
     const extra =
-      entry.failureTimestamps.length * IP_THREAT_DELAY_PER_FAILURE_MS;
+      (await securityStore.getIpFailureQueueLength(ip)) *
+      IP_THREAT_DELAY_PER_FAILURE_MS;
     return Math.min(base + extra, IP_THREAT_DELAY_CAP_MS);
   } catch {
     return base;
@@ -917,7 +628,7 @@ function ipThreatDelayMs(ip: string): number {
 // directly so legitimate logins from a shared-NAT IP are not
 // penalised by an attacker that recently used the same IP.
 async function adaptiveLoginDelay(ip: string): Promise<void> {
-  const ms = ipThreatDelayMs(ip);
+  const ms = await ipThreatDelayMs(ip);
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
@@ -931,24 +642,12 @@ async function adaptiveLoginDelay(ip: string): Promise<void> {
 // failure re-trips detection. Conversely, an attacker who pauses
 // for the full block duration accrues no timestamps and gets a
 // clean window back (intended: the block achieved its goal).
-function recordIpBlockedAttempt(ip: string): void {
+async function recordIpBlockedAttempt(ip: string): Promise<void> {
   if (!ip) return;
   try {
-    const now = Date.now();
-    const entry = ipThreatState.get(ip);
-    if (!entry) return;
-    pruneIpThreatEntry(entry, now);
-    if (entry.failureTimestamps.length >= IP_THREAT_FAILURE_QUEUE_CAP) {
-      entry.failureTimestamps.shift();
-    }
-    entry.failureTimestamps.push(now);
-    entry.lastSeenAt = now;
-    // Deliberately do NOT touch targetTimestamps (we have no target
-    // at the block-check point — it's before body parsing) and do
-    // NOT call evaluateIpThreat (the IP is already blocked; there
-    // is nothing to escalate beyond the existing block).
+    await securityStore.recordIpBlockedAttempt(ip);
   } catch {
-    // Fail-open per T010.
+    // Fail-open: a store error must not 500 a blocked-IP response.
   }
 }
 
@@ -967,14 +666,14 @@ async function ipBlockResponse(
   res: Response,
   ip: string,
 ): Promise<Response> {
-  recordIpBlockedAttempt(ip);
+  await recordIpBlockedAttempt(ip);
   await adaptiveLoginDelay(ip);
   return res
     .status(429)
     .json({ error: "Too many attempts. Please try again later." });
 }
 
-function recordIpFailure(
+async function recordIpFailure(
   storage: IStorage,
   ip: string,
   // Either a real userId (uuid) or a hashUsernameForIpThreat()
@@ -982,109 +681,31 @@ function recordIpFailure(
   // threshold; only the real userId variant produces audit rows.
   targetKey: string,
   realUserId: string | null,
-): void {
+): Promise<void> {
   if (!ip) return;
   // Outer try/catch is the LAST line of fail-open defense — any
   // mutation, evaluator, or audit failure must NOT propagate up
-  // into the auth response. The route-level handlers above also
-  // call this fire-and-forget (no return value to depend on).
+  // into the auth response.
   try {
-    const now = Date.now();
-    let entry = ipThreatState.get(ip);
-    if (!entry) {
-      entry = {
-        failureTimestamps: [],
-        targetTimestamps: new Map(),
-        lastSeenAt: now,
-        bruteAlerted: false,
-        stuffingAlerted: false,
-      };
-      ipThreatState.set(ip, entry);
-    }
-    pruneIpThreatEntry(entry, now);
-    if (entry.failureTimestamps.length >= IP_THREAT_FAILURE_QUEUE_CAP) {
-      // Cap reached — drop oldest, keep newest. Sliding-window
-      // semantics under sustained burst; threshold detection is
-      // unaffected because the cap is far above the brute threshold.
-      entry.failureTimestamps.shift();
-    }
-    entry.failureTimestamps.push(now);
-    // Upsert: a repeat probe of the same target refreshes its
-    // lastSeen so the rolling stuffing window correctly excludes
-    // it once activity stops. Cap distinct entries to bound memory.
-    if (
-      entry.targetTimestamps.has(targetKey) ||
-      entry.targetTimestamps.size < IP_THREAT_TARGETS_CAP
-    ) {
-      entry.targetTimestamps.set(targetKey, {
-        lastSeen: now,
-        isReal: realUserId !== null,
-      });
-    }
-    entry.lastSeenAt = now;
-    evaluateIpThreat(storage, ip, entry);
-  } catch {
-    // Fail-open per T010.
-  }
-}
-
-function evaluateIpThreat(
-  storage: IStorage,
-  ip: string,
-  entry: IpThreatEntry,
-): void {
-  try {
-    const now = Date.now();
-    // Brute force: ≥THRESHOLD failures inside the rolling 5-min
-    // window. Independent of stuffing — both can fire on the same
-    // entry (each at most once per active block, flags reset on
-    // unblock so re-blocking is permitted on continued attack).
-    const bruteCount = ipThreatBruteCount(entry, now);
-    if (
-      !entry.bruteAlerted &&
-      bruteCount >= IP_THREAT_BRUTE_THRESHOLD
-    ) {
-      entry.bruteAlerted = true;
-      entry.blockedUntil = now + IP_THREAT_BLOCK_MS;
-      fireIpThreatDetected(
-        storage,
-        ip,
-        "brute_force",
-        bruteCount,
-        ipThreatRecentRealUserIds(entry, now),
-      );
-    }
-    // Credential stuffing: ≥THRESHOLD DISTINCT targets inside the
-    // rolling 10-min window. Mix of real userIds + hashed-username
-    // probes both count toward cardinality; audit rows only fire
-    // for real userIds.
-    const stuffingCount = ipThreatStuffingCount(entry, now);
-    if (
-      !entry.stuffingAlerted &&
-      stuffingCount >= IP_THREAT_STUFFING_THRESHOLD
-    ) {
-      entry.stuffingAlerted = true;
-      entry.blockedUntil = now + IP_THREAT_BLOCK_MS;
-      fireIpThreatDetected(
-        storage,
-        ip,
-        "credential_stuffing",
-        bruteCount, // count = brute window count for consistency
-        ipThreatRecentRealUserIds(entry, now),
-      );
+    const detections = await securityStore.recordIpFailure(
+      ip,
+      targetKey,
+      realUserId,
+    );
+    for (const d of detections) {
+      await fireIpThreatDetected(storage, ip, d);
     }
   } catch {
     // Fail-open per T010.
   }
 }
 
-function fireIpThreatDetected(
+async function fireIpThreatDetected(
   storage: IStorage,
   ip: string,
-  type: "brute_force" | "credential_stuffing",
-  count: number,
-  realUserIds: string[],
-): void {
+  detection: IpThreatDetection,
+): Promise<void> {
+  const { type, count, realUserIds } = detection;
   // Per T009: log type, ip, count. NEVER raw usernames or the
   // targeted-user set. Each affected REAL user gets ONE row
   // attached to their account so it surfaces in their security
@@ -1123,43 +744,19 @@ function fireIpThreatDetected(
       const hardLock = type === "credential_stuffing";
       recordSecuritySignalHit(userId, null, hardLock);
       if (hardLock) {
-        triggerSoftLock(userId);
+        await triggerSoftLock(userId);
       }
     } catch {
-      // Fail-open per T010: in-memory security model errors MUST
-      // NOT propagate up into the auth response.
+      // Fail-open per T010: security-model errors MUST NOT
+      // propagate up into the auth response.
     }
   }
 }
 
-function recordIpSuccess(ip: string): void {
+async function recordIpSuccess(ip: string): Promise<void> {
   if (!ip) return;
   try {
-    const entry = ipThreatState.get(ip);
-    if (!entry) return;
-    // Decay by popping the MOST RECENT failures from the rolling
-    // queue. Pop-from-tail (vs shift-from-head) means the oldest
-    // failures stay in the window — so a clean success after a
-    // recent fat-finger streak relieves the user, but an attacker
-    // who somehow guesses correctly in the middle of a 9-failure
-    // burst still leaves 7 in the window for the next 2 failures
-    // to re-trip detection. Decay step is bounded so a single
-    // success cannot fully erase a sustained attack pattern.
-    for (
-      let i = 0;
-      i < IP_THREAT_DECAY_PER_SUCCESS && entry.failureTimestamps.length > 0;
-      i++
-    ) {
-      entry.failureTimestamps.pop();
-    }
-    entry.lastSeenAt = Date.now();
-    if (entry.failureTimestamps.length === 0 && !entry.blockedUntil) {
-      // Fully decayed and no active block — drop the entry now
-      // rather than waiting for the 30-min TTL. Frees memory for
-      // IPs that turned out to be benign and lets the next attack
-      // burst from this IP re-alert from a clean slate.
-      ipThreatState.delete(ip);
-    }
+    await securityStore.recordIpSuccess(ip);
   } catch {
     // Fail-open per T010.
   }
@@ -1184,38 +781,12 @@ const sessionBindingDriftDedup = new Map<string, number>();
 if (!RATE_LIMIT_DISABLED) {
   setInterval(() => {
     const now = Date.now();
-    for (const [k, v] of passkeyFailureState) {
-      if (now - v.lastTouchedAt > PASSKEY_FAILURE_STATE_TTL_MS) {
-        passkeyFailureState.delete(k);
-      }
-    }
-    // Same 5-min sweep also GCs the login-failure tracker — entries
-    // not touched in an hour can't be part of any active 5-min burst
-    // window and serve no further purpose.
-    for (const [k, v] of loginFailureState) {
-      if (now - v.lastTouchedAt > LOGIN_FAILURE_STATE_TTL_MS) {
-        loginFailureState.delete(k);
-      }
-    }
-    // T003 hardening: piggyback on the same 5-min sweep to GC the
-    // session-binding-drift dedup map. Entries older than the dedup
-    // TTL are safe to evict — the next drifted request from the
-    // same tuple will simply re-fire one event, which is the
-    // intended cadence anyway.
+    // Session-binding-drift dedup stays process-local (audit-spam
+    // guard only; DB + shared store remain the security source of
+    // truth). Entries older than the dedup TTL are safe to evict.
     for (const [k, ts] of sessionBindingDriftDedup) {
       if (now - ts > SESSION_BINDING_DEDUP_TTL_MS) {
         sessionBindingDriftDedup.delete(k);
-      }
-    }
-    // Adaptive IP threat sweep: drop entries that haven't seen a
-    // login attempt in IP_THREAT_INACTIVITY_TTL_MS (30 min). The
-    // entry's failures + targetedUsers history can't contribute to
-    // any active 5-min brute-force or 10-min stuffing window after
-    // that long, so it's safe to evict — a returning attacker
-    // starts fresh and re-trips the thresholds normally.
-    for (const [k, v] of ipThreatState) {
-      if (now - v.lastSeenAt > IP_THREAT_INACTIVITY_TTL_MS) {
-        ipThreatState.delete(k);
       }
     }
   }, 5 * 60_000);
@@ -1346,14 +917,14 @@ function checkSessionBindingDrift(
 // sessionId may be null for unauthenticated paths (login/start,
 // login/finish). markSessionSuspicious + the suspicious-session set
 // are both gated on a non-null sessionId.
-function escalatePasskeyAnomaly(
+async function escalatePasskeyAnomaly(
   storage: IStorage,
   userId: string,
   sessionId: string | null,
   ip: string,
   meta: string,
   opts: { hardLock: boolean },
-): void {
+): Promise<void> {
   recordAudit(storage, {
     userId,
     action: "anomaly_detected",
@@ -1361,7 +932,7 @@ function escalatePasskeyAnomaly(
     userAgent: meta,
   });
   if (opts.hardLock) {
-    triggerSoftLock(userId);
+    await triggerSoftLock(userId);
   }
   if (sessionId) {
     void storage.markSessionSuspicious(sessionId);
@@ -1370,7 +941,7 @@ function escalatePasskeyAnomaly(
 }
 
 // ---------------------------------------------------------------------------
-// Soft-lock + IP-burst response system (in-memory, fail-open)
+// Soft-lock + IP-burst response system (shared store)
 // ---------------------------------------------------------------------------
 //
 // LAYERED on top of anomaly detection. Anomaly detection observes; this
@@ -1388,10 +959,10 @@ function escalatePasskeyAnomaly(
 //     during a lock.
 //   - Always auto-expires (Date.now() comparison, no admin override
 //     needed). There is no code path that creates a permanent lock.
-//   - Fail-open: if the in-memory state is somehow lost (server
-//     restart, GC eviction), all writes succeed. This is INTENTIONAL.
-//     Locking out a legitimate user because the lock-state Map crashed
-//     would be worse than a brief detection gap.
+//   - Shared-store source of truth (Redis when REDIS_URL is set).
+//     Vault write gates fail CLOSED if Redis is configured but
+//     unreachable so a store outage cannot open a write window.
+//     Display/hydration reads fail OPEN (last known cache / unlocked).
 //   - Triggered by the anomaly detector but NEVER by the rate-limiter:
 //     hitting a rate cap (429) is normal client misbehavior; tripping
 //     an anomaly threshold is the genuinely-suspicious signal.
@@ -1401,16 +972,6 @@ function escalatePasskeyAnomaly(
 // (per spec's "light touch"). Locking only happens after enough flips
 // pile up in the window — this catches "session token in use from many
 // places" without punishing road-warrior / mobile-roaming users.
-const SOFT_LOCK_DURATION_MS = 5 * 60_000;
-const IP_CHANGE_WINDOW_MS = 10 * 60_000;
-// Spec wording: "more than 3 IP changes within 10 minutes". A "change"
-// is a transition (A→B), not an entry. With N entries in the buffer,
-// transitions = N - 1. "More than 3" → transitions ≥ 4 → entries ≥ 5.
-const IP_CHANGE_THRESHOLD = 3;
-// Cap the buffer slightly above what the threshold needs so the
-// trim-to-window step has room to detect the most recent burst even
-// if old entries haven't been GC'd yet.
-const IP_HISTORY_MAX = IP_CHANGE_THRESHOLD + 3;
 
 type UserSecurityState = {
   // Wall-clock epoch-ms after which the lock no longer applies. Absent
@@ -1598,13 +1159,14 @@ function recordSecuritySignalHit(
   if (flagSession && sessionId) {
     s.suspiciousSessions.add(sessionId);
   }
+  void securityStore.recordRecentAnomalyAt(userId, s.recentAnomalyAt);
 }
 
 // Returns the lock-until timestamp if the user is currently soft-locked,
 // otherwise undefined. ALSO opportunistically clears expired locks so the
-// in-memory state doesn't accumulate stale `softLockedUntil` values past
-// their expiry — important for the auto-expire UX (user makes a request
-// after the 5min lock has elapsed, this returns undefined, write proceeds).
+// in-memory cache doesn't accumulate stale `softLockedUntil` values past
+// their expiry. Write gates must use getActiveSoftLockFromStore so a
+// Redis outage fail-closes instead of trusting this cache.
 function getActiveSoftLock(userId: string): number | undefined {
   const s = userSecurityState.get(userId);
   if (!s || s.softLockedUntil === undefined) return undefined;
@@ -1614,16 +1176,54 @@ function getActiveSoftLock(userId: string): number | undefined {
   return undefined;
 }
 
+// Authoritative soft-lock read for vault write gates. Consults the
+// shared store; fail-closed when Redis is configured but unreachable.
+async function getActiveSoftLockFromStore(
+  userId: string,
+): Promise<number | undefined> {
+  const until = await securityStore.getSoftLockUntil(userId, {
+    failClosed: securityStore.backend === "redis",
+  });
+  const s = getOrInitSecurityState(userId);
+  if (until !== undefined && until > Date.now()) {
+    s.softLockedUntil = until;
+    return until;
+  }
+  s.softLockedUntil = undefined;
+  return undefined;
+}
+
+// Refresh the process-local cache from the shared store so
+// deriveSecurityLevel stays synchronous after authenticate().
+async function refreshSharedSecuritySignals(userId: string): Promise<void> {
+  try {
+    const [lock, anom] = await Promise.all([
+      securityStore.getSoftLockUntil(userId, { failClosed: false }),
+      securityStore.getRecentAnomalyAt(userId),
+    ]);
+    const s = getOrInitSecurityState(userId);
+    s.softLockedUntil = lock;
+    if (anom !== undefined) {
+      s.recentAnomalyAt = Math.max(s.recentAnomalyAt ?? 0, anom);
+    }
+    s.lastTouchedAt = Date.now();
+  } catch {
+    // Display path fail-open: keep last known cache.
+  }
+}
+
 // Idempotent. Multiple anomalies in quick succession do NOT extend an
 // already-longer lock — Math.max keeps the latest expiry, never shortens.
 // Returns the lock-until timestamp so callers can include it in the
 // audit log payload.
-function triggerSoftLock(userId: string): number {
+async function triggerSoftLock(userId: string): Promise<number> {
+  const until = await securityStore.triggerSoftLock(
+    userId,
+    SOFT_LOCK_DURATION_MS,
+  );
   const s = getOrInitSecurityState(userId);
-  const now = Date.now();
-  const candidate = now + SOFT_LOCK_DURATION_MS;
-  s.softLockedUntil = Math.max(s.softLockedUntil ?? 0, candidate);
-  s.lastTouchedAt = now;
+  s.softLockedUntil = Math.max(s.softLockedUntil ?? 0, until);
+  s.lastTouchedAt = Date.now();
   return s.softLockedUntil;
 }
 
@@ -1638,33 +1238,13 @@ function triggerSoftLock(userId: string): number {
 // subsequent request was wasteful and made auditing the trigger point
 // harder). When the window expires and entries drop back below the
 // threshold, the next crossing fires fresh — no permanent suppression.
-function trackIpAndCheckBurst(userId: string, ip: string): boolean {
+async function trackIpAndCheckBurst(
+  userId: string,
+  ip: string,
+): Promise<boolean> {
   const s = getOrInitSecurityState(userId);
-  const now = Date.now();
-  s.lastTouchedAt = now;
-  // Prune stale entries FIRST so transitionsBefore reflects only the
-  // current 10-min window. Otherwise a 2-hour-old entry would inflate
-  // the pre-push count and prevent the edge detector from firing the
-  // current window's first crossing.
-  s.ipHistory = s.ipHistory.filter((e) => now - e.at <= IP_CHANGE_WINDOW_MS);
-  const transitionsBefore = Math.max(0, s.ipHistory.length - 1);
-
-  const last = s.ipHistory[s.ipHistory.length - 1];
-  if (!last || last.ip !== ip) {
-    s.ipHistory.push({ ip, at: now });
-  }
-  // Hard cap on buffer length to bound per-user memory.
-  if (s.ipHistory.length > IP_HISTORY_MAX) {
-    s.ipHistory = s.ipHistory.slice(-IP_HISTORY_MAX);
-  }
-  const transitionsAfter = s.ipHistory.length - 1;
-  // Edge: must have just crossed from "at-or-below threshold" to
-  // "above threshold". Threshold check uses ">" to match spec wording
-  // "more than 3".
-  return (
-    transitionsAfter > IP_CHANGE_THRESHOLD &&
-    transitionsBefore <= IP_CHANGE_THRESHOLD
-  );
+  s.lastTouchedAt = Date.now();
+  return securityStore.trackIpAndCheckBurst(userId, ip);
 }
 
 // ---------------------------------------------------------------------------
@@ -1696,7 +1276,6 @@ const LEVEL_RANK: Record<SecurityLevel, number> = {
   high: 2,
   critical: 3,
 };
-const ANOMALY_RECENT_WINDOW_MS = 10 * 60_000;
 
 // Per-user "last observed level" so we can detect transitions and log
 // only on change (not on every request). Mutating this Map and emitting
@@ -2107,18 +1686,18 @@ function evaluateSecurityLevel(
 // Lazy hydration of in-memory security state from the audit log
 // ---------------------------------------------------------------------------
 //
-// Problem: all the security state (recentAnomalyAt, softLockedUntil,
-// suspiciousSessions, currentLevel) lives ONLY in memory. A server
-// restart wipes it, which would let an attacker downgrade their
-// securityLevel ("critical" → "normal") simply by waiting for / causing
-// a process bounce. Spec requires the level to remain consistent
-// across restarts.
+// Problem: session-trust Sets and the derived securityLevel cache are
+// still process-local. Soft-lock, recent-anomaly, failure-burst, and
+// IP-threat counters now live in the shared security store (Redis when
+// REDIS_URL is set). A restart without Redis would still let an
+// attacker downgrade "critical" → "normal" unless we rehydrate.
 //
-// Solution: on the first authenticated request per user after a fresh
-// process start, reconstruct what we can from the audit log (last 10
-// minutes only — beyond that the signal naturally decays anyway). This
-// is LAZY: only active users pay the cost; cold-start does not scan
-// every user.
+// Solution: every authenticated request refreshes soft-lock / recent
+// anomaly from the shared store. On the first authenticated request
+// per user after a fresh process start we also reconstruct what we
+// can from the audit log (last 10 minutes only — beyond that the
+// signal naturally decays anyway). This is LAZY: only active users
+// pay the audit cost; cold-start does not scan every user.
 //
 // All hot-path constraints still hold:
 //   - Hydration is gated on "is this user's in-memory state empty?";
@@ -2241,10 +1820,9 @@ async function hydrateSecurityStateFromAudit(
     // an anomaly_detected the moment a sixth failure arrives.
     if (
       passkeyFailuresInWindow > 0 &&
-      oldestPasskeyFailureInWindowAt !== undefined &&
-      !passkeyFailureState.has(userId)
+      oldestPasskeyFailureInWindowAt !== undefined
     ) {
-      passkeyFailureState.set(userId, {
+      await securityStore.seedPasskeyFailures(userId, {
         windowStart: oldestPasskeyFailureInWindowAt,
         count: passkeyFailuresInWindow,
         burstLogged: passkeyFailuresInWindow > PASSKEY_FAILURE_THRESHOLD,
@@ -2315,6 +1893,10 @@ async function hydrateIfNeeded(
       // populating still-undefined fields.
       const slot = getOrInitSecurityState(userId);
       try {
+        // Shared store is the restart-durable source of truth when
+        // Redis is configured. Audit hydration fills any remaining
+        // gaps (memory-only deploys, or Redis keys that already TTL'd).
+        await refreshSharedSecuritySignals(userId);
         const result = await hydrateSecurityStateFromAudit(userId, storage);
         // Merge with "live wins" semantics. Each field is only written
         // when the live path hasn't already populated it during the
@@ -2619,6 +2201,11 @@ async function authenticate(
     } catch {
       // Already swallowed inside hydrateIfNeeded; this is defense in depth.
     }
+    try {
+      await refreshSharedSecuritySignals(session.userId);
+    } catch {
+      // Display cache refresh is best-effort; write gates re-read the store.
+    }
     // Populate the in-memory untrusted-session cache from the DB row.
     // The DB column is the source of truth (set at session-creation
     // time, flipped only by /api/auth/trust-device); we mirror it into
@@ -2713,6 +2300,11 @@ async function authenticate(
   } catch {
     // Already swallowed inside hydrateIfNeeded.
   }
+  try {
+    await refreshSharedSecuritySignals(userId);
+  } catch {
+    // Display cache refresh is best-effort; write gates re-read the store.
+  }
   return { ok: true, userId, sessionId: null, totpVerifiedUntil: null };
 }
 
@@ -2772,7 +2364,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
 
       const clientIp = getClientIp(req);
-      if (isRateLimited(`register:${clientIp}`)) {
+      if (await isRateLimited(`register:${clientIp}`)) {
         return res.status(429).json({ error: "Too many attempts. Please try again later." });
       }
 
@@ -2815,7 +2407,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
 
       const clientIp = getClientIp(req);
-      if (isRateLimited(`login:${clientIp}`)) {
+      if (await isRateLimited(`login:${clientIp}`)) {
         return res.status(429).json({ error: "Too many attempts. Please try again later." });
       }
       // Adaptive IP threat block: if recent failures from this IP
@@ -2825,7 +2417,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // the same wording the rate-limiter above uses, so an
       // attacker can't tell which gate fired. Adaptive delay before
       // the response keeps the timing oracle closed.
-      if (isIpBlocked(clientIp)) {
+      if (await isIpBlocked(clientIp)) {
         return await ipBlockResponse(res, clientIp);
       }
 
@@ -2857,7 +2449,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // usernames never enter process memory. No userId to attach
         // an audit row to (and a not-found audit would itself be a
         // username-enumeration oracle), so realUserId=null.
-        recordIpFailure(
+        await recordIpFailure(
           storage,
           clientIp,
           hashUsernameForIpThreat(username),
@@ -2894,9 +2486,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // this is the unauthenticated path — an attacker who knows
         // a victim username + can rotate IPs could otherwise soft-
         // lock the legitimate user's writes (DoS vector).
-        const burst = recordLoginFailure(user.id);
+        const burst = await recordLoginFailure(user.id);
         if (burst.burstMeta) {
-          escalatePasskeyAnomaly(
+          await escalatePasskeyAnomaly(
             storage,
             user.id,
             null,
@@ -2911,7 +2503,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // cardinality (this user contributes 1 distinct target).
         // Real userId so the ip_threat_detected audit row, if it
         // fires here, is attached to this user.
-        recordIpFailure(storage, clientIp, user.id, user.id);
+        await recordIpFailure(storage, clientIp, user.id, user.id);
         await adaptiveLoginDelay(clientIp);
         return res.status(401).json({ error: "Invalid credentials" });
       }
@@ -3011,14 +2603,14 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // single successful login should NOT erase a 5-attempt streak
       // that came before it (an attacker who stumbles on the right
       // password after 4 wrong guesses still leaves a partial trail).
-      decayLoginFailures(user.id);
+      await decayLoginFailures(user.id);
       // Adaptive IP threat decay (T008): a clean success from this
       // IP knocks IP_THREAT_DECAY_PER_SUCCESS off its accumulated
       // failure count. If the count reaches zero and there's no
       // active block, the entry is dropped entirely so a one-off
       // fat-finger streak followed by a real login doesn't leave
       // adaptive friction lingering on a benign IP.
-      recordIpSuccess(ip);
+      await recordIpSuccess(ip);
       // New-device path: log the event AND raise the in-memory threat
       // signal so the very first request after login (the client's
       // initial /api/vault/fetch) already sees securityLevel=elevated.
@@ -3074,7 +2666,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
 
       const clientIp = getClientIp(req);
-      if (isRateLimited(`salt:${clientIp}`)) {
+      if (await isRateLimited(`salt:${clientIp}`)) {
         return res.status(429).json({ error: "Too many attempts. Please try again later." });
       }
 
@@ -3120,7 +2712,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // Rate limit AFTER authenticate so the userId is real and unauth
       // probes can never poison either bucket. Single-shape 429 — see
       // checkUserRateLimit doc for why we don't distinguish IP vs user.
-      if (checkUserRateLimit("vault_sync", getClientIp(req), userId)) {
+      if (await checkUserRateLimit("vault_sync", getClientIp(req), userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
 
@@ -3147,7 +2739,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // 423 (Locked) is the closest standard HTTP status; the response
       // body is a single-shape error so a probe can't distinguish 423
       // from any other rejection without parsing.
-      const lockedUntil = getActiveSoftLock(userId);
+      const lockedUntil = await getActiveSoftLockFromStore(userId);
       if (lockedUntil !== undefined) {
         recordAudit(storage, {
           userId,
@@ -3294,8 +2886,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         userId,
         parsed.data.encryptedBlob,
         parsed.data.expectedPrevVersion,
+        parsed.data.vaultKeyProof,
+        parsed.data.nextVaultKeyProof,
       );
       if (!result.ok) {
+        if (result.code === "key_proof_invalid" || result.code === "key_proof_unbound") {
+          return res.status(403).json({ error: "Invalid vault key proof" });
+        }
         // Version conflict is NOT a successful sync — do not audit-log
         // it. Per spec we only log AFTER success to avoid noise and to
         // prevent enumeration via repeated failed attempts.
@@ -3304,8 +2901,8 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
 
       // Audit + anomaly hooks AFTER success. blobSize is the actual
       // byte length of the encrypted blob the client just stored
-      // (NOT the blob contents themselves — we never log those, that
-      // would break zero-knowledge). versionBefore is captured inside
+      // (NOT the blob contents themselves — we never log ciphertext).
+      // Blob size is still operator-visible metadata. versionBefore is captured inside
       // syncVault's transaction so it's race-free.
       const ip = getClientIp(req);
       const userAgent = captureAuditUserAgent(req);
@@ -3318,7 +2915,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         ipAddress: ip,
         userAgent,
       });
-      const signal = recordAnomaly(userId, "vault_sync", ip);
+      const signal = await recordAnomaly(userId, "vault_sync", ip);
       if (signal.rateAnomalyMeta) {
         // Stash anomaly context in user_agent (per spec: "include
         // metadata in user_agent or a new field"). Keeps the schema
@@ -3334,7 +2931,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // (The current request already passed validation and the
         // storage write succeeded; spec is "block writes during the
         // lock window", not "retroactively reject this one".)
-        triggerSoftLock(userId);
+        await triggerSoftLock(userId);
         // Mark the authenticating session as suspicious so the user's
         // session-list UI can flag the device. No-op if the request
         // came in via legacy auth-hash (auth.sessionId === null) —
@@ -3360,8 +2957,8 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // IP_CHANGE_THRESHOLD transitions in the window. Independent of
       // the single-flip ip_change_detected event above (which only
       // fires once per anomaly window and never locks).
-      if (trackIpAndCheckBurst(userId, ip)) {
-        triggerSoftLock(userId);
+      if (await trackIpAndCheckBurst(userId, ip)) {
+        await triggerSoftLock(userId);
       }
 
       return res.status(200).json({
@@ -3370,6 +2967,623 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       });
     } catch (err) {
       console.error("Vault sync error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Opaque per-item ciphertext store. Accepts one canonical manifest plus
+  // contentSha256. Writes require a session token and the same vaultKeyProof
+  // already bound on vault_blobs. The long-lived auth hash is not a write
+  // credential here. These routes do not decrypt and do not modify vault_blobs.
+  app.put("/api/vault/items", jsonBody(VAULT_ITEM_BODY_LIMIT), async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const parsed = validateVaultItemPut(req.body);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+
+      // Session token only. A long-lived auth hash is not a write
+      // credential, and it is not inspected on this route.
+      const tokenHeader = validateSessionTokenHeader(req);
+      if (!tokenHeader.ok) {
+        return res.status(400).json({ error: tokenHeader.error });
+      }
+
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      if (auth.sessionId === null) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+      const { userId } = auth;
+
+      if (await checkUserRateLimit("vault_item_put", getClientIp(req), userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+
+      if (isRecoveryModeActive(userId, storage)) {
+        return res
+          .status(423)
+          .json({ error: "Vault locked - recovery mode active" });
+      }
+
+      const lockedUntil = await getActiveSoftLockFromStore(userId);
+      if (lockedUntil !== undefined) {
+        recordAudit(storage, {
+          userId,
+          action: "write_blocked_soft_lock",
+          ipAddress: getClientIp(req),
+          userAgent: `attemptedAction=item_put; blockedUntil=${lockedUntil}`,
+        });
+        recordSecuritySignalHit(userId, auth.sessionId, false);
+        return res
+          .status(423)
+          .json({ error: "Vault temporarily locked due to suspicious activity" });
+      }
+
+      const blob = await storage.getVaultBlob(userId);
+      if (!blob?.keyVerifier) {
+        return res.status(403).json({ error: "Invalid vault key proof" });
+      }
+      const proof = decideVaultWriteProof({
+        storedVerifier: blob.keyVerifier,
+        hasExistingBlob: true,
+        providedProof: parsed.data.vaultKeyProof,
+      });
+      if (!proof.ok) {
+        return res.status(403).json({ error: "Invalid vault key proof" });
+      }
+
+      const accepted = acceptOpaqueItemManifest(parsed.data);
+      if (!accepted.ok) {
+        return res.status(400).json({ error: accepted.error });
+      }
+
+      const stored = await storage.putVaultItem(userId, accepted.item);
+      const previous = await storage.getVaultItemReceipt(userId, stored.itemId);
+      const signed = createSignedItemReceipt({
+        previous,
+        op: "put",
+        itemId: stored.itemId,
+        itemVersion: stored.version,
+        contentSha256: stored.contentSha256,
+        fromLocator: ITEM_RECEIPT_CLIENT_LOCATOR,
+        toLocator:
+          stored.locator === ITEM_RECEIPT_TOMBSTONE_LOCATOR ? "stored" : stored.locator,
+        issuedAt: Date.now(),
+      });
+      const savedReceipt = await storage.putVaultItemReceipt(userId, signed);
+      return res.status(200).json(itemReadBody(stored, savedReceipt));
+    } catch (err) {
+      console.error("Vault item put error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Bind the device Ed25519 public key to the session issued at login.
+  // The private key is not accepted. vaultKeyProof is not required: the
+  // vault may still be locked at login. Writes do not accept this key.
+  app.post(
+    "/api/auth/retrieval-device",
+    jsonBody(AUTH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+
+        const parsed = validateRetrievalDevice(req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        const tokenHeader = validateSessionTokenHeader(req);
+        if (!tokenHeader.ok) {
+          return res.status(400).json({ error: tokenHeader.error });
+        }
+
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        if (auth.sessionId === null) {
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+
+        if (
+          await checkUserRateLimit(
+            "retrieval_device_register",
+            getClientIp(req),
+            auth.userId,
+          )
+        ) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+
+        const bound = await storage.bindSessionRetrievalKey(
+          auth.sessionId,
+          parsed.data.publicKey,
+        );
+        if (!bound) {
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+        return res.status(200).json({ registered: true });
+      } catch (err) {
+        console.error("Retrieval device register error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  app.get("/api/vault/items/:itemId", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const itemId = req.params.itemId;
+      if (typeof itemId !== "string" || !isOpaqueItemId(itemId)) {
+        return res.status(400).json({ error: "Invalid itemId" });
+      }
+
+      // A retrieval token is read-only. When the header is present it is
+      // the only credential: authenticate() is not called, so a long-lived
+      // auth hash on the same request is never inspected. Writes ignore
+      // this header and still require the session plus vaultKeyProof.
+      const bearer = readAuthorizationBearer(req.get("authorization"));
+      let userId: string;
+      if (bearer.present) {
+        if (!bearer.token) {
+          return res.status(401).json({ error: "Invalid retrieval token" });
+        }
+        const publicKey = retrievalTokenPublicKey(bearer.token);
+        if (!publicKey) {
+          return res.status(401).json({ error: "Invalid retrieval token" });
+        }
+        const registeredUserIds = await storage.listActiveRetrievalKeyUserIds(publicKey);
+        const verdict = verifyRetrievalToken({
+          token: bearer.token,
+          itemId,
+          nowMs: Date.now(),
+          registeredUserIds,
+        });
+        if (!verdict.ok) {
+          return res.status(401).json({ error: "Invalid retrieval token" });
+        }
+        userId = verdict.userId;
+      } else {
+        const tokenHeader = validateSessionTokenHeader(req);
+        if (!tokenHeader.ok) {
+          return res.status(400).json({ error: tokenHeader.error });
+        }
+
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        if (auth.sessionId === null) {
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+        userId = auth.userId;
+      }
+
+      if (await checkUserRateLimit("vault_item_get", getClientIp(req), userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+
+      const item = await storage.getVaultItem(userId, itemId);
+      if (!item) {
+        return res.status(404).json({ error: "Not found" });
+      }
+      const receipt = await storage.getVaultItemReceipt(userId, itemId);
+      // receiptPublicKey is the Ed25519 pin the client can record. The
+      // signing seed is not included. A missing row stays receipt: null.
+      return res.status(200).json(itemReadBody(item, receipt));
+    } catch (err) {
+      console.error("Vault item get error");
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Tombstone for one item. Session token is required before the auth hash
+  // is considered. vaultKeyProof is required. The document hash must match
+  // the canonical tombstone encoding. Ciphertext fields and locator are cleared.
+  app.put(
+    "/api/vault/items/:itemId/tombstone",
+    jsonBody(AUTH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+
+        const itemId = req.params.itemId;
+        if (typeof itemId !== "string" || !isOpaqueItemId(itemId)) {
+          return res.status(400).json({ error: "Invalid itemId" });
+        }
+
+        const parsed = validateVaultItemTombstonePut(req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        if (parsed.data.itemId !== itemId) {
+          return res.status(400).json({ error: "Invalid itemId" });
+        }
+
+        const tokenHeader = validateSessionTokenHeader(req);
+        if (!tokenHeader.ok) {
+          return res.status(400).json({ error: tokenHeader.error });
+        }
+
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        if (auth.sessionId === null) {
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+        const { userId } = auth;
+
+        if (await checkUserRateLimit("vault_item_tombstone", getClientIp(req), userId)) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+
+        if (isRecoveryModeActive(userId, storage)) {
+          return res
+            .status(423)
+            .json({ error: "Vault locked - recovery mode active" });
+        }
+
+        const lockedUntil = await getActiveSoftLockFromStore(userId);
+        if (lockedUntil !== undefined) {
+          recordAudit(storage, {
+            userId,
+            action: "write_blocked_soft_lock",
+            ipAddress: getClientIp(req),
+            userAgent: `attemptedAction=item_tombstone; blockedUntil=${lockedUntil}`,
+          });
+          recordSecuritySignalHit(userId, auth.sessionId, false);
+          return res
+            .status(423)
+            .json({ error: "Vault temporarily locked due to suspicious activity" });
+        }
+
+        const blob = await storage.getVaultBlob(userId);
+        if (!blob?.keyVerifier) {
+          return res.status(403).json({ error: "Invalid vault key proof" });
+        }
+        const proof = decideVaultWriteProof({
+          storedVerifier: blob.keyVerifier,
+          hasExistingBlob: true,
+          providedProof: parsed.data.vaultKeyProof,
+        });
+        if (!proof.ok) {
+          return res.status(403).json({ error: "Invalid vault key proof" });
+        }
+
+        const accepted = acceptOpaqueItemTombstone(parsed.data);
+        if (!accepted.ok) {
+          return res.status(400).json({ error: accepted.error });
+        }
+
+        const existing = await storage.getVaultItem(userId, accepted.tombstone.itemId);
+        const fromLocator =
+          existing &&
+          existing.locator.length > 0 &&
+          existing.locator !== ITEM_RECEIPT_TOMBSTONE_LOCATOR
+            ? existing.locator
+            : ITEM_RECEIPT_CLIENT_LOCATOR;
+        const stored = await storage.putVaultItemTombstone(userId, accepted.tombstone);
+        const previous = await storage.getVaultItemReceipt(userId, stored.itemId);
+        const signed = createSignedItemReceipt({
+          previous,
+          op: "delete",
+          itemId: stored.itemId,
+          itemVersion: stored.version,
+          contentSha256: stored.contentSha256,
+          fromLocator,
+          toLocator: ITEM_RECEIPT_TOMBSTONE_LOCATOR,
+          issuedAt: Date.now(),
+        });
+        const savedReceipt = await storage.putVaultItemReceipt(userId, signed);
+        return res.status(200).json(itemReadBody(stored, savedReceipt));
+      } catch (err) {
+        console.error("Vault item tombstone error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // Locator move. Session token is required before the auth hash is
+  // considered. vaultKeyProof is required. Only the locator column changes.
+  // The content hash stays on the stored row. A tombstone cannot move.
+  app.post(
+    "/api/vault/items/:itemId/move",
+    jsonBody(AUTH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+
+        const itemId = req.params.itemId;
+        if (typeof itemId !== "string" || !isOpaqueItemId(itemId)) {
+          return res.status(400).json({ error: "Invalid itemId" });
+        }
+
+        const parsed = validateVaultItemMove(req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        const tokenHeader = validateSessionTokenHeader(req);
+        if (!tokenHeader.ok) {
+          return res.status(400).json({ error: tokenHeader.error });
+        }
+
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        if (auth.sessionId === null) {
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+        const { userId } = auth;
+
+        if (await checkUserRateLimit("vault_item_move", getClientIp(req), userId)) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+
+        if (isRecoveryModeActive(userId, storage)) {
+          return res
+            .status(423)
+            .json({ error: "Vault locked - recovery mode active" });
+        }
+
+        const lockedUntil = await getActiveSoftLockFromStore(userId);
+        if (lockedUntil !== undefined) {
+          recordAudit(storage, {
+            userId,
+            action: "write_blocked_soft_lock",
+            ipAddress: getClientIp(req),
+            userAgent: `attemptedAction=item_move; blockedUntil=${lockedUntil}`,
+          });
+          recordSecuritySignalHit(userId, auth.sessionId, false);
+          return res
+            .status(423)
+            .json({ error: "Vault temporarily locked due to suspicious activity" });
+        }
+
+        const blob = await storage.getVaultBlob(userId);
+        if (!blob?.keyVerifier) {
+          return res.status(403).json({ error: "Invalid vault key proof" });
+        }
+        const proof = decideVaultWriteProof({
+          storedVerifier: blob.keyVerifier,
+          hasExistingBlob: true,
+          providedProof: parsed.data.vaultKeyProof,
+        });
+        if (!proof.ok) {
+          return res.status(403).json({ error: "Invalid vault key proof" });
+        }
+
+        if (parsed.data.newLocator === ITEM_RECEIPT_TOMBSTONE_LOCATOR) {
+          return res.status(400).json({ error: "Invalid locator" });
+        }
+
+        const existing = await storage.getVaultItem(userId, itemId);
+        if (!existing) {
+          return res.status(404).json({ error: "Not found" });
+        }
+        if (existing.tombstone || existing.locator.length === 0) {
+          return res.status(409).json({ error: "Item is a tombstone" });
+        }
+
+        const stored = await storage.moveVaultItemLocator(
+          userId,
+          itemId,
+          existing.locator,
+          parsed.data.newLocator,
+        );
+        if (!stored) {
+          const again = await storage.getVaultItem(userId, itemId);
+          if (!again) {
+            return res.status(404).json({ error: "Not found" });
+          }
+          if (again.tombstone || again.locator.length === 0) {
+            return res.status(409).json({ error: "Item is a tombstone" });
+          }
+          return res.status(409).json({ error: "Locator changed" });
+        }
+
+        const previous = await storage.getVaultItemReceipt(userId, stored.itemId);
+        const signed = createSignedItemReceipt({
+          previous,
+          op: "move",
+          itemId: stored.itemId,
+          itemVersion: stored.version,
+          contentSha256: stored.contentSha256,
+          fromLocator: existing.locator,
+          toLocator: parsed.data.newLocator,
+          issuedAt: Date.now(),
+          botId: parsed.data.botId,
+        });
+        const savedReceipt = await storage.putVaultItemReceipt(userId, signed);
+        return res.status(200).json(itemReadBody(stored, savedReceipt));
+      } catch (err) {
+        console.error("Vault item move error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // Replica proposal. Same write gates as a move. The item locator stays
+  // where it is. The receipt op is copy, from the current locator to the
+  // replica locator. The content hash is not rewritten.
+  app.post(
+    "/api/vault/items/:itemId/replicate",
+    jsonBody(AUTH_BODY_LIMIT),
+    async (req: Request, res: Response) => {
+      try {
+        const queryCheck = validateNoQueryParams(req);
+        if (!queryCheck.ok) {
+          return res.status(400).json({ error: queryCheck.error });
+        }
+
+        const itemId = req.params.itemId;
+        if (typeof itemId !== "string" || !isOpaqueItemId(itemId)) {
+          return res.status(400).json({ error: "Invalid itemId" });
+        }
+
+        const parsed = validateVaultItemMove(req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        const tokenHeader = validateSessionTokenHeader(req);
+        if (!tokenHeader.ok) {
+          return res.status(400).json({ error: tokenHeader.error });
+        }
+
+        const auth = await authenticate(req, storage);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ error: auth.error });
+        }
+        if (auth.sessionId === null) {
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+        const { userId } = auth;
+
+        if (await checkUserRateLimit("vault_item_replicate", getClientIp(req), userId)) {
+          return res.status(429).json({ error: "Too many requests" });
+        }
+
+        if (isRecoveryModeActive(userId, storage)) {
+          return res
+            .status(423)
+            .json({ error: "Vault locked - recovery mode active" });
+        }
+
+        const lockedUntil = await getActiveSoftLockFromStore(userId);
+        if (lockedUntil !== undefined) {
+          recordAudit(storage, {
+            userId,
+            action: "write_blocked_soft_lock",
+            ipAddress: getClientIp(req),
+            userAgent: `attemptedAction=item_replicate; blockedUntil=${lockedUntil}`,
+          });
+          recordSecuritySignalHit(userId, auth.sessionId, false);
+          return res
+            .status(423)
+            .json({ error: "Vault temporarily locked due to suspicious activity" });
+        }
+
+        const blob = await storage.getVaultBlob(userId);
+        if (!blob?.keyVerifier) {
+          return res.status(403).json({ error: "Invalid vault key proof" });
+        }
+        const proof = decideVaultWriteProof({
+          storedVerifier: blob.keyVerifier,
+          hasExistingBlob: true,
+          providedProof: parsed.data.vaultKeyProof,
+        });
+        if (!proof.ok) {
+          return res.status(403).json({ error: "Invalid vault key proof" });
+        }
+
+        if (
+          parsed.data.newLocator === ITEM_RECEIPT_TOMBSTONE_LOCATOR
+        ) {
+          return res.status(400).json({ error: "Invalid locator" });
+        }
+
+        const existing = await storage.getVaultItem(userId, itemId);
+        if (!existing) {
+          return res.status(404).json({ error: "Not found" });
+        }
+        if (existing.tombstone || existing.locator.length === 0) {
+          return res.status(409).json({ error: "Item is a tombstone" });
+        }
+        if (parsed.data.newLocator === existing.locator) {
+          return res.status(400).json({ error: "Invalid locator" });
+        }
+
+        const previous = await storage.getVaultItemReceipt(userId, existing.itemId);
+        const signed = createSignedItemReceipt({
+          previous,
+          op: "copy",
+          itemId: existing.itemId,
+          itemVersion: existing.version,
+          contentSha256: existing.contentSha256,
+          fromLocator: existing.locator,
+          toLocator: parsed.data.newLocator,
+          issuedAt: Date.now(),
+          botId: parsed.data.botId,
+        });
+        const savedReceipt = await storage.putVaultItemReceipt(userId, signed);
+        return res.status(200).json(itemReadBody(existing, savedReceipt));
+      } catch (err) {
+        console.error("Vault item replicate error");
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    },
+  );
+
+  // Account deletion. Session token only. vaultKeyProof is not required.
+  // The user row delete cascades vault items, vault blobs, sessions, and
+  // audit rows. The account_delete audit row is written first with metadata
+  // only; the same cascade then removes it with the rest of the account.
+  app.delete("/api/account", async (req: Request, res: Response) => {
+    try {
+      const queryCheck = validateNoQueryParams(req);
+      if (!queryCheck.ok) {
+        return res.status(400).json({ error: queryCheck.error });
+      }
+
+      const tokenHeader = validateSessionTokenHeader(req);
+      if (!tokenHeader.ok) {
+        return res.status(400).json({ error: tokenHeader.error });
+      }
+
+      const auth = await authenticate(req, storage);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+      if (auth.sessionId === null) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+
+      if (await checkUserRateLimit("account_delete", getClientIp(req), auth.userId)) {
+        return res.status(429).json({ error: "Too many requests" });
+      }
+
+      await storage.logAuditEvent({
+        userId: auth.userId,
+        action: "account_delete",
+        ipAddress: getClientIp(req),
+        userAgent: captureAuditUserAgent(req),
+        versionBefore: null,
+        versionAfter: null,
+        blobSize: null,
+      });
+
+      const deleted = await storage.deleteUser(auth.userId);
+      if (!deleted) {
+        return res.status(404).json({ error: "Not found" });
+      }
+      return res.status(204).end();
+    } catch (err) {
+      console.error("Account delete error");
       return res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -3387,7 +3601,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
       const { userId } = auth;
 
-      if (checkUserRateLimit("vault_fetch", getClientIp(req), userId)) {
+      if (await checkUserRateLimit("vault_fetch", getClientIp(req), userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
 
@@ -3403,7 +3617,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         ipAddress: ip,
         userAgent,
       });
-      const signal = recordAnomaly(userId, "vault_fetch", ip);
+      const signal = await recordAnomaly(userId, "vault_fetch", ip);
       if (signal.rateAnomalyMeta) {
         recordAudit(storage, {
           userId,
@@ -3417,7 +3631,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // also stolen a session token, and we want their next write
         // attempt to be blocked. Reads remain available throughout
         // (per spec — user must always be able to see their data).
-        triggerSoftLock(userId);
+        await triggerSoftLock(userId);
         if (auth.sessionId) {
           void storage.markSessionSuspicious(auth.sessionId);
         }
@@ -3435,8 +3649,8 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // than writes and give us a denser signal of session-token reuse
       // across geographies. The lock it triggers still only blocks
       // WRITES; the fetch in flight here completes normally.
-      if (trackIpAndCheckBurst(userId, ip)) {
-        triggerSoftLock(userId);
+      if (await trackIpAndCheckBurst(userId, ip)) {
+        await triggerSoftLock(userId);
       }
 
       // Compute + log security level transition just before the
@@ -3505,7 +3719,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
       const { userId } = auth;
 
-      if (checkUserRateLimit("vault_history", getClientIp(req), userId)) {
+      if (await checkUserRateLimit("vault_history", getClientIp(req), userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
 
@@ -3547,7 +3761,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
       const { userId } = auth;
 
-      if (checkUserRateLimit("vault_restore", getClientIp(req), userId)) {
+      if (await checkUserRateLimit("vault_restore", getClientIp(req), userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
 
@@ -3565,7 +3779,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // /api/vault/sync. Restore IS a write (it archives the current
       // blob and replaces it with a historical version), so it must
       // be blocked during a lock too.
-      const restoreLockedUntil = getActiveSoftLock(userId);
+      const restoreLockedUntil = await getActiveSoftLockFromStore(userId);
       if (restoreLockedUntil !== undefined) {
         recordAudit(storage, {
           userId,
@@ -3679,8 +3893,15 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // displaced current blob first (a restore IS a write, so it must
       // itself be reversible), and prunes history. The historical entry
       // is looked up by (userId, targetVersion); if absent → 404.
-      const result = await storage.restoreVault(userId, parsed.data.version);
+      const result = await storage.restoreVault(
+        userId,
+        parsed.data.version,
+        parsed.data.vaultKeyProof,
+      );
       if (!result.ok) {
+        if (result.code === "key_proof_invalid" || result.code === "key_proof_unbound") {
+          return res.status(403).json({ error: "Invalid vault key proof" });
+        }
         // Failed restores (version_conflict, not_found) are NOT
         // audit-logged per the "only log AFTER success" rule.
         if (result.code === "version_conflict") {
@@ -3709,8 +3930,8 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // do NOT call recordAnomaly() here: restore has its own much
       // tighter rate cap (10/min, well below the 15/min anomaly
       // threshold), so a rate-spike anomaly bucket would never fire.
-      if (trackIpAndCheckBurst(userId, restoreIp)) {
-        triggerSoftLock(userId);
+      if (await trackIpAndCheckBurst(userId, restoreIp)) {
+        await triggerSoftLock(userId);
       }
 
       return res.status(200).json({
@@ -3796,7 +4017,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // times in a user's lifetime. Capping it tightly stops an
       // attacker who briefly grabs a session from spamming this to
       // disrupt the legitimate user's other sessions repeatedly.
-      if (checkUserRateLimit("logout_all", getClientIp(req), auth.userId)) {
+      if (await checkUserRateLimit("logout_all", getClientIp(req), auth.userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
 
@@ -3838,7 +4059,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(auth.status).json({ error: auth.error });
       }
 
-      if (checkUserRateLimit("auth_sessions", getClientIp(req), auth.userId)) {
+      if (await checkUserRateLimit("auth_sessions", getClientIp(req), auth.userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
 
@@ -3915,7 +4136,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // Rate limit AFTER authenticate so the userId is real and unauth
       // probes never poison the user/IP buckets — same pattern as the
       // other authenticated endpoints. See checkUserRateLimit doc.
-      if (checkUserRateLimit("vault_audit", getClientIp(req), auth.userId)) {
+      if (await checkUserRateLimit("vault_audit", getClientIp(req), auth.userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
 
@@ -4129,7 +4350,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       // Rate-limit AFTER authenticate (real userId only). recovery_ack
       // bucket: 10/min — see PER_USER_RATE_LIMITS comment for the
       // rationale on why we don't lock this down further.
-      if (checkUserRateLimit("recovery_ack", getClientIp(req), userId)) {
+      if (await checkUserRateLimit("recovery_ack", getClientIp(req), userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
 
@@ -4226,7 +4447,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
 
       // Rate-limit AFTER authenticate (real userId only). 5/min — see
       // PER_USER_RATE_LIMITS comment for rationale.
-      if (checkUserRateLimit("trust_device", getClientIp(req), userId)) {
+      if (await checkUserRateLimit("trust_device", getClientIp(req), userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
 
@@ -4342,7 +4563,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       if (!auth.ok) {
         return res.status(auth.status).json({ error: auth.error });
       }
-      if (checkUserRateLimit("security_devices", getClientIp(req), auth.userId)) {
+      if (await checkUserRateLimit("security_devices", getClientIp(req), auth.userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
       const devices = await storage.getDevicesForUser(auth.userId);
@@ -4382,7 +4603,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(auth.status).json({ error: auth.error });
       }
       if (
-        checkUserRateLimit("security_device_trust", getClientIp(req), auth.userId)
+        await checkUserRateLimit("security_device_trust", getClientIp(req), auth.userId)
       ) {
         return res.status(429).json({ error: "Too many requests" });
       }
@@ -4445,7 +4666,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(auth.status).json({ error: auth.error });
       }
       if (
-        checkUserRateLimit("security_device_trust", getClientIp(req), auth.userId)
+        await checkUserRateLimit("security_device_trust", getClientIp(req), auth.userId)
       ) {
         return res.status(429).json({ error: "Too many requests" });
       }
@@ -4525,7 +4746,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       if (!auth.ok) {
         return res.status(auth.status).json({ error: auth.error });
       }
-      if (checkUserRateLimit("device_label", getClientIp(req), auth.userId)) {
+      if (await checkUserRateLimit("device_label", getClientIp(req), auth.userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
       const parsed = deviceLabelSchema.safeParse(req.body);
@@ -4601,7 +4822,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         return res.status(auth.status).json({ error: auth.error });
       }
       if (
-        checkUserRateLimit("honeytoken_list", getClientIp(req), auth.userId)
+        await checkUserRateLimit("honeytoken_list", getClientIp(req), auth.userId)
       ) {
         return res.status(429).json({ error: "Too many requests" });
       }
@@ -4633,7 +4854,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           return res.status(auth.status).json({ error: auth.error });
         }
         if (
-          checkUserRateLimit(
+          await checkUserRateLimit(
             "honeytoken_create",
             getClientIp(req),
             auth.userId,
@@ -4706,7 +4927,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           return res.status(auth.status).json({ error: auth.error });
         }
         if (
-          checkUserRateLimit(
+          await checkUserRateLimit(
             "honeytoken_disable",
             getClientIp(req),
             auth.userId,
@@ -4786,7 +5007,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           return res.status(auth.status).json({ error: auth.error });
         }
         if (
-          checkUserRateLimit(
+          await checkUserRateLimit(
             "honeytoken_trigger",
             getClientIp(req),
             auth.userId,
@@ -4849,7 +5070,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // extend an already-active lock past its natural expiry.
         let softLockedUntil: number | undefined;
         if (result.triggerCount >= 2) {
-          softLockedUntil = triggerSoftLock(auth.userId);
+          softLockedUntil = await triggerSoftLock(auth.userId);
         }
 
         return res.status(200).json({
@@ -4881,7 +5102,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       if (!auth.ok) {
         return res.status(auth.status).json({ error: auth.error });
       }
-      if (checkUserRateLimit("passkeys_list", getClientIp(req), auth.userId)) {
+      if (await checkUserRateLimit("passkeys_list", getClientIp(req), auth.userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
       const credentials = await storage.listCredentialsForUser(auth.userId);
@@ -4924,7 +5145,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       if (!auth.ok) {
         return res.status(auth.status).json({ error: auth.error });
       }
-      if (checkUserRateLimit("passkey_revoke", getClientIp(req), auth.userId)) {
+      if (await checkUserRateLimit("passkey_revoke", getClientIp(req), auth.userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
       const parsed = passkeyRevokeSchema.safeParse(req.body);
@@ -5010,7 +5231,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
       }
       const { userId } = auth;
 
-      if (checkUserRateLimit("totp_setup", getClientIp(req), userId)) {
+      if (await checkUserRateLimit("totp_setup", getClientIp(req), userId)) {
         return res.status(429).json({ error: "Too many requests" });
       }
 
@@ -5090,7 +5311,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         }
         const { userId } = auth;
 
-        if (checkUserRateLimit("totp_verify", getClientIp(req), userId)) {
+        if (await checkUserRateLimit("totp_verify", getClientIp(req), userId)) {
           return res.status(429).json({ error: "Too many requests" });
         }
 
@@ -5175,7 +5396,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // and also don't want to leak which usernames have TOTP via
         // diff-rate behaviour). 5/min keyed on IP, same shape as the
         // login + register IP buckets.
-        if (isRateLimited(`totp_login:${clientIp}`)) {
+        if (await isRateLimited(`totp_login:${clientIp}`)) {
           return res
             .status(429)
             .json({ error: "Too many attempts. Please try again later." });
@@ -5183,7 +5404,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // Adaptive IP threat block — same shape as /api/auth/login.
         // The TOTP phase is the second half of the password+TOTP flow,
         // so we share the IP block bucket with the password phase.
-        if (isIpBlocked(clientIp)) {
+        if (await isIpBlocked(clientIp)) {
           return await ipBlockResponse(res, clientIp);
         }
 
@@ -5294,9 +5515,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // halves of the same auth flow). 6th failure inside 5 min
           // escalates via the existing security-signal pipeline.
           // hardLock=false: this is the unauth (pre-session) path.
-          const burst = recordLoginFailure(user.id);
+          const burst = await recordLoginFailure(user.id);
           if (burst.burstMeta) {
-            escalatePasskeyAnomaly(
+            await escalatePasskeyAnomaly(
               storage,
               user.id,
               null,
@@ -5308,7 +5529,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // Adaptive IP threat: TOTP wrong-code = same severity as a
           // password failure for IP-block purposes. Real userId so an
           // ip_threat_detected row, if it fires, attaches here.
-          recordIpFailure(storage, clientIp, user.id, user.id);
+          await recordIpFailure(storage, clientIp, user.id, user.id);
           await adaptiveLoginDelay(clientIp);
           return res
             .status(401)
@@ -5358,9 +5579,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // Decay (not full-reset) the login-failure burst counter on
         // a clean TOTP success — same reasoning as the password
         // login success path. Mirrors decayPasskeyFailures.
-        decayLoginFailures(user.id);
+        await decayLoginFailures(user.id);
         // Adaptive IP threat decay (T008) — see /api/auth/login.
-        recordIpSuccess(clientIp);
+        await recordIpSuccess(clientIp);
         if (!isKnownDevice) {
           recordAudit(storage, {
             userId: user.id,
@@ -5417,7 +5638,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         }
         const { userId, sessionId } = auth;
 
-        if (checkUserRateLimit("totp_step_up", getClientIp(req), userId)) {
+        if (await checkUserRateLimit("totp_step_up", getClientIp(req), userId)) {
           return res.status(429).json({ error: "Too many requests" });
         }
 
@@ -5539,7 +5760,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         const { userId, sessionId } = auth;
 
         if (
-          checkUserRateLimit("passkey_step_up_start", getClientIp(req), userId)
+          await checkUserRateLimit("passkey_step_up_start", getClientIp(req), userId)
         ) {
           return res.status(429).json({ error: "Too many requests" });
         }
@@ -5640,7 +5861,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         const userAgent = captureUserAgent(req);
 
         if (
-          checkUserRateLimit("passkey_step_up_finish", clientIp, userId)
+          await checkUserRateLimit("passkey_step_up_finish", clientIp, userId)
         ) {
           return res.status(429).json({ error: "Too many requests" });
         }
@@ -5669,9 +5890,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // authenticated session, so escalating with hardLock=true is
           // appropriate when the burst threshold is crossed (matches
           // the existing rate-spike escalation pattern in vault/sync).
-          const burst = recordPasskeyFailure(userId);
+          const burst = await recordPasskeyFailure(userId);
           if (burst.burstMeta) {
-            escalatePasskeyAnomaly(
+            await escalatePasskeyAnomaly(
               storage,
               userId,
               sessionId,
@@ -5751,7 +5972,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             // is already revoked above, so this lock primarily
             // protects the user's WRITE surface for 5 min while they
             // notice the activity-log entry and react.
-            escalatePasskeyAnomaly(
+            await escalatePasskeyAnomaly(
               storage,
               userId,
               sessionId,
@@ -5776,9 +5997,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // are still ATTEMPTS from the user's perspective and count
           // the same. counter_replay is handled separately above and
           // does NOT count here (it has its own single-event escalation).
-          const burst = recordPasskeyFailure(userId);
+          const burst = await recordPasskeyFailure(userId);
           if (burst.burstMeta) {
-            escalatePasskeyAnomaly(
+            await escalatePasskeyAnomaly(
               storage,
               userId,
               sessionId,
@@ -5852,7 +6073,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             ipAddress: clientIp,
             userAgent,
           });
-          escalatePasskeyAnomaly(
+          await escalatePasskeyAnomaly(
             storage,
             userId,
             sessionId,
@@ -5899,7 +6120,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // DECAY (not full-reset) the failure-burst counter so an
         // attacker can't launder a long streak with a single
         // successful tap. See decayPasskeyFailures for rationale.
-        decayPasskeyFailures(userId);
+        await decayPasskeyFailures(userId);
 
         return res.status(200).json({
           success: true,
@@ -5947,7 +6168,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         const { userId } = auth;
 
         if (
-          checkUserRateLimit(
+          await checkUserRateLimit(
             "passkey_register_start",
             getClientIp(req),
             userId,
@@ -6038,7 +6259,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         const { userId } = auth;
 
         if (
-          checkUserRateLimit(
+          await checkUserRateLimit(
             "passkey_register_finish",
             getClientIp(req),
             userId,
@@ -6167,7 +6388,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // (a fresh session for the same user), so a single bucket
         // prevents an attacker from doubling their guess budget by
         // alternating between the two endpoints.
-        if (isRateLimited(`login:${clientIp}`)) {
+        if (await isRateLimited(`login:${clientIp}`)) {
           return res
             .status(429)
             .json({ error: "Too many attempts. Please try again later." });
@@ -6175,7 +6396,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // Adaptive IP threat block — same shape as /api/auth/login.
         // Shared block bucket across all 4 login entry points so an
         // attacker can't bypass via endpoint switching.
-        if (isIpBlocked(clientIp)) {
+        if (await isIpBlocked(clientIp)) {
           return await ipBlockResponse(res, clientIp);
         }
 
@@ -6205,7 +6426,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // toward the credential-stuffing cardinality threshold —
           // an attacker spraying random usernames at the passkey
           // start endpoint is the textbook stuffing pattern.
-          recordIpFailure(
+          await recordIpFailure(
             storage,
             clientIp,
             hashUsernameForIpThreat(username),
@@ -6248,9 +6469,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // the user's activity log; the per-IP `login:` rate limit
           // upstream is the primary defense against the brute force
           // itself.
-          const burst = recordPasskeyFailure(user.id);
+          const burst = await recordPasskeyFailure(user.id);
           if (burst.burstMeta) {
-            escalatePasskeyAnomaly(
+            await escalatePasskeyAnomaly(
               storage,
               user.id,
               null,
@@ -6264,7 +6485,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // valid login_failed signal — distinct from "user not
           // found" — and contributes one distinct target to this
           // IP's stuffing cardinality.
-          recordIpFailure(storage, clientIp, user.id, user.id);
+          await recordIpFailure(storage, clientIp, user.id, user.id);
           await adaptiveLoginDelay(clientIp);
           return res.status(401).json({ error: "Invalid credentials" });
         }
@@ -6331,7 +6552,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         }
 
         const clientIp = getClientIp(req);
-        if (isRateLimited(`login:${clientIp}`)) {
+        if (await isRateLimited(`login:${clientIp}`)) {
           return res
             .status(429)
             .json({ error: "Too many attempts. Please try again later." });
@@ -6339,7 +6560,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // Adaptive IP threat block — same shape as /api/auth/login.
         // Shared block bucket across all 4 login entry points so an
         // attacker can't bypass via endpoint switching.
-        if (isIpBlocked(clientIp)) {
+        if (await isIpBlocked(clientIp)) {
           return await ipBlockResponse(res, clientIp);
         }
 
@@ -6457,7 +6678,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             // owner's WRITE surface for 5 min while they read the
             // activity log entry. sessionId is null here — login
             // mints a new session on success, never on failure.
-            escalatePasskeyAnomaly(
+            await escalatePasskeyAnomaly(
               storage,
               stored.userId,
               null,
@@ -6467,7 +6688,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             );
             // Adaptive IP threat: explicit counter_replay = same
             // severity as a verifier failure for IP-block purposes.
-            recordIpFailure(storage, clientIp, stored.userId, stored.userId);
+            await recordIpFailure(storage, clientIp, stored.userId, stored.userId);
             await adaptiveLoginDelay(clientIp);
             return res
               .status(401)
@@ -6500,9 +6721,9 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // Same failure-burst tracking + hardLock=false reasoning as
           // the login/start no-credentials branch above. counter_replay
           // is handled separately and does NOT count here.
-          const burst = recordPasskeyFailure(stored.userId);
+          const burst = await recordPasskeyFailure(stored.userId);
           if (burst.burstMeta) {
-            escalatePasskeyAnomaly(
+            await escalatePasskeyAnomaly(
               storage,
               stored.userId,
               null,
@@ -6514,7 +6735,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // Adaptive IP threat: verifier failure attaches to the
           // credential's owner. Real userId so an ip_threat_detected
           // row can fire here.
-          recordIpFailure(storage, clientIp, stored.userId, stored.userId);
+          await recordIpFailure(storage, clientIp, stored.userId, stored.userId);
           await adaptiveLoginDelay(clientIp);
           return res.status(401).json({ error: "Invalid credentials" });
         }
@@ -6587,7 +6808,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
             ipAddress: clientIp,
             userAgent: `reason=invalid_credentials; ua=${(userAgent ?? "").slice(0, 200)}`,
           });
-          escalatePasskeyAnomaly(
+          await escalatePasskeyAnomaly(
             storage,
             stored.userId,
             null,
@@ -6600,7 +6821,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // pre-existing uniformLoginDelay (added by T007) for
           // adaptiveLoginDelay so the per-failure friction also
           // attaches to this branch.
-          recordIpFailure(storage, clientIp, stored.userId, stored.userId);
+          await recordIpFailure(storage, clientIp, stored.userId, stored.userId);
           await adaptiveLoginDelay(clientIp);
           return res.status(401).json({ error: "Invalid credentials" });
         }
@@ -6649,7 +6870,7 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
           // still pending. The passkey half is proven; the streak
           // budget is reduced by one so an alternating fail/succeed
           // pattern still trips the burst eventually.
-          decayPasskeyFailures(stored.userId);
+          await decayPasskeyFailures(stored.userId);
           // The ABSENCE of sessionToken is the signal that more
           // factors are needed. requiresTOTP + tempToken matches
           // /api/auth/login's 2FA-required response shape exactly.
@@ -6704,13 +6925,13 @@ export async function registerRoutes(app: Express, storage: IStorage): Promise<S
         // proof. T006: decay (not full-reset) the failure-burst
         // counter so an attacker can't launder a long streak with
         // a single tap.
-        decayPasskeyFailures(stored.userId);
+        await decayPasskeyFailures(stored.userId);
         // Adaptive IP threat decay (T008) — see /api/auth/login.
         // Only the full-session success path decays; the
         // TOTP-required half-success above defers decay to the
         // /api/auth/totp/login completion, mirroring the
         // password→TOTP path.
-        recordIpSuccess(clientIp);
+        await recordIpSuccess(clientIp);
         if (!isKnownDevice) {
           // Mirror the new-device handling from /api/auth/login:
           // log the event, raise the in-memory threat signal, and

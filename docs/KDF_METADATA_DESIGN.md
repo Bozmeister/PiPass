@@ -46,7 +46,7 @@ Current PBKDF2 fallback:
 
 KDF metadata must:
 
-- preserve zero-knowledge and stay local by default
+- keep vault key material local; do not send vault plaintext to the server
 - record the actual KDF algorithm used for vault unlock
 - record enough parameters to reproduce the same master key later
 - keep `deviceUUID` stable and explicitly represented as a binding input

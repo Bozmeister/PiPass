@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { 
   View, Text, FlatList, Pressable, Alert, Platform, 
   ActivityIndicator, AppState, Modal, Switch, TextInput 
@@ -6,7 +6,6 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, useFocusEffect } from "expo-router";
-import * as ScreenCapture from "expo-screen-capture";
 import { 
   VaultEntry, 
   SecureNote, 
@@ -15,8 +14,8 @@ import {
   decryptVaultEntry,
   reEncryptEntry,
   reEncryptSecureNote,
-  deriveMasterKeyShares,
 } from "../workers/vaultWorker";
+import { enableScreenCaptureProtection } from "../lib/screenCaptureProtection";
 
 import { 
   getAllEntries, 
@@ -29,18 +28,32 @@ import {
   saveShowKeyprints,
   getMasterSalt,
   getMasterKeyHash,
+  getKdfMetadataState,
   saveMasterKeyHash,
+  saveKdfMetadata,
   saveFractalFingerprint,
   getFractalFingerprint,
   FractalFingerprintRecord,
   migrateToSharedStorage,
   storeMasterKeySecurely,
   hasLocalEncryptedVaultData,
+  buildArgon2idKdfMetadata,
+  buildPbkdf2KdfMetadata,
+  KDF_DEVICE_BINDING_NONE,
 } from "../workers/storageWorker";
 
-import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer } from "../crypto/secureMemory";
-import { setActiveKeyShares } from "../lib/vaultSession";
-import { hashMasterKey } from "../crypto/keyDerivation";
+import { KeyShares, wipeShares, combineShares, hexToBytes, wipeBuffer, splitKeyIntoShares } from "../crypto/secureMemory";
+import { setActiveKeyShares, clearActiveKeyShares } from "../lib/vaultSession";
+import {
+  hashMasterKey,
+  planUnlockKdfDerivation,
+  getArgon2idKdfParameters,
+  getStrongPbkdf2FallbackParameters,
+  deriveMasterKeyWithArgon2id,
+  deriveMasterKeyWithPbkdf2,
+  KdfDerivationError,
+} from "../crypto/keyDerivation";
+import { verifyMasterPasswordWithStoredKdf } from "../lib/currentUnlock";
 import { requireFreshBiometric } from "../crypto/biometricGate";
 import { sanitizeEntryFields } from "../crypto/hyperbaricSanitizer";
 import { deriveFractalSeed, deriveFractalSeedLegacy, FractalParams, DEFAULT_FRACTAL_PARAMS } from "../crypto/hkdf";
@@ -57,6 +70,18 @@ import FaviconImage from "../components/FaviconImage";
 import NuclearResetModal from "../components/NuclearResetModal";
 import FractalBackground from "../components/FractalBackground";
 import { useSecurityState } from "../context/SecurityContext";
+import {
+  visibleVaultEntries,
+  type SearchIndexPlain,
+  type SearchSort,
+} from "../lib/vaultSearch";
+import {
+  rebuildSearchIndex,
+  removeStoredSearchRecord,
+  upsertVaultEntrySearch,
+  loadSearchIndex,
+} from "../lib/vaultSearchStore";
+import { formatFeatureStatus, reportFeatureStatus } from "../lib/intentdb/featureStatus";
 
 const AUTO_LOCK_MS = 120000;
 const PROFILE_CHANGE_PAUSED_TITLE = "Profile changes are paused";
@@ -100,6 +125,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
 
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<VaultEntry | null>(null);
   const [decryptedEntry, setDecryptedEntry] = useState<DecryptedVaultEntry | null>(null);
   const [decrypting, setDecrypting] = useState(false);
@@ -117,6 +143,9 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [deleteTargetTitle, setDeleteTargetTitle] = useState("");
   const [showUndoSnackbar, setShowUndoSnackbar] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchSort, setSearchSort] = useState<SearchSort>("none");
+  const [searchIndex, setSearchIndex] = useState<SearchIndexPlain | null>(null);
 
   const recentlyDeletedEntryRef = useRef<VaultEntry | null>(null);
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -142,10 +171,21 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     // without re-prompting the user. Passing null on lock clears
     // (and wipes) the previous shares — see lib/vaultSession.ts.
     setActiveKeyShares(keyShares);
+    if (!keyShares) {
+      clearActiveKeyShares();
+    }
   }, [keyShares]);
 
   useEffect(() => {
     if (locked) {
+      // Drop any plaintext list fields held in React state (titles,
+      // usernames, urls injected by withDisplayFields). Ciphertext-only
+      // reload happens after full password unlock.
+      setEntries([]);
+      setSecureNotes([]);
+      setSearchIndex(null);
+      setSearchQuery("");
+      setSearchSort("none");
       setSelectedEntry(null);
       setDecryptedEntry(null);
       setDecrypting(false);
@@ -159,15 +199,67 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       commitPendingDeletion();
       setPendingProfileIterations(null);
       setProfilePassword("");
+      recentlyDeletedEntryRef.current = null;
       selectTokenRef.current++;
+      // Defensive: vaultSession must not retain key material while locked.
+      if (!keySharesRef.current) {
+        clearActiveKeyShares();
+      }
     }
   }, [locked]);
 
+  // After a hard lock, entries were cleared from memory. Re-hydrate
+  // ciphertext + display fields only when key shares are available again
+  // (full master-password unlock), not from retained soft-lock state.
   useEffect(() => {
-    verifyFractalFingerprint(fractalFingerprint);
-  }, []);
+    if (locked || !keyShares) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const stored = await getAllEntries();
+        if (cancelled) return;
+        const notes = await getAllSecureNotes();
+        if (cancelled) return;
+        setEntries(stored);
+        setSecureNotes(notes);
+        try {
+          const index = await rebuildSearchIndex(keyShares, stored, notes);
+          if (!cancelled) setSearchIndex(index);
+        } catch {
+          if (!cancelled) {
+            setSearchIndex(null);
+            setEntries(withDisplayFields(stored));
+          }
+        }
+      } catch {
+        // Non-fatal: user can retry by reopening the vault tab.
+      }
+      if (cancelled) return;
+      try {
+        const line = formatFeatureStatus(await reportFeatureStatus());
+        if (!cancelled) console.info(line);
+      } catch {
+        // A status line must not fail unlock.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [locked, keyShares]);
+
+  // Bind / verify fractal fingerprint whenever key material is available.
+  // Integrity is based on the fingerprint string (derived from the master key).
+  // Metadata (iterations / kdf label) is self-healed when the fingerprint matches
+  // so newly created Argon2id/PBKDF2 vaults never false-alarm "tampering".
+  useEffect(() => {
+    if (!keyShares) return;
+    const result = refreshFractalFromShares(keyShares);
+    void verifyFractalFingerprint(result.fingerprint);
+  }, [keyShares, iterations]);
 
   function buildFingerprintRecord(fp: string): FractalFingerprintRecord {
+    // Fractal is derived from master key only; kdf label is informational.
+    // Prefer argon2id for new binds; unlock path may self-heal over pbkdf2-sha256 records.
     return { fingerprint: fp, iterations, kdf: "argon2id", version: 1 };
   }
 
@@ -185,51 +277,71 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     const r = v as Record<string, unknown>;
     return (
       typeof r.fingerprint === "string" &&
+      r.fingerprint.length > 0 &&
       typeof r.iterations === "number" &&
-      r.kdf === "argon2id" &&
+      (r.kdf === "argon2id" || r.kdf === "pbkdf2-sha256") &&
       r.version === 1
     );
   }
 
   async function verifyFractalFingerprint(currentFingerprint: string) {
-    const legacyFp = getLegacyFingerprint();
-    const stored = await getFractalFingerprint();
-    const expected = buildFingerprintRecord(currentFingerprint);
-
-    if (stored === null) {
-      await saveFractalFingerprint(expected);
+    // Never bind or compare an empty fingerprint (mount-before-key race).
+    if (!currentFingerprint || currentFingerprint.length < 16) {
       return;
     }
 
-    if (typeof stored === "string") {
-      if (stored === currentFingerprint || stored === legacyFp) {
+    try {
+      const legacyFp = getLegacyFingerprint();
+      const stored = await getFractalFingerprint();
+      const expected = buildFingerprintRecord(currentFingerprint);
+
+      if (stored === null) {
+        // First unlock of this vault — bind current fingerprint.
         await saveFractalFingerprint(expected);
+        setFractalTampered(false);
         return;
       }
+
+      if (typeof stored === "string") {
+        if (stored === currentFingerprint || (legacyFp && stored === legacyFp)) {
+          await saveFractalFingerprint(expected);
+          setFractalTampered(false);
+          return;
+        }
+        setFractalTampered(true);
+        return;
+      }
+
+      const storedFp =
+        stored && typeof stored === "object" && typeof (stored as FractalFingerprintRecord).fingerprint === "string"
+          ? (stored as FractalFingerprintRecord).fingerprint
+          : "";
+
+      // Primary integrity signal: fingerprint matches current or legacy derivation.
+      if (
+        storedFp === currentFingerprint ||
+        (legacyFp && storedFp === legacyFp)
+      ) {
+        // Self-heal metadata (iterations/kdf/version) without warning.
+        if (
+          !isValidRecord(stored) ||
+          stored.fingerprint !== expected.fingerprint ||
+          stored.iterations !== expected.iterations ||
+          stored.kdf !== expected.kdf ||
+          stored.version !== expected.version
+        ) {
+          await saveFractalFingerprint(expected);
+        }
+        setFractalTampered(false);
+        return;
+      }
+
+      // Genuine mismatch — different master-key visual identity.
       setFractalTampered(true);
-      return;
+    } catch (err) {
+      console.error("[VAULT] verifyFractalFingerprint failed");
+      // Fail open: do not brick the vault UI on storage/read errors.
     }
-
-    if (!isValidRecord(stored)) {
-      setFractalTampered(true);
-      return;
-    }
-
-    if (
-      stored.fingerprint === expected.fingerprint &&
-      stored.iterations === expected.iterations &&
-      stored.kdf === expected.kdf &&
-      stored.version === expected.version
-    ) {
-      return;
-    }
-
-    if (stored.fingerprint === legacyFp) {
-      await saveFractalFingerprint(expected);
-      return;
-    }
-
-    setFractalTampered(true);
   }
 
   function refreshFractalFromShares(shares: KeyShares) {
@@ -240,9 +352,11 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     return result;
   }
 
+  // Screen capture is blocked app-wide (root layout) for production native builds.
+  // Re-assert here when the vault is visible; never call allowScreenCaptureAsync —
+  // that previously re-enabled capture on unmount and cleared Android FLAG_SECURE.
   useEffect(() => {
-    if (Platform.OS !== "web") ScreenCapture.preventScreenCaptureAsync();
-    return () => { if (Platform.OS !== "web") ScreenCapture.allowScreenCaptureAsync(); };
+    void enableScreenCaptureProtection();
   }, []);
 
   const lockedRef = useRef(locked);
@@ -279,7 +393,30 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       // Reload silently — no setLoading(true) so the user doesn't
       // see a flash of the loading state on every tab switch.
       getAllEntries()
-        .then((stored) => setEntries(stored))
+        .then(async (stored) => {
+          if (lockedRef.current) return;
+          setEntries(stored);
+          const shares = keySharesRef.current;
+          if (!shares) return;
+          const loaded = await loadSearchIndex(shares);
+          const indexedIds = new Set(
+            loaded.ok
+              ? loaded.index.records.filter((record) => record.kind === "vault-entry").map((record) => record.id)
+              : [],
+          );
+          const stale = !loaded.ok || stored.some((entry) => !indexedIds.has(entry.id));
+          if (!stale && loaded.ok) {
+            setSearchIndex(loaded.index);
+            return;
+          }
+          const notes = await getAllSecureNotes();
+          if (lockedRef.current || !keySharesRef.current) return;
+          try {
+            setSearchIndex(await rebuildSearchIndex(keySharesRef.current, stored, notes));
+          } catch {
+            setSearchIndex(null);
+          }
+        })
         .catch(() => {
           // Silent: a refetch failure is non-fatal; the user can
           // pull-to-refresh or wait for the next focus.
@@ -311,6 +448,47 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
     if (!lockedRef.current) lastActivityRef.current = Date.now();
   }
 
+  /** Attach decrypted title/username/url for list display (encrypted-only entries have blank plaintext fields). */
+  function withDisplayFields(stored: VaultEntry[]): VaultEntry[] {
+    const shares = keySharesRef.current;
+    if (!shares) return stored;
+    return stored.map((e) => {
+      try {
+        const d = decryptVaultEntry(e, shares);
+        return {
+          ...e,
+          title: d.title,
+          username: d.username,
+          url: d.url,
+        };
+      } catch {
+        return e;
+      }
+    });
+  }
+
+  async function reloadEntries() {
+    const stored = await getAllEntries();
+    setEntries(stored);
+  }
+
+  async function syncSearchEntry(entry: VaultEntry) {
+    const shares = keySharesRef.current;
+    if (!shares || lockedRef.current) return;
+    try {
+      const updated = await upsertVaultEntrySearch(shares, entry);
+      if (updated) {
+        setSearchIndex(updated);
+        return;
+      }
+      const stored = await getAllEntries();
+      const notes = await getAllSecureNotes();
+      setSearchIndex(await rebuildSearchIndex(shares, stored, notes));
+    } catch {
+      // The next unlock rebuilds the index.
+    }
+  }
+
   async function loadVault() {
     try {
       await migrateToSharedStorage();
@@ -319,10 +497,17 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       setShowKeyprints(keyprintPref);
 
       const stored = await getAllEntries();
-      setEntries(stored);
-
       const notes = await getAllSecureNotes();
+      setEntries(stored);
       setSecureNotes(notes);
+      if (keySharesRef.current && !lockedRef.current) {
+        try {
+          setSearchIndex(await rebuildSearchIndex(keySharesRef.current, stored, notes));
+        } catch {
+          setSearchIndex(null);
+          setEntries(withDisplayFields(stored));
+        }
+      }
 
       if (stored.length > 0 && keySharesRef.current) {
         try {
@@ -358,9 +543,47 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
 
     const encrypted = encryptVaultEntry(sanitized, keySharesRef.current);
     await saveEntry(encrypted);
-    const stored = await getAllEntries();
-    setEntries(stored);
+    await syncSearchEntry(encrypted);
+    await reloadEntries();
     setShowAddModal(false);
+  }
+
+  async function handleUpdateEntry(entry: {
+    title: string;
+    username: string;
+    password: string;
+    url?: string;
+    notes?: string;
+  }) {
+    if (!keySharesRef.current || lockedRef.current || !selectedEntry || !decryptedEntry) return;
+
+    const { sanitized, ok, error } = sanitizeEntryFields(entry);
+    if (!ok) {
+      Alert.alert("Sanitization Error", error || "Input rejected.");
+      return;
+    }
+
+    const encrypted = encryptVaultEntry(
+      {
+        ...sanitized,
+        // Preserve honeytoken status across edits
+        isHoneytoken: decryptedEntry.isHoneytoken,
+        honeytokenId: decryptedEntry.honeytokenId,
+        honeytokenMarker: decryptedEntry.honeytokenMarker,
+      },
+      keySharesRef.current,
+      selectedEntry.id,
+    );
+    // Keep original creation time; encryptVaultEntry stamps both to "now".
+    encrypted.createdAt = selectedEntry.createdAt;
+    encrypted.updatedAt = Date.now();
+
+    await saveEntry(encrypted);
+    await syncSearchEntry(encrypted);
+    await reloadEntries();
+    setSelectedEntry(null);
+    setDecryptedEntry(null);
+    setShowEditModal(false);
   }
 
   async function handleSelectEntry(entry: VaultEntry) {
@@ -414,6 +637,10 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       setShowUndoSnackbar(false);
       try {
         await deleteStoredEntry(pending.id);
+        if (keySharesRef.current) {
+          const next = await removeStoredSearchRecord(keySharesRef.current, pending.id, "vault-entry");
+          if (next) setSearchIndex(next);
+        }
       } catch {
         setEntries(prev => [...prev, pending].sort((a, b) => b.createdAt - a.createdAt));
         Alert.alert("Delete Failed", "Could not permanently delete the entry. It has been restored to your vault.");
@@ -424,6 +651,9 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   function handleRequestDelete(entryId: string) {
     const target = entries.find(e => e.id === entryId);
     if (!target) return;
+    const indexed = searchIndex?.records.find(
+      (record) => record.id === entryId && record.kind === "vault-entry",
+    );
 
     Alert.alert(
       "Delete entry?",
@@ -433,7 +663,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         {
           text: "Delete",
           style: "destructive",
-          onPress: () => beginSecureDeleteFlow(entryId, target.title || "Untitled entry"),
+          onPress: () => beginSecureDeleteFlow(entryId, indexed?.title || target.title || "Untitled entry"),
         },
       ]
     );
@@ -495,6 +725,7 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   function handleCloseDetail() {
     setSelectedEntry(null);
     setDecryptedEntry(null);
+    setShowEditModal(false);
   }
 
   function showProfileChangePaused(message = PROFILE_CHANGE_REENCRYPTION_MESSAGE) {
@@ -538,9 +769,55 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       const salt = await getMasterSalt();
       if (!salt) throw new Error("No salt found");
 
-      const newShares = await deriveMasterKeyShares(profilePassword, salt, pendingProfileIterations);
-      const newKeyHex = combineShares(newShares);
+      // Verify current password against stored hash + KDF metadata (no silent downgrade).
+      const passwordOk = await verifyMasterPasswordWithStoredKdf(
+        { password: profilePassword, salt, iterations },
+        {
+          getMasterKeyHash,
+          getKdfMetadataState,
+          planUnlockKdfDerivation,
+        },
+      );
+      if (!passwordOk) {
+        throw new Error("Incorrect password");
+      }
+
+      // Re-derive for the NEW profile with explicit algorithm + matching metadata.
+      // Prefer Argon2id; only fall back to strong PBKDF2 when Argon2 is unavailable,
+      // and always persist the actual parameters used.
+      let newKeyHex: string;
+      let kdfLabel: "argon2id" | "pbkdf2-sha256";
+      const argonParams = getArgon2idKdfParameters(pendingProfileIterations);
+      try {
+        newKeyHex = await deriveMasterKeyWithArgon2id(
+          profilePassword,
+          salt,
+          argonParams,
+        );
+        await saveKdfMetadata(
+          buildArgon2idKdfMetadata(pendingProfileIterations, argonParams, "profile-change", {
+            deviceBinding: KDF_DEVICE_BINDING_NONE,
+          }),
+        );
+        kdfLabel = "argon2id";
+      } catch (err) {
+        if (!(err instanceof KdfDerivationError)) throw err;
+        const pbkdf2Params = getStrongPbkdf2FallbackParameters(pendingProfileIterations);
+        newKeyHex = await deriveMasterKeyWithPbkdf2(
+          profilePassword,
+          salt,
+          pbkdf2Params,
+        );
+        await saveKdfMetadata(
+          buildPbkdf2KdfMetadata(pendingProfileIterations, pbkdf2Params, "profile-change", {
+            deviceBinding: KDF_DEVICE_BINDING_NONE,
+          }),
+        );
+        kdfLabel = "pbkdf2-sha256";
+      }
+
       const newKeyHash = hashMasterKey(newKeyHex);
+      const newShares = splitKeyIntoShares(newKeyHex);
 
       await saveMasterKeyHash(newKeyHash);
       await onIterationsChange(pendingProfileIterations);
@@ -556,7 +833,12 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       setActiveKeyShares(newShares);
 
       const newFractal = refreshFractalFromShares(newShares);
-      await saveFractalFingerprint({ fingerprint: newFractal.fingerprint, iterations: pendingProfileIterations, kdf: "argon2id", version: 1 });
+      await saveFractalFingerprint({
+        fingerprint: newFractal.fingerprint,
+        iterations: pendingProfileIterations,
+        kdf: kdfLabel,
+        version: 1,
+      });
       setFractalTampered(false);
 
       setPendingProfileIterations(null);
@@ -572,14 +854,14 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   async function verifyPasswordForReset(pw: string): Promise<boolean> {
     const salt = await getMasterSalt();
     if (!salt) return false;
-    const shares = await deriveMasterKeyShares(pw, salt, iterations);
-    const keyHex = combineShares(shares);
-    const keyHash = hashMasterKey(keyHex);
-    const kb = hexToBytes(keyHex);
-    wipeBuffer(kb);
-    wipeShares(shares);
-    const storedHash = await getMasterKeyHash();
-    return !!storedHash && keyHash === storedHash;
+    return verifyMasterPasswordWithStoredKdf(
+      { password: pw, salt, iterations },
+      {
+        getMasterKeyHash,
+        getKdfMetadataState,
+        planUnlockKdfDerivation,
+      },
+    );
   }
 
   async function executeNuclearReset() {
@@ -612,6 +894,11 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
   }
 
   const webTopInset = Platform.OS === "web" ? 67 : 0;
+  const visibleEntries = useMemo(
+    () => visibleVaultEntries(entries, locked ? null : searchIndex, searchQuery, searchSort),
+    [entries, locked, searchIndex, searchQuery, searchSort],
+  );
+  const searchActive = searchQuery.trim().length > 0 || searchSort !== "none";
 
   const renderItem = ({ item }: { item: VaultEntry }) => (
     <Pressable onPress={() => handleSelectEntry(item)} style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#222", flexDirection: "row", alignItems: "center" }}>
@@ -631,8 +918,12 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         <FaviconImage url={item.url} size={32} />
       )}
       <View style={{ marginLeft: 12, flex: 1 }}>
-        <Text style={{ color: "#fff", fontSize: 18 }}>{item.title}</Text>
-        <Text style={{ color: "#888" }}>{item.username}</Text>
+        <Text style={{ color: "#f0f0f0", fontSize: 18, fontWeight: "600" as const }} numberOfLines={1}>
+          {item.title || "Untitled"}
+        </Text>
+        <Text style={{ color: "#aaaaaa" }} numberOfLines={1}>
+          {item.username || ""}
+        </Text>
       </View>
     </Pressable>
   );
@@ -673,6 +964,64 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         </View>
       </View>
 
+      {!locked && (
+        <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
+          <TextInput
+            value={searchQuery}
+            onChangeText={(text) => {
+              resetActivity();
+              setSearchQuery(text);
+            }}
+            placeholder="Search vault"
+            placeholderTextColor={INPUT_PLACEHOLDER}
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoComplete="off"
+            textContentType="none"
+            clearButtonMode="while-editing"
+            style={{
+              color: INPUT_TEXT,
+              fontSize: 16,
+              padding: 12,
+              backgroundColor: INPUT_BG,
+              borderRadius: 10,
+              borderWidth: 1,
+              borderColor: INPUT_BORDER,
+            }}
+            testID="vault-search-input"
+          />
+          <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+            {([
+              ["none", "None"],
+              ["az", "A-Z"],
+              ["za", "Z-A"],
+            ] as const).map(([mode, label]) => {
+              const selected = searchSort === mode;
+              return (
+                <Pressable
+                  key={mode}
+                  onPress={() => {
+                    resetActivity();
+                    setSearchSort(mode);
+                  }}
+                  testID={`vault-sort-${mode}`}
+                  style={{
+                    paddingVertical: 6,
+                    paddingHorizontal: 12,
+                    borderRadius: 8,
+                    backgroundColor: selected ? "#1a2e1a" : "#141414",
+                    borderWidth: 1,
+                    borderColor: selected ? "#4CAF50" : "#333",
+                  }}
+                >
+                  <Text style={{ color: selected ? "#4CAF50" : "#aaa", fontSize: 14 }}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      )}
+
       {fractalTampered && (
         <View style={{
           backgroundColor: "#3a0a0a",
@@ -704,35 +1053,66 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
       <View style={{ flex: 1 }}>
         <FractalBackground seed={visualSeed} fractalParams={fractalParams} />
         <FlatList
-          data={entries}
+          data={visibleEntries}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           style={{ backgroundColor: "transparent" }}
+          keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
-            <View style={{ flex: 1, justifyContent: "center", alignItems: "center", marginTop: 100 }}>
-              <Pressable
-                onPress={() => {
-                  resetActivity();
-                  // T007 — same as the per-row keyprint tap.
-                  router.push("/settings/security");
-                }}
-              >
-                <AnimatedFractalView
-                  seed={visualSeed}
-                  size={150}
-                  fractalParams={fractalParams}
-                  securityState={securityState}
-                />
-              </Pressable>
-              <Text style={{ color: "#888", fontSize: 18, marginTop: 30 }}>Empty vault — add something!</Text>
-            </View>
+            searchActive && entries.length > 0 ? (
+              <View style={{ flex: 1, justifyContent: "center", alignItems: "center", marginTop: 80 }}>
+                <Text style={{ color: "#888", fontSize: 18 }} testID="vault-search-empty">No matches</Text>
+              </View>
+            ) : (
+              <View style={{ flex: 1, justifyContent: "center", alignItems: "center", marginTop: 100 }}>
+                <Pressable
+                  onPress={() => {
+                    resetActivity();
+                    // T007 — same as the per-row keyprint tap.
+                    router.push("/settings/security");
+                  }}
+                >
+                  <AnimatedFractalView
+                    seed={visualSeed}
+                    size={150}
+                    fractalParams={fractalParams}
+                    securityState={securityState}
+                  />
+                </Pressable>
+                <Text style={{ color: "#888", fontSize: 18, marginTop: 30 }}>Empty vault — add something!</Text>
+              </View>
+            )
           }
         />
       </View>
 
-      <AddEntryModal visible={showAddModal} onClose={() => setShowAddModal(false)} onSave={handleAddEntry} onActivity={resetActivity} />
+      <AddEntryModal
+        visible={showAddModal}
+        onClose={() => setShowAddModal(false)}
+        onSave={handleAddEntry}
+        onActivity={resetActivity}
+      />
 
-      {selectedEntry && decryptedEntry && (
+      <AddEntryModal
+        visible={showEditModal && !!decryptedEntry}
+        mode="edit"
+        initialValues={
+          decryptedEntry
+            ? {
+                title: decryptedEntry.title,
+                username: decryptedEntry.username,
+                password: decryptedEntry.password,
+                url: decryptedEntry.url,
+                notes: decryptedEntry.notes,
+              }
+            : undefined
+        }
+        onClose={() => setShowEditModal(false)}
+        onSave={handleUpdateEntry}
+        onActivity={resetActivity}
+      />
+
+      {selectedEntry && (
         <EntryDetailModal
           visible={true}
           entry={selectedEntry}
@@ -742,6 +1122,10 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
           fractalParams={fractalParams}
           onClose={handleCloseDetail}
           onRequestDelete={handleRequestDelete}
+          onRequestEdit={() => {
+            if (!decryptedEntry) return;
+            setShowEditModal(true);
+          }}
           onActivity={resetActivity}
         />
       )}
@@ -762,6 +1146,14 @@ export default function VaultScreen({ keyShares, iterations, locked = false, onL
         onNotesChanged={async () => {
           const notes = await getAllSecureNotes();
           setSecureNotes(notes);
+          const shares = keySharesRef.current;
+          if (!shares || lockedRef.current) return;
+          try {
+            const stored = await getAllEntries();
+            setSearchIndex(await rebuildSearchIndex(shares, stored, notes));
+          } catch {
+            // The next unlock rebuilds the index.
+          }
         }}
         onActivity={resetActivity}
       />

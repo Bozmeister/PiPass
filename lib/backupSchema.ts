@@ -1,5 +1,9 @@
 import type { SecureNote, VaultEntry } from "../workers/vaultWorker";
-import { isValidKdfMetadata, type KdfMetadata } from "../crypto/kdfMetadata";
+import {
+  isSupportedKdfDeviceBinding,
+  isValidKdfMetadata,
+  type KdfMetadata,
+} from "../crypto/kdfMetadata";
 
 export const PIPASS_BACKUP_SCHEMA = "pipass-backup";
 export const PIPASS_BACKUP_VERSION = 1;
@@ -252,7 +256,7 @@ export function classifyBackupCompatibility(
     };
   }
 
-  if (localContext.deviceBinding !== "deviceUUID:v1") {
+  if (!isSupportedKdfDeviceBinding(localContext.deviceBinding)) {
     return {
       status: "incompatible",
       reason: "unsupported-local-device-binding",
@@ -313,15 +317,12 @@ export function buildBackupCompatibilityContextFromSetup(
   input: BuildBackupCompatibilityContextInput,
 ): BackupCompatibilityContext {
   const deviceUUIDPresent = input.deviceUUIDPresent ?? (!!input.deviceUUID && input.deviceUUID.length > 0);
-  const deviceBinding: "deviceUUID:v1" | string = deviceUUIDPresent
-    ? "deviceUUID:v1"
-    : "unknown";
 
   return {
     format: PIPASS_BACKUP_FORMAT_ENCRYPTED_LOCAL_RECORDS,
     kdfMetadata: input.setupMetadata.kdfMetadata,
     masterSaltPresent: input.setupMetadata.masterSalt.length > 0,
-    deviceBinding,
+    deviceBinding: input.setupMetadata.kdfMetadata.deviceBinding,
     deviceUUIDPresent,
   };
 }
@@ -416,15 +417,25 @@ function validateEncryptedSecureNote(value: unknown, index: number): BackupParse
     return validationError("invalid-secure-note", "Backup secure note must be an object.", path);
   }
 
-  const requiredStrings = ["id", "label", "encryptedLabel", "encryptedContent", "salt"];
+  // Plaintext `label` is intentionally NOT required (and must not be required):
+  // modern notes store only encryptedLabel. Legacy backups may still include label.
+  const requiredStrings = ["id", "encryptedLabel", "encryptedContent", "salt"];
   for (const field of requiredStrings) {
-    if (typeof value[field] !== "string") {
+    if (typeof value[field] !== "string" || (value[field] as string).length === 0) {
       return validationError(
         "invalid-secure-note",
         "Backup secure note is missing required encrypted-note fields.",
         `${path}.${field}`,
       );
     }
+  }
+  // If a legacy plaintext label is present it must be a string (never trusted as sole source).
+  if (value.label !== undefined && typeof value.label !== "string") {
+    return validationError(
+      "invalid-secure-note",
+      "Backup secure note label must be a string when present.",
+      `${path}.label`,
+    );
   }
 
   if (!isSafeNonNegativeInteger(value.createdAt)) {

@@ -1,15 +1,15 @@
 import "dotenv/config";
 import { defineConfig } from "drizzle-kit";
+import { resolveDatabaseConfig } from "./server/dbConfig";
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL, ensure the database is provisioned");
-}
+const databaseConfig = resolveDatabaseConfig();
 
 export default defineConfig({
   out: "./migrations",
   schema: "./shared/schema.ts",
   dialect: "postgresql",
   dbCredentials: {
-    url: process.env.DATABASE_URL,
+    url: databaseConfig.connectionString,
+    ssl: databaseConfig.ssl === false ? false : databaseConfig.ssl,
   },
 });

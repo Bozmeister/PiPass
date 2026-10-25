@@ -10,6 +10,7 @@ import {
   check,
   index,
   uniqueIndex,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 
@@ -63,6 +64,10 @@ export const vaultBlobs = pgTable(
     updatedAt: bigint("updated_at", { mode: "number" })
       .notNull()
       .$defaultFn(() => Date.now()),
+    // SHA-256 of the client vault-key HMAC proof. Null only on legacy
+    // rows uploaded before proof-of-possession. Writes against a live
+    // blob require a matching proof; unbound legacy blobs fail closed.
+    keyVerifier: text("key_verifier"),
   },
   (table) => [
     check("vault_blobs_version_range", sql`${table.version} >= 1`),
@@ -73,8 +78,8 @@ export const vaultBlobs = pgTable(
 // successful sync, the previous vault_blobs row is archived here BEFORE the
 // new row is written, then this table is pruned to keep only the latest N
 // entries per user (see DatabaseStorage.syncVault). The encrypted blob is
-// stored verbatim — the server never decrypts it, preserving the
-// zero-knowledge property. Restoration writes a historical blob back into
+// stored verbatim — the server does not decrypt vault ciphertext.
+// Restoration writes a historical blob back into
 // vault_blobs as currentVersion + 1 (see DatabaseStorage.restoreVault).
 export const vaultBlobHistory = pgTable(
   "vault_blob_history",
@@ -99,6 +104,101 @@ export const vaultBlobHistory = pgTable(
       table.archivedAt.desc(),
     ),
     check("vault_blob_history_version_range", sql`${table.version} >= 1`),
+  ],
+);
+
+// Per-item ciphertext manifests. Opaque to the server: fields are v4
+// strings, and this table is not a decryption, search, or bot store.
+// vault_blobs remains the monolithic blob and is not written by item routes.
+// version is the client manifest version (epoch-ms updatedAt), so it is a
+// bigint rather than the 32-bit vault_blobs version counter.
+export const vaultItems = pgTable(
+  "vault_items",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    itemId: text("item_id").notNull(),
+    kind: text("kind").notNull(),
+    itemSchema: text("schema").notNull(),
+    version: bigint("version", { mode: "number" }).notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    fields: text("fields").notNull(),
+    salt: text("salt").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    locator: text("locator").notNull(),
+    tombstone: boolean("tombstone").notNull(),
+    storedAt: bigint("stored_at", { mode: "number" })
+      .notNull()
+      .$defaultFn(() => Date.now()),
+  },
+  (table) => [
+    primaryKey({
+      name: "vault_items_pkey",
+      columns: [table.userId, table.itemId],
+    }),
+    check(
+      "vault_items_kind",
+      sql`${table.kind} IN ('vault-entry', 'secure-note')`,
+    ),
+    // drizzle-kit push 0.31 does not alter an existing check. Databases that
+    // already have vault_items_schema limited to pipass-item-v1 need:
+    //   ALTER TABLE vault_items DROP CONSTRAINT vault_items_schema;
+    //   ALTER TABLE vault_items ADD CONSTRAINT vault_items_schema
+    //     CHECK (schema IN ('pipass-item-v1', 'pipass-tombstone-v1'));
+    check(
+      "vault_items_schema",
+      sql`${table.itemSchema} IN ('pipass-item-v1', 'pipass-tombstone-v1')`,
+    ),
+    check("vault_items_version_nonneg", sql`${table.version} >= 0`),
+    check(
+      "vault_items_hash_len",
+      sql`char_length(${table.contentSha256}) = 64`,
+    ),
+  ],
+);
+
+// Latest movement receipt for one item. The server signs this with an
+// Ed25519 key after a manifest or tombstone write. Ciphertext stays in
+// vault_items. This table stores the receipt fields and the canonical
+// unsigned body that was signed. One row per item; a newer write replaces
+// it. User deletion cascades the row.
+export const vaultItemReceipts = pgTable(
+  "vault_item_receipts",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    itemId: text("item_id").notNull(),
+    op: text("op").notNull(),
+    itemVersion: bigint("item_version", { mode: "number" }).notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    fromLocator: text("from_locator").notNull(),
+    toLocator: text("to_locator").notNull(),
+    botId: text("bot_id").notNull(),
+    issuedAt: bigint("issued_at", { mode: "number" }).notNull(),
+    prevReceiptHash: text("prev_receipt_hash").notNull(),
+    sigAlg: text("sig_alg").notNull(),
+    signature: text("signature").notNull(),
+    canonical: text("canonical").notNull(),
+    v: integer("v").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      name: "vault_item_receipts_pkey",
+      columns: [table.userId, table.itemId],
+    }),
+    check(
+      "vault_item_receipts_op",
+      sql`${table.op} IN ('put', 'copy', 'move', 'delete')`,
+    ),
+    check("vault_item_receipts_sig_alg", sql`${table.sigAlg} = 'ed25519'`),
+    check("vault_item_receipts_v", sql`${table.v} = 1`),
+    check(
+      "vault_item_receipts_hash_len",
+      sql`char_length(${table.contentSha256}) = 64 AND char_length(${table.prevReceiptHash}) = 64`,
+    ),
   ],
 );
 
@@ -177,6 +277,12 @@ export const sessions = pgTable(
     // the row is deleted with the session, and on a fresh login a new
     // row is created with NULL anyway.
     totpVerifiedUntil: bigint("totp_verified_until", { mode: "number" }),
+    // Ed25519 raw public key (64 lowercase hex) for short-lived retrieval
+    // tokens. The client registers it on the session created at login.
+    // The private key is never stored. Null until that registration.
+    // Nullable so existing session rows stay valid. The public session
+    // list does not select this column.
+    retrievalPublicKey: text("retrieval_public_key"),
   },
   (table) => [
     index("sessions_user_expires_idx").on(table.userId, table.expiresAt),
@@ -188,6 +294,7 @@ export const sessions = pgTable(
       table.userId,
       table.deviceFingerprint,
     ),
+    index("sessions_retrieval_key_idx").on(table.retrievalPublicKey),
   ],
 );
 
@@ -196,10 +303,10 @@ export const sessions = pgTable(
 // user-facing GET /api/vault/audit endpoint and gives operators a way to
 // reconstruct "what happened on this account" after a security incident.
 //
-// Zero-knowledge guarantees are preserved: this table NEVER stores
-// encrypted blob contents, auth hashes, or session tokens — only
-// metadata about the action (which version was written, how big the
-// blob was, where the request came from).
+// This table NEVER stores encrypted blob contents, auth hashes, or
+// session tokens — only metadata about the action (which version was
+// written, how big the blob was, where the request came from).
+// Operators can still see that metadata; it is not a "learns nothing" log.
 //
 // version_before / version_after / blob_size_bytes are nullable because
 // only the vault_sync / vault_restore actions populate them; login,
@@ -377,7 +484,7 @@ export const trustedDevices = pgTable(
 // ---------------------------------------------------------------------------
 //
 // User-defined "decoy" entries the client embeds in its decrypted vault. The
-// server never sees the cleartext entry — it only stores an irreversible
+// server does not receive the cleartext decoy — it only stores an irreversible
 // SHA-256 of a stable marker the client can recompute when it observes a
 // suspicious access (read of a decoy entry, copy of a decoy password, paste
 // of a decoy URL into the autofill flow, etc.).
@@ -458,6 +565,8 @@ export type NewUser = typeof users.$inferInsert;
 export type VaultBlob = typeof vaultBlobs.$inferSelect;
 export type NewVaultBlob = typeof vaultBlobs.$inferInsert;
 export type VaultBlobHistoryEntry = typeof vaultBlobHistory.$inferSelect;
+export type VaultItem = typeof vaultItems.$inferSelect;
+export type NewVaultItem = typeof vaultItems.$inferInsert;
 export type Session = typeof sessions.$inferSelect;
 export type VaultAuditLogEntry = typeof vaultAuditLog.$inferSelect;
 export type WebauthnCredential = typeof webauthnCredentials.$inferSelect;
@@ -519,6 +628,11 @@ export const loginSchema = insertUserSchema
   })
   .strict();
 
+const vaultKeyProofSchema = z
+  .string()
+  .length(64)
+  .regex(/^[0-9a-f]+$/);
+
 export const vaultSyncSchema = z
   .object({
     encryptedBlob: vaultEncryptedBlobSchema,
@@ -527,8 +641,130 @@ export const vaultSyncSchema = z
       .int()
       .min(0)
       .max(VAULT_EXPECTED_PREV_VERSION_MAX),
+    // HMAC-SHA256(masterKey, "pipass.vault.pop.v1|" + userId). Required
+    // so a stolen session cannot overwrite the cloud blob.
+    vaultKeyProof: vaultKeyProofSchema,
+    // Optional rotation: accepted only when vaultKeyProof matches the
+    // current verifier. Server stores SHA-256(nextVaultKeyProof).
+    nextVaultKeyProof: vaultKeyProofSchema.optional(),
   })
   .strict();
+
+// PUT /api/vault/items — one canonical pipass-item-v1 manifest.
+// contentSha256 is checked against the canonical body in the route.
+// locator and tombstone are storage metadata and are not part of the hash.
+// vaultKeyProof is the write credential; the long-lived auth hash is not.
+const opaqueItemFieldSchema = z
+  .object({
+    name: z.enum([
+      "password",
+      "title",
+      "username",
+      "url",
+      "notes",
+      "aux",
+      "label",
+      "content",
+      // Opaque wrapped item key. The server stores the v4 ciphertext and does not unwrap it.
+      "itemKey",
+    ]),
+    ciphertext: z
+      .string()
+      .min(1)
+      .max(100_000)
+      .regex(/^v4:[0-9a-fA-F]{24}:(?:[0-9a-fA-F]{2})*:[0-9a-fA-F]{32}$/),
+  })
+  .strict();
+
+const safeNonNegativeInt = z
+  .number()
+  .int()
+  .nonnegative()
+  .refine((value) => Number.isSafeInteger(value));
+
+export const vaultItemPutSchema = z
+  .object({
+    schema: z.literal("pipass-item-v1"),
+    itemId: z
+      .string()
+      .min(1)
+      .max(128)
+      .refine((value) => !/[\0\n\r:]/.test(value)),
+    kind: z.enum(["vault-entry", "secure-note"]),
+    version: safeNonNegativeInt,
+    salt: z
+      .string()
+      .regex(/^[0-9a-f]+$/)
+      .refine((value) => value.length >= 16 && value.length <= 256 && value.length % 2 === 0),
+    createdAt: safeNonNegativeInt,
+    updatedAt: safeNonNegativeInt,
+    fields: z.array(opaqueItemFieldSchema).min(1).max(8),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    locator: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[^\x00-\x1F\x7F]+$/),
+    tombstone: z.boolean(),
+    vaultKeyProof: vaultKeyProofSchema,
+  })
+  .strict();
+
+export type VaultItemPutInput = z.infer<typeof vaultItemPutSchema>;
+
+// PUT /api/vault/items/:itemId/tombstone
+// contentSha256 is the deleted item hash and is inside the canonical body.
+// tombstoneSha256 is SHA-256 of that body. vaultKeyProof is the write credential.
+const tombstoneDeletedAt = safeNonNegativeInt.refine((value) => value > 0);
+
+export const vaultItemTombstonePutSchema = z
+  .object({
+    schema: z.literal("pipass-tombstone-v1"),
+    itemId: z
+      .string()
+      .min(1)
+      .max(128)
+      .refine((value) => !/[\0\n\r:]/.test(value)),
+    kind: z.enum(["vault-entry", "secure-note"]),
+    itemVersion: safeNonNegativeInt,
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    contentBound: z.boolean(),
+    deletedAt: tombstoneDeletedAt,
+    tombstoneSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    vaultKeyProof: vaultKeyProofSchema,
+  })
+  .strict();
+
+export type VaultItemTombstonePutInput = z.infer<typeof vaultItemTombstonePutSchema>;
+
+// POST /api/vault/items/:itemId/move
+// The body names the next locator only. The stored content hash, fields,
+// and version stay as they are. vaultKeyProof is the write credential.
+// botId is optional. Omit it and the receipt is stamped pipass-server.
+// The only accepted proposer id is intentdb-bot-v1.
+export const vaultItemMoveSchema = z
+  .object({
+    newLocator: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[^\x00-\x1F\x7F]+$/),
+    vaultKeyProof: vaultKeyProofSchema,
+    botId: z.literal("intentdb-bot-v1").optional(),
+  })
+  .strict();
+
+export type VaultItemMoveInput = z.infer<typeof vaultItemMoveSchema>;
+
+// POST /api/auth/retrieval-device — bind an Ed25519 public key to the
+// current login session. The private key stays on the device.
+export const retrievalDeviceSchema = z
+  .object({
+    publicKey: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
+
+export type RetrievalDeviceInput = z.infer<typeof retrievalDeviceSchema>;
 
 // Restore endpoint — caller picks which historical version to roll back to.
 // `version` is the historical version (the one stored in vault_blob_history),
@@ -539,6 +775,7 @@ export const vaultSyncSchema = z
 export const vaultRestoreSchema = z
   .object({
     version: z.number().int().min(1),
+    vaultKeyProof: vaultKeyProofSchema,
   })
   .strict();
 

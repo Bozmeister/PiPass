@@ -25,8 +25,7 @@ async function writeItem(key: string, value: string): Promise<void> {
     if (!(await isWebStoragePlatform())) {
       throw err;
     }
-    // localStorage unavailable (private mode, quota) - fail silently per
-    // the credentials contract: caller cannot rely on persistence.
+    // Web vault storage is disabled (V3). Persistence is not available.
   }
 }
 

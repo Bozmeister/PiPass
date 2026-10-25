@@ -45,6 +45,7 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createVaultKeyProof } from "../../crypto/vaultKeyProof";
 
 import { registerRoutes } from "../routes";
 import { setupErrorHandler, setupRequestLogging } from "../logging";
@@ -111,11 +112,25 @@ function validEncryptedBlob(seed = "vault"): string {
   return `${hex64(`${seed}:iv`).slice(0, 32)}:${hex64(`${seed}:cipher`)}:${hex64(`${seed}:mac`)}`;
 }
 
+function testMasterKeyHex(userId: string): string {
+  return createHash("sha256").update(`test-mk:${userId}`).digest("hex");
+}
+
+function testVaultKeyProof(userId: string): string {
+  return createVaultKeyProof(testMasterKeyHex(userId), userId);
+}
+
+const DUMMY_VAULT_KEY_PROOF = "ab".repeat(32);
+
 async function expectInvalidVaultBlob(encryptedBlob: string): Promise<void> {
   const res = await fetch(`${baseUrl}/api/vault/sync`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ encryptedBlob, expectedPrevVersion: 0 }),
+    body: JSON.stringify({
+      encryptedBlob,
+      expectedPrevVersion: 0,
+      vaultKeyProof: DUMMY_VAULT_KEY_PROOF,
+    }),
   });
   assert.equal(res.status, 400);
   assert.deepEqual(await res.json(), { error: "Invalid blob" });
@@ -202,7 +217,11 @@ async function legacyVaultSync(
   return fetch(`${baseUrl}/api/vault/sync`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ encryptedBlob, expectedPrevVersion }),
+    body: JSON.stringify({
+      encryptedBlob,
+      expectedPrevVersion,
+      vaultKeyProof: testVaultKeyProof(user.userId),
+    }),
   });
 }
 
@@ -236,7 +255,10 @@ async function legacyVaultRestore(
   return fetch(`${baseUrl}/api/vault/restore`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ version }),
+    body: JSON.stringify({
+      version,
+      vaultKeyProof: testVaultKeyProof(user.userId),
+    }),
   });
 }
 
@@ -843,6 +865,7 @@ test("T004.b — sync from an untrusted device is blocked (step-up required)", a
     body: JSON.stringify({
       encryptedBlob: validEncryptedBlob("t004b"),
       expectedPrevVersion: 0,
+      vaultKeyProof: testVaultKeyProof(u.userId),
     }),
     ua: "T004b-Agent/1.0",
     ip: "10.0.4.10",
@@ -861,6 +884,7 @@ test("T004.b — sync from an untrusted device is blocked (step-up required)", a
 test("T004.c — vault sync rejects legacy client-chosen version", async () => {
   await expectInvalidVaultSyncBody({
     encryptedBlob: validEncryptedBlob("legacy-version"),
+    vaultKeyProof: DUMMY_VAULT_KEY_PROOF,
     version: 1,
   });
 });
@@ -868,6 +892,7 @@ test("T004.c — vault sync rejects legacy client-chosen version", async () => {
 test("T004.d — vault sync rejects huge legacy client-chosen version", async () => {
   await expectInvalidVaultSyncBody({
     encryptedBlob: validEncryptedBlob("huge-legacy-version"),
+    vaultKeyProof: DUMMY_VAULT_KEY_PROOF,
     version: 2_147_483_647,
   });
 });
@@ -875,6 +900,7 @@ test("T004.d — vault sync rejects huge legacy client-chosen version", async ()
 test("T004.e — vault sync rejects both version and expectedPrevVersion", async () => {
   await expectInvalidVaultSyncBody({
     encryptedBlob: validEncryptedBlob("both-version-fields"),
+    vaultKeyProof: DUMMY_VAULT_KEY_PROOF,
     version: 1,
     expectedPrevVersion: 0,
   });
@@ -1025,6 +1051,136 @@ test("T004.p — huge expectedPrevVersion conflicts and cannot force huge stored
   };
   assert.equal(fetched.version, 1);
   assert.equal(fetched.encryptedBlob, blob);
+});
+
+test("vault sync rejects a missing vault key proof", async () => {
+  const res = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      encryptedBlob: validEncryptedBlob("pop-missing"),
+      expectedPrevVersion: 0,
+    }),
+  });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Invalid proof" });
+});
+
+test("vault sync rejects a second write with the wrong vault key proof", async () => {
+  const u = await registerUser();
+  const blob1 = validEncryptedBlob("pop-first");
+  await expectStatus(await legacyVaultSync(u, blob1, 0), 200, "first sync binds proof");
+
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-user-id": u.userId,
+    "x-auth-hash": u.authHash,
+    "x-forwarded-for": randomIp(),
+  };
+  const attacker = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      encryptedBlob: validEncryptedBlob("pop-attacker"),
+      expectedPrevVersion: 1,
+      vaultKeyProof: DUMMY_VAULT_KEY_PROOF,
+    }),
+  });
+  assert.equal(attacker.status, 403);
+  assert.deepEqual(await attacker.json(), { error: "Invalid vault key proof" });
+
+  const fetchRes = await legacyVaultFetch(u);
+  const fetched = (await fetchRes.json()) as { encryptedBlob: string | null; version: number };
+  assert.equal(fetched.version, 1);
+  assert.equal(fetched.encryptedBlob, blob1);
+});
+
+test("vault sync accepts a matching proof and can rotate it", async () => {
+  const u = await registerUser();
+  const blob1 = validEncryptedBlob("pop-rotate-1");
+  await expectStatus(await legacyVaultSync(u, blob1, 0), 200, "first sync");
+
+  const nextKey = hex64(`next-mk:${u.userId}`);
+  const nextProof = createVaultKeyProof(nextKey, u.userId);
+  const blob2 = validEncryptedBlob("pop-rotate-2");
+  const rotate = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-user-id": u.userId,
+      "x-auth-hash": u.authHash,
+      "x-forwarded-for": randomIp(),
+    },
+    body: JSON.stringify({
+      encryptedBlob: blob2,
+      expectedPrevVersion: 1,
+      vaultKeyProof: testVaultKeyProof(u.userId),
+      nextVaultKeyProof: nextProof,
+    }),
+  });
+  await expectStatus(rotate, 200, "rotation sync should succeed");
+
+  const oldProofRetry = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-user-id": u.userId,
+      "x-auth-hash": u.authHash,
+      "x-forwarded-for": randomIp(),
+    },
+    body: JSON.stringify({
+      encryptedBlob: validEncryptedBlob("pop-rotate-old"),
+      expectedPrevVersion: 2,
+      vaultKeyProof: testVaultKeyProof(u.userId),
+    }),
+  });
+  assert.equal(oldProofRetry.status, 403);
+
+  const newProofWrite = await fetch(`${baseUrl}/api/vault/sync`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-user-id": u.userId,
+      "x-auth-hash": u.authHash,
+      "x-forwarded-for": randomIp(),
+    },
+    body: JSON.stringify({
+      encryptedBlob: validEncryptedBlob("pop-rotate-3"),
+      expectedPrevVersion: 2,
+      vaultKeyProof: nextProof,
+    }),
+  });
+  await expectStatus(newProofWrite, 200, "new proof should write after rotation");
+});
+
+test("vault restore rejects a stolen session without the vault key proof", async () => {
+  const u = await registerUser();
+  await expectStatus(
+    await legacyVaultSync(u, validEncryptedBlob("pop-restore-1"), 0),
+    200,
+    "first sync",
+  );
+  await expectStatus(
+    await legacyVaultSync(u, validEncryptedBlob("pop-restore-2"), 1),
+    200,
+    "second sync",
+  );
+
+  const stolen = await fetch(`${baseUrl}/api/vault/restore`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-user-id": u.userId,
+      "x-auth-hash": u.authHash,
+      "x-forwarded-for": randomIp(),
+    },
+    body: JSON.stringify({
+      version: 1,
+      vaultKeyProof: DUMMY_VAULT_KEY_PROOF,
+    }),
+  });
+  assert.equal(stolen.status, 403);
+  assert.deepEqual(await stolen.json(), { error: "Invalid vault key proof" });
 });
 
 // ---------------------------------------------------------------------------
@@ -1346,7 +1502,11 @@ test("T006.e — untrusted-device sync block emits a safe audit row", async () =
   const blob = validEncryptedBlob("t006e:blocked");
   const sync = await authedFetch("/api/vault/sync", login.sessionToken!, {
     method: "POST",
-    body: JSON.stringify({ encryptedBlob: blob, expectedPrevVersion: 0 }),
+    body: JSON.stringify({
+      encryptedBlob: blob,
+      expectedPrevVersion: 0,
+      vaultKeyProof: testVaultKeyProof(u.userId),
+    }),
     ua,
     ip,
     installId,

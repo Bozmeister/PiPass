@@ -2,15 +2,21 @@ import React, { useState } from "react";
 import { View, Text, TextInput, Pressable, Modal, ScrollView, Platform, KeyboardAvoidingView, Alert, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import * as Clipboard from "expo-clipboard";
-import { SecureNote, DecryptedSecureNote, encryptSecureNote, decryptSecureNote } from "../workers/vaultWorker";
+import {
+  SecureNote,
+  DecryptedSecureNote,
+  encryptSecureNote,
+  decryptSecureNote,
+  decryptSecureNoteLabel,
+  migrateSecureNoteToEncryptedLabel,
+  secureNoteHasLegacyPlaintextLabel,
+} from "../workers/vaultWorker";
 import { saveSecureNote, deleteSecureNote } from "../workers/storageWorker";
 import { KeyShares } from "../crypto/secureMemory";
 import { requireFreshBiometric } from "../crypto/biometricGate";
+import { copySecret, SECRET_CLIPBOARD_TTL_MS } from "../lib/secureClipboard";
 import { sanitizeInput } from "../utils/watchman";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_FOCUS, LABEL_COLOR } from "../styles/inputTheme";
-
-const CLIPBOARD_CLEAR_MS = 30000;
 
 interface SecureNotesModalProps {
   visible: boolean;
@@ -32,15 +38,63 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
   const [decrypting, setDecrypting] = useState(false);
   const [copiedField, setCopiedField] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
-  const clipboardTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Labels are ciphertext at rest — only filled after decrypt while vault is unlocked. */
+  const [decryptedLabels, setDecryptedLabels] = useState<Record<string, string>>({});
   const copyFeedbackTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const migratingLegacyRef = React.useRef(false);
 
   React.useEffect(() => {
     return () => {
-      if (clipboardTimerRef.current) clearTimeout(clipboardTimerRef.current);
       if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current);
     };
   }, []);
+
+  // Decrypt list labels only while unlocked; never show at-rest plaintext `label`.
+  React.useEffect(() => {
+    if (!visible || !keyShares) {
+      setDecryptedLabels({});
+      return;
+    }
+    const next: Record<string, string> = {};
+    for (const note of notes) {
+      try {
+        next[note.id] = decryptSecureNoteLabel(note, keyShares);
+      } catch {
+        next[note.id] = "Secure note";
+      }
+    }
+    setDecryptedLabels(next);
+  }, [visible, notes, keyShares]);
+
+  // One-shot migrate: strip legacy plaintext labels from disk once vault is open.
+  React.useEffect(() => {
+    if (!visible || !keyShares || migratingLegacyRef.current) return;
+    const legacy = notes.filter(secureNoteHasLegacyPlaintextLabel);
+    if (legacy.length === 0) return;
+
+    migratingLegacyRef.current = true;
+    let cancelled = false;
+    (async () => {
+      let changed = false;
+      for (const note of legacy) {
+        try {
+          const cleaned = migrateSecureNoteToEncryptedLabel(note, keyShares);
+          await saveSecureNote(cleaned);
+          changed = true;
+        } catch {
+          // Leave legacy record; decrypt still falls back to plaintext until re-save works.
+        }
+      }
+      if (!cancelled && changed) {
+        onNotesChanged();
+      }
+      migratingLegacyRef.current = false;
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, notes, keyShares, onNotesChanged]);
 
   function resetView() {
     setView("list");
@@ -138,15 +192,10 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
 
   async function handleCopy(value: string) {
     try {
-      await Clipboard.setStringAsync(value);
+      await copySecret(value);
       setCopiedField(true);
       if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current);
       copyFeedbackTimerRef.current = setTimeout(() => { setCopiedField(false); copyFeedbackTimerRef.current = null; }, 2000);
-      if (clipboardTimerRef.current) clearTimeout(clipboardTimerRef.current);
-      clipboardTimerRef.current = setTimeout(async () => {
-        try { await Clipboard.setStringAsync(""); } catch {}
-        clipboardTimerRef.current = null;
-      }, CLIPBOARD_CLEAR_MS);
     } catch {}
   }
 
@@ -225,7 +274,9 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
                     >
                       <Ionicons name="document-text-outline" size={20} color="#4CAF50" style={{ marginRight: 12 }} />
                       <View style={{ flex: 1 }}>
-                        <Text style={{ color: "#fff", fontSize: 15, fontWeight: "600" }}>{note.label}</Text>
+                        <Text style={{ color: "#fff", fontSize: 15, fontWeight: "600" }}>
+                          {decryptedLabels[note.id] ?? "Secure note"}
+                        </Text>
                         <Text style={{ color: "#666", fontSize: 11, marginTop: 2 }}>
                           {new Date(note.createdAt).toLocaleDateString()}
                         </Text>
@@ -309,7 +360,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
                 }}>
                   <Ionicons name="lock-closed" size={14} color="#fbbf24" />
                   <Text style={{ color: "#aaa", fontSize: 11, marginLeft: 6 }}>
-                    Content will be encrypted with your vault key before storage
+                    Label and content are encrypted with your vault key before storage
                   </Text>
                 </View>
 
@@ -368,7 +419,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
                         borderWidth: 1,
                         borderColor: "#333",
                       }}>
-                        <Text style={{ color: "#fff", fontSize: 15, lineHeight: 22 }} selectable>
+                        <Text style={{ color: "#fff", fontSize: 15, lineHeight: 22 }}>
                           {decryptedNote.content}
                         </Text>
                       </View>
@@ -384,7 +435,7 @@ export default function SecureNotesModal({ visible, notes, keyShares, onClose, o
                     }}>
                       <Ionicons name="timer-outline" size={14} color="#888" />
                       <Text style={{ color: "#888", fontSize: 11, marginLeft: 6 }}>
-                        Clipboard auto-clears 30s after copy
+                        Secret copies auto-clear after {Math.round(SECRET_CLIPBOARD_TTL_MS / 1000)}s
                       </Text>
                     </View>
 

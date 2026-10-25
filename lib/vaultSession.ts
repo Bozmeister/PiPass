@@ -16,13 +16,15 @@ import { wipeShares } from "../crypto/secureMemory";
 // memory while unlocked; making them readable from another module
 // in the same JS bundle adds no new path for an attacker. The
 // shares are still XOR-split at rest in memory (per
-// crypto/secureMemory.ts), wiped on lock, and never written to
-// disk or sent to the server.
+// crypto/secureMemory.ts) while unlocked, wiped on hard lock
+// (clearActiveKeyShares / setActiveKeyShares(null)), and never
+// written to disk or sent to the server.
 //
 // Discipline:
 //   - VaultScreen is the SOLE writer. It calls setActiveKeyShares
 //     whenever keySharesRef.current changes (unlock, password
 //     rotation) and clearActiveKeyShares on lock.
+//   - Lock MUST wipe — never park shares in a "locked" ref.
 //   - Other screens are READERS ONLY. They MUST gracefully handle
 //     null (== "vault is locked, ask the user to unlock first").
 //   - Never persist this value. Never copy it into a closure that

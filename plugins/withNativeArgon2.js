@@ -1,41 +1,95 @@
-const { withSettingsGradle, withAppBuildGradle, withDangerousMod } = require("@expo/config-plugins");
+const {
+  withSettingsGradle,
+  withAppBuildGradle,
+  withDangerousMod,
+  withMainApplication,
+} = require("@expo/config-plugins");
 const fs = require("fs");
 const path = require("path");
 
-const SPHEREON_PROJECT = ":@sphereon_react-native-argon2";
-const SPHEREON_DIR = "../node_modules/@sphereon/react-native-argon2/android";
+const LOCAL_PROJECT = ":pipass-argon2";
+const LOCAL_DIR = "../modules/pipass-argon2/android";
 
 function withNativeArgon2(config) {
+  // Gradle include + PackageList registration come from Expo/RN
+  // autolinking of modules/pipass-argon2 (package.json + react-native.config.js).
+  // This plugin only strips leftover Sphereon includes so they cannot
+  // collide with the first-party module.
   config = withArgonSettingsGradle(config);
-  config = withArgonAppBuildGradle(config);
   return config;
+}
+
+/**
+ * Register the first-party Android module. Autolinking is not used for
+ * @sphereon/react-native-argon2 on Android (see react-native.config.js).
+ * JS still reads NativeModules.RNArgon2 (PipassArgon2Module.getName()).
+ */
+function withArgonMainApplicationPackage(config) {
+  return withMainApplication(config, (config) => {
+    let contents = config.modResults.contents;
+    if (contents.includes("PipassArgon2Package")) {
+      return config;
+    }
+
+    // Drop a previous Sphereon registration if a rebuild is incremental.
+    contents = contents.replace(/\nimport com\.poowf\.argon2\.RNArgon2Package/g, "");
+    contents = contents.replace(
+      /\n\s*\/\/ Manual register:[^\n]*\n\s*add\(RNArgon2Package\(\)\)/g,
+      "",
+    );
+    contents = contents.replace(
+      /\n\s*\/\/ Manual register:[^\n]*\n\s*packages\.add\(new RNArgon2Package\(\)\);/g,
+      "",
+    );
+
+    // Kotlin (Expo SDK 54 default)
+    if (contents.includes("PackageList(this).packages")) {
+      if (!contents.includes("import com.pipass.argon2.PipassArgon2Package")) {
+        if (contents.includes("import expo.modules.ReactNativeHostWrapper")) {
+          contents = contents.replace(
+            "import expo.modules.ReactNativeHostWrapper",
+            "import expo.modules.ReactNativeHostWrapper\nimport com.pipass.argon2.PipassArgon2Package",
+          );
+        } else if (contents.includes("import com.facebook.react.PackageList")) {
+          contents = contents.replace(
+            "import com.facebook.react.PackageList",
+            "import com.facebook.react.PackageList\nimport com.pipass.argon2.PipassArgon2Package",
+          );
+        }
+      }
+      contents = contents.replace(
+        /(PackageList\(this\)\.packages\.apply\s*\{)/,
+        `$1\n              // First-party Android Argon2 (modules/pipass-argon2)\n              add(PipassArgon2Package())`,
+      );
+    } else if (contents.includes("new PackageList(this).getPackages()")) {
+      if (!contents.includes("import com.pipass.argon2.PipassArgon2Package")) {
+        contents = contents.replace(
+          "import com.facebook.react.PackageList;",
+          "import com.facebook.react.PackageList;\nimport com.pipass.argon2.PipassArgon2Package;",
+        );
+      }
+      contents = contents.replace(
+        /(List<ReactPackage> packages = new PackageList\(this\)\.getPackages\(\);)/,
+        `$1\n              // First-party Android Argon2 (modules/pipass-argon2)\n              packages.add(new PipassArgon2Package());`,
+      );
+    }
+
+    config.modResults.contents = contents;
+    return config;
+  });
 }
 
 function withArgonSettingsGradle(config) {
   return withSettingsGradle(config, (config) => {
     let contents = config.modResults.contents;
-    const includeMarker = `include ':app'`;
 
-    // Strip ANY prior includes for sphereon/argon2 (from autolinking or previous patches)
-    // to prevent duplicate module registration under different names pointing to same dir,
-    // which can lead to namespace conflicts or dependency resolution failures for the lib.
+    // Drop leftover Sphereon includes only. Do not re-add :pipass-argon2
+    // here — Expo autolinking of modules/pipass-argon2 owns that include.
     contents = contents.replace(
-      /include\s+['"][^'"]*(?:sphereon|argon2)[^'"]*['"][^\n]*\n?(?:project\(['"][^'"]*(?:sphereon|argon2)[^'"]*['"]\)\.projectDir\s*=\s*new File\([^\n]+\)[^\n]*\n?)?/gi,
-      ''
+      /include\s+['"]:@sphereon_react-native-argon2['"][^\n]*\n?(?:project\(['"]:@sphereon_react-native-argon2['"]\)\.projectDir\s*=\s*new File\([^\n]+\)[^\n]*\n?)?/gi,
+      "",
     );
 
-    if (contents.includes(SPHEREON_PROJECT)) {
-      // After strip, if still present (unlikely), keep as-is
-      config.modResults.contents = contents;
-      return config;
-    }
-    if (contents.includes(includeMarker)) {
-      const addition = `
-include '${SPHEREON_PROJECT}'
-project('${SPHEREON_PROJECT}').projectDir = new File(rootProject.projectDir, '${SPHEREON_DIR}')
-`;
-      contents = contents.replace(includeMarker, includeMarker + addition);
-    }
     config.modResults.contents = contents;
     return config;
   });
@@ -47,7 +101,7 @@ function withArgonAppBuildGradle(config) {
 
     // Add the project implementation if missing (in dependencies block).
     // Insert right after the opening 'dependencies {' for robustness (avoids fragile end-of-block regex that could break generated build.gradle syntax).
-    const implLine = `    implementation project('${SPHEREON_PROJECT}')`;
+    const implLine = `    implementation project('${LOCAL_PROJECT}')`;
     if (!contents.includes(implLine)) {
       contents = contents.replace(
         /dependencies\s*\{/,
@@ -64,34 +118,197 @@ function withArgonAppBuildGradle(config) {
   });
 }
 
-// Permanent release signing using the production upload key.
-// This ensures that *every* clean prebuild + ./gradlew bundleRelease produces a Play-acceptable
-// signed AAB (no more "debugging only" artifacts from signingConfigs.debug fallback).
-// The keystore must be present at android/app/upload-keystore.jks at build time (we place the
-// master copy there after prebuild in the grok build flow; for EAS, upload the key to EAS or
-// keep the file via EAS secrets / git + .easignore exception if desired).
+const RELEASE_SIGNING_LOADER_MARKER = "pipassResolvedStoreFile";
+const RELEASE_SIGNING_CONFIG_MARKER = "pipass-signingConfigs-release";
+const RELEASE_SIGNING_BEGIN = "// BEGIN pipass-release-signing";
+const RELEASE_SIGNING_END = "// END pipass-release-signing";
+
+const RELEASE_SIGNING_LOADER = `
+${RELEASE_SIGNING_BEGIN}
+// Secrets from android/app/keystore.properties or PIPASS_UPLOAD_* — never hardcoded.
+def pipassTrimSigningValue(value) {
+    if (value == null) return ""
+    def text = value.toString().trim()
+    if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+        return text.substring(1, text.length() - 1).trim()
+    }
+    return text
+}
+def pipassFirstNonEmpty(Object... values) {
+    for (value in values) {
+        def text = pipassTrimSigningValue(value)
+        if (text.length() > 0) return text
+    }
+    return ""
+}
+def pipassReadSigningMap(File propsFile) {
+    def map = [:]
+    def text = propsFile.getText("UTF-8")
+    if (text.startsWith("\\uFEFF")) {
+        text = text.substring(1)
+    }
+    text.eachLine { raw ->
+        def line = raw.trim()
+        if (line.length() == 0 || line.startsWith("#") || line.startsWith("!")) return
+        def eq = line.indexOf("=")
+        def colon = line.indexOf(":")
+        def sep = -1
+        if (eq >= 0 && (colon < 0 || eq < colon)) sep = eq
+        else if (colon >= 0) sep = colon
+        if (sep < 0) return
+        def key = line.substring(0, sep).trim().toLowerCase().replace("_", "").replace("-", "")
+        def val = line.substring(sep + 1).trim()
+        if (key.length() > 0) map[key] = val
+    }
+    return map
+}
+def pipassKeystorePropertiesFile = [
+    file("keystore.properties"),
+    file("\${projectDir}/keystore.properties"),
+    rootProject.file("app/keystore.properties"),
+    rootProject.file("keystore.properties"),
+].find { it != null && it.isFile() }
+def pipassSigningMap = [:]
+if (pipassKeystorePropertiesFile != null) {
+    pipassSigningMap = pipassReadSigningMap(pipassKeystorePropertiesFile)
+    logger.lifecycle("[pipass] loaded signing properties from " + pipassKeystorePropertiesFile.absolutePath + " keys=" + pipassSigningMap.keySet())
+} else {
+    logger.lifecycle("[pipass] keystore.properties not found next to the app module or android/")
+}
+def pipassStorePassword = pipassFirstNonEmpty(
+    pipassSigningMap["storepassword"],
+    System.getenv("PIPASS_UPLOAD_STORE_PASSWORD")
+)
+def pipassKeyPassword = pipassFirstNonEmpty(
+    pipassSigningMap["keypassword"],
+    System.getenv("PIPASS_UPLOAD_KEY_PASSWORD")
+)
+def pipassKeyAlias = pipassFirstNonEmpty(
+    pipassSigningMap["keyalias"],
+    System.getenv("PIPASS_UPLOAD_KEY_ALIAS"),
+    "upload"
+)
+def pipassStoreFileName = pipassFirstNonEmpty(
+    pipassSigningMap["storefile"],
+    System.getenv("PIPASS_UPLOAD_STORE_FILE"),
+    "upload-keystore.jks"
+)
+def pipassStoreFileCandidates = []
+if (pipassStoreFileName.length() > 0) {
+    def named = new File(pipassStoreFileName)
+    if (named.isAbsolute()) {
+        pipassStoreFileCandidates.add(named)
+    }
+    pipassStoreFileCandidates.add(file(pipassStoreFileName))
+    pipassStoreFileCandidates.add(file("\${projectDir}/" + named.name))
+    pipassStoreFileCandidates.add(rootProject.file("app/" + named.name))
+    pipassStoreFileCandidates.add(rootProject.file(pipassStoreFileName))
+}
+def ${RELEASE_SIGNING_LOADER_MARKER} = pipassStoreFileCandidates.find { it != null && it.isFile() }
+if (${RELEASE_SIGNING_LOADER_MARKER} != null) {
+    ${RELEASE_SIGNING_LOADER_MARKER} = ${RELEASE_SIGNING_LOADER_MARKER}.absoluteFile
+    logger.lifecycle("[pipass] release keystore " + ${RELEASE_SIGNING_LOADER_MARKER})
+}
+def pipassReleaseSigningConfigured = (pipassStorePassword.length() > 0) && (pipassKeyPassword.length() > 0) && (${RELEASE_SIGNING_LOADER_MARKER} != null)
+logger.lifecycle("[pipass] release signing configured=" + pipassReleaseSigningConfigured + " storePassword=" + (pipassStorePassword.length() > 0) + " keyPassword=" + (pipassKeyPassword.length() > 0) + " alias=" + (pipassKeyAlias.length() > 0) + " storeFile=" + (${RELEASE_SIGNING_LOADER_MARKER} != null))
+gradle.taskGraph.whenReady { graph ->
+    def signingRelease = graph.allTasks.any { it.name.toLowerCase().contains("signrelease") }
+    if (signingRelease && !pipassReleaseSigningConfigured) {
+        throw new GradleException(
+            "Release signing is not configured (storePassword=" + (pipassStorePassword.length() > 0) + ", keyPassword=" + (pipassKeyPassword.length() > 0) + ", storeFile=" + (${RELEASE_SIGNING_LOADER_MARKER} != null) + "). Put storePassword/keyPassword/keyAlias/storeFile in android/app/keystore.properties (or set PIPASS_UPLOAD_*)."
+        )
+    }
+}
+${RELEASE_SIGNING_END}
+
+`;
+
+const RELEASE_SIGNING_CONFIG_BLOCK = `        release {
+            // ${RELEASE_SIGNING_CONFIG_MARKER}
+            if (pipassReleaseSigningConfigured) {
+                storeFile ${RELEASE_SIGNING_LOADER_MARKER}
+                storePassword pipassStorePassword
+                keyAlias pipassKeyAlias
+                keyPassword pipassKeyPassword
+            }
+        }
+`;
+
+/**
+ * Ensure signingConfigs.release exists and buildTypes.release points at it.
+ * Passwords come from keystore.properties / PIPASS_UPLOAD_* — never hardcoded.
+ * Exported for unit tests.
+ */
+function applyReleaseSigningToGradle(contents) {
+  let next = contents;
+
+  next = next.replace(
+    /storePassword\s+['"]PiPass2026!['"]/g,
+    "storePassword pipassStorePassword",
+  );
+  next = next.replace(
+    /keyPassword\s+['"]PiPass2026!['"]/g,
+    "keyPassword pipassKeyPassword",
+  );
+
+  // Replace any previous loader (old relative-path version or this block).
+  next = next.replace(
+    /\n\/\/ BEGIN pipass-release-signing[\s\S]*?\/\/ END pipass-release-signing\n/,
+    "\n",
+  );
+  next = next.replace(
+    /\n\/\/ Release signing secrets:[\s\S]*?def pipassReleaseSigningConfigured = [^\n]+\n/,
+    "\n",
+  );
+
+  if (!next.includes(RELEASE_SIGNING_BEGIN)) {
+    if (next.includes("\nandroid {")) {
+      next = next.replace("\nandroid {", `${RELEASE_SIGNING_LOADER}android {`);
+    } else {
+      next = RELEASE_SIGNING_LOADER + next;
+    }
+  }
+
+  // Upgrade a hollow / relative-path release signingConfig.
+  next = next.replace(
+    /release\s*\{\s*\/\/ pipass-signingConfigs-release[\s\S]*?storeFile file\(pipassStoreFileName\)[\s\S]*?\n\s*\}/,
+    RELEASE_SIGNING_CONFIG_BLOCK.trim(),
+  );
+
+  if (!next.includes(RELEASE_SIGNING_CONFIG_MARKER)) {
+    const hardcodedRelease =
+      /release\s*\{\s*storeFile file\(['"]upload-keystore\.jks['"]\)\s*storePassword ['"][^'"]*['"]\s*keyAlias ['"][^'"]*['"]\s*keyPassword ['"][^'"]*['"]\s*\}/m;
+    if (hardcodedRelease.test(next)) {
+      next = next.replace(hardcodedRelease, RELEASE_SIGNING_CONFIG_BLOCK.trim());
+    } else {
+      const inserted = next.replace(
+        /(signingConfigs\s*\{[\s\S]*?debug\s*\{[\s\S]*?\}\s*)/m,
+        `$1${RELEASE_SIGNING_CONFIG_BLOCK}`,
+      );
+      if (inserted === next) {
+        throw new Error(
+          "[withNativeArgon2] Could not insert signingConfigs.release (no signingConfigs.debug block).",
+        );
+      }
+      next = inserted;
+    }
+  }
+
+  if (next.includes(RELEASE_SIGNING_CONFIG_MARKER)) {
+    next = next.replace(
+      /(buildTypes\s*\{[\s\S]*?\brelease\s*\{[\s\S]*?)signingConfig signingConfigs\.(?:debug|release)\b/,
+      "$1signingConfig (pipassReleaseSigningConfigured ? signingConfigs.release : signingConfigs.debug)",
+    );
+  }
+
+  return next;
+}
+
 function withReleaseSigning(config) {
   return withAppBuildGradle(config, (config) => {
-    let contents = config.modResults.contents;
-
-    // Add release signingConfig if the upload keystore reference is not already present.
-    const hasUploadKeystore = contents.includes("upload-keystore.jks");
-    if (!hasUploadKeystore) {
-      // Insert a release entry inside the signingConfigs block, right after the debug entry.
-      contents = contents.replace(
-        /(signingConfigs\s*\{[\s\S]*?debug\s*\{[\s\S]*?\}\s*)/m,
-        `$1        release {\n            storeFile file('upload-keystore.jks')\n            storePassword 'PiPass2026!'\n            keyAlias 'upload'\n            keyPassword 'PiPass2026!'\n        }\n`
-      );
-    }
-
-    // Force the release buildType to use signingConfigs.release instead of debug (the previous root cause).
-    // This replacement is scoped to the release block to avoid touching debug.
-    contents = contents.replace(
-      /(release\s*\{[^}]*?)signingConfig signingConfigs\.debug/m,
-      `$1signingConfig signingConfigs.release`
+    config.modResults.contents = applyReleaseSigningToGradle(
+      config.modResults.contents,
     );
-
-    config.modResults.contents = contents;
     return config;
   });
 }
@@ -107,73 +324,10 @@ function withArgonProguard(config) {
       } catch {
         contents = "";
       }
-      const keep = "# Native cryptography (Argon2 via @sphereon/react-native-argon2 + argon2kt) for reliable KDF on arm64-v8a\n-keep class com.poowf.argon2.** { *; }\n-keep class com.lambdapioneer.argon2kt.** { *; }";
-      if (!contents.includes("lambdapioneer.argon2kt")) {
+      const keep = "# Native cryptography (first-party pipass-argon2 + argon2kt)\n-keep class com.pipass.argon2.** { *; }\n-keep class com.lambdapioneer.argon2kt.** { *; }";
+      if (!contents.includes("com.pipass.argon2")) {
         contents = contents.trimEnd() + "\n\n" + keep + "\n";
         fs.writeFileSync(proguardPath, contents);
-      }
-      return config;
-    },
-  ]);
-}
-
-// Patch the old sphereon lib's build.gradle (jcenter dead, old AGP) so including the project succeeds in modern EAS gradle
-function withPatchSphereonBuild(config) {
-  return withDangerousMod(config, [
-    "android",
-    (config) => {
-      const sphereonBuild = path.join(
-        config.modRequest.projectRoot,
-        "node_modules/@sphereon/react-native-argon2/android/build.gradle"
-      );
-      try {
-        // Nuclear but reliable: completely replace the ancient subproject build.gradle with a modern minimal one
-        // that is compatible with Expo SDK 54 / RN 0.81 / AGP 8+ used in EAS.
-        // This forces the native argon2kt .so to be built and packaged for arm64-v8a etc.
-        // Use the exact RN version from the project's react-native to avoid resolution issues in EAS cloud maven for "react-android:+".
-        let rnVersion = "0.81.5";
-        try {
-          const rnPkgPath = path.join(config.modRequest.projectRoot, "node_modules/react-native/package.json");
-          if (fs.existsSync(rnPkgPath)) {
-            const rnPkg = JSON.parse(fs.readFileSync(rnPkgPath, "utf8"));
-            if (rnPkg.version) rnVersion = rnPkg.version;
-          }
-        } catch {}
-        const modernBuildGradle = `apply plugin: 'com.android.library'
-
-repositories {
-    google()
-    mavenCentral()
-}
-
-android {
-    namespace "com.poowf.argon2"
-    compileSdkVersion 34
-
-    defaultConfig {
-        minSdkVersion 21
-        targetSdkVersion 34
-    }
-
-    buildFeatures {
-        buildConfig = true
-    }
-
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-}
-
-dependencies {
-    // Use bare coordinate (no explicit version) so the root project's React Native Gradle Plugin / version catalog provides the exact matching react-android for the RN version used by the main app (avoids resolution "not found" or version skew in EAS isolated maven).
-    implementation 'com.facebook.react:react-android'
-    implementation 'com.lambdapioneer.argon2kt:argon2kt:1.3.0'
-}
-`;
-        fs.writeFileSync(sphereonBuild, modernBuildGradle);
-      } catch (e) {
-        // non fatal if not present
       }
       return config;
     },
@@ -232,23 +386,26 @@ function withPatchReanimatedForRN081(config) {
         walk2(reanimatedRoot);
         borderFiles.forEach(full => {
           let c = fs.readFileSync(full, 'utf8');
-          const before = c;
-          // If it uses LengthPercentage or any .resolve on radii, replace the whole getBorderRadii impl with safe version
+          // Nuclear stub: any BorderRadiiDrawableUtils that touches LengthPercentage / resolve
+          // must be fully replaced. Partial method replacement leaves helper methods like
+          // getRadiusForCorner() which still call resolve() with the wrong RN 0.81 signature
+          // and fail compileReleaseJavaWithJavac (even if getBorderRadii itself is stubbed).
           if (/LengthPercentage|CSSBackgroundDrawable|\.resolve\(/.test(c)) {
-            c = c.replace(
-              /public static ReactNativeUtils\.BorderRadii getBorderRadii\(View view\) \{[\s\S]*?\n  \}/m,
-              `public static ReactNativeUtils.BorderRadii getBorderRadii(View view) {
-    // Patched for RN 0.81 + EAS gradle compile compat: LengthPercentage.resolve() sig differs across RN/react-native-style deps in cloud build env.
-    // Rounded corner animation is cosmetic only for PiPass; returning zero radii is safe and unblocks the native argon2 + full AAB.
+            const stub = `package com.swmansion.reanimated;
+
+import android.view.View;
+
+public class BorderRadiiDrawableUtils {
+  public static ReactNativeUtils.BorderRadii getBorderRadii(View view) {
+    // Patched for RN 0.81 + AGP compile compat: LengthPercentage.resolve() signature
+    // differs across RN versions. Rounded-corner animation is cosmetic for PiPass.
     return new ReactNativeUtils.BorderRadii(0, 0, 0, 0, 0);
-  }`
-            );
-            // Also direct line fallback for any remaining resolve expr
-            c = c.replace(/uniform != null \? uniform\.resolve\([^)]+\) : Float\.NaN/g, '0f /* patched resolve stub */');
-            c = c.replace(/return length\.resolve\([^)]+\)\.toPixelFromDIP\(\)\.getHorizontal\(\);/g, 'return defaultValue; // patched for RN 0.81 LengthPercentage API');
-          }
-          if (c !== before) {
-            fs.writeFileSync(full, c);
+  }
+}
+`;
+            if (c !== stub) {
+              fs.writeFileSync(full, stub);
+            }
           }
         });
       } catch (e) {
@@ -260,25 +417,20 @@ function withPatchReanimatedForRN081(config) {
 }
 
 module.exports = (config) => {
-  // Re-enabled native Argon2 inclusion with aggressive patches (namespace for AGP8+, buildFeatures, jcenter->mavenCentral, updated AGP, sdk 34).
-  // This forces the required native crypto .so libs (argon2kt) into the AAB for arm64-v8a reliability on Pixels.
-  // Combined with the JS-side try { native } catch + detailed logging + PBKDF2 fallback in keyDerivation + firstTimeSetup,
-  // vault creation will now succeed reliably and log the *exact* root cause if native ever fails to init.
-  // Also injects permanent release signingConfigs + wires release buildType (see withReleaseSigning)
-  // so local clean prebuild + bundleRelease (and EAS when using local credentials) always produce
-  // a properly signed AAB using the committed upload-keystore.jks (no more debug signing fallback).
+  // Argon2 strategy (Android): first-party module at modules/pipass-argon2
+  // (argon2kt). JS never requires @sphereon/react-native-argon2.
+  // iOS: Sphereon remains autolinked; JS prefers hash-wasm there because
+  // CatCrypto treats salt as a UTF-8 string, not hex-decoded bytes.
+  // Fallback chain is in crypto/keyDerivation.ts (native → wasm → PBKDF2).
+  //
+  // Also injects release signingConfigs (keystore.properties / PIPASS_UPLOAD_*)
+  // and RN 0.81 reanimated compile stubs.
 
-  // Ensure autolinking is disabled for the argon package (root react-native.config.js).
-  // Prevents duplicate module registration (autolink + our manual include) which caused
-  // "Namespace 'com.poowf.argon2' is used for 2 modules" and related gradle dep resolution errors.
   try {
     const rnConfigPath = path.join(config.modRequest.projectRoot, "react-native.config.js");
     if (!fs.existsSync(rnConfigPath)) {
-      const rnConfig = `// Disable autolinking for @sphereon/react-native-argon2 on Android.
-// We manually include it via plugins/withNativeArgon2 (settings.gradle + app/build.gradle + nuclear-patched build.gradle)
-// to ensure the native argon2kt libs are packaged for arm64-v8a (Pixel reliability) with modern AGP/namespace fixes.
-// Without this, autolinking + our manual include can cause duplicate module registration
-// (leading to namespace 'com.poowf.argon2' used for 2 modules, or dep resolution failures on react-android in the subproject).
+      const rnConfig = `// Android Argon2 is the first-party modules/pipass-argon2 project.
+// Disable Sphereon autolink on Android so it cannot register a second RNArgon2.
 module.exports = {
   dependencies: {
     '@sphereon/react-native-argon2': {
@@ -297,8 +449,9 @@ module.exports = {
 
   config = withNativeArgon2(config);
   config = withArgonProguard(config);
-  config = withPatchSphereonBuild(config);
   config = withPatchReanimatedForRN081(config);
   config = withReleaseSigning(config);
   return config;
 };
+
+module.exports.applyReleaseSigningToGradle = applyReleaseSigningToGradle;

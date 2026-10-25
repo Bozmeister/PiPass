@@ -27,6 +27,9 @@ android/app/build/
 temp/
 eas-build-log.txt
 last-log.url
+keystore.properties
+**/keystore.properties
+!keystore.properties.example
 
 # Metro
 .metro-health-check*

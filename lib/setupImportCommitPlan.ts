@@ -69,7 +69,8 @@ export interface SetupImportSetupMetadata {
   masterHash: string;
   securityProfile: number;
   kdfMetadata: KdfMetadata;
-  recoveryKeyHash: string;
+  /** @deprecated Recovery key feature removed; optional for legacy wipe/import only. */
+  recoveryKeyHash?: string;
 }
 
 export interface BuildSetupImportCommitPlanInput {
@@ -143,13 +144,7 @@ export function buildSetupImportCommitPlan(
     input.setupMetadata.masterHash,
     "write setup master hash",
   );
-  pushWrite(
-    operations,
-    SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash,
-    "setup-metadata",
-    input.setupMetadata.recoveryKeyHash,
-    "write setup recovery key hash",
-  );
+  // Recovery key feature removed: do not write pipass_recovery_key_hash on new setup.
 
   for (const entry of entries) {
     pushWrite(
@@ -237,9 +232,6 @@ function validateInput(
   }
   if (!isNonEmptyString(setup.masterHash)) {
     return failure("missing-setup-metadata", "setupMetadata.masterHash");
-  }
-  if (!isNonEmptyString(setup.recoveryKeyHash)) {
-    return failure("missing-setup-metadata", "setupMetadata.recoveryKeyHash");
   }
   if (!Number.isSafeInteger(setup.securityProfile) || setup.securityProfile <= 0) {
     return failure("invalid-security-profile", "setupMetadata.securityProfile");

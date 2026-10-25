@@ -1,0 +1,101 @@
+diff --git a/node_modules/expo-clipboard/android/src/main/java/expo/modules/clipboard/ClipboardModule.kt b/node_modules/expo-clipboard/android/src/main/java/expo/modules/clipboard/ClipboardModule.kt
+index aad412e..c9fdc7d 100644
+--- a/node_modules/expo-clipboard/android/src/main/java/expo/modules/clipboard/ClipboardModule.kt
++++ b/node_modules/expo-clipboard/android/src/main/java/expo/modules/clipboard/ClipboardModule.kt
+@@ -5,6 +5,7 @@ import android.content.ClipData
+ import android.content.ClipDescription
+ import android.content.ClipboardManager
+ import android.os.Build
++import android.os.PersistableBundle
+ import android.text.Html
+ import android.text.Html.FROM_HTML_MODE_LEGACY
+ import android.text.Spanned
+@@ -54,6 +55,11 @@ class ClipboardModule : Module() {
+           ClipData.newHtmlText(null, plainText, content)
+         }
+       }
++      if (options.isSensitive) {
++        val extras = PersistableBundle()
++        extras.putBoolean("android.content.extra.IS_SENSITIVE", true)
++        clip.description.extras = extras
++      }
+       clipboardManager.setPrimaryClip(clip)
+       return@AsyncFunction true
+     }
+diff --git a/node_modules/expo-clipboard/android/src/main/java/expo/modules/clipboard/ClipboardOptions.kt b/node_modules/expo-clipboard/android/src/main/java/expo/modules/clipboard/ClipboardOptions.kt
+index 71cbc0f..51c97df 100644
+--- a/node_modules/expo-clipboard/android/src/main/java/expo/modules/clipboard/ClipboardOptions.kt
++++ b/node_modules/expo-clipboard/android/src/main/java/expo/modules/clipboard/ClipboardOptions.kt
+@@ -21,6 +21,14 @@ internal class GetStringOptions : Record {
+ internal class SetStringOptions : Record {
+   @Field
+   var inputFormat: StringFormat = StringFormat.PLAIN
++
++  // --- PiPass sensitive clipboard ---
++  @Field
++  var isSensitive: Boolean = false
++
++  @Field
++  var expirationMs: Double = 0.0
++  // --- End PiPass sensitive clipboard ---
+ }
+ 
+ internal enum class ImageFormat(val jsName: String) : Enumerable {
+diff --git a/node_modules/expo-clipboard/ios/ClipboardModule.swift b/node_modules/expo-clipboard/ios/ClipboardModule.swift
+index 66bdf69..26d71e0 100644
+--- a/node_modules/expo-clipboard/ios/ClipboardModule.swift
++++ b/node_modules/expo-clipboard/ios/ClipboardModule.swift
+@@ -21,11 +21,29 @@ public class ClipboardModule: Module {
+     }
+ 
+     AsyncFunction("setStringAsync") { (content: String?, options: SetStringOptions) -> Bool in
+-      switch options.inputFormat {
+-      case .plainText:
+-        UIPasteboard.general.string = content
+-      case .html:
+-        UIPasteboard.general.html = content
++      if options.isSensitive {
++        var pasteOptions: [UIPasteboard.OptionsKey: Any] = [
++          .localOnly: true
++        ]
++        if options.expirationMs > 0 {
++          pasteOptions[.expirationDate] = Date().addingTimeInterval(options.expirationMs / 1000.0)
++        }
++        let text = content ?? ""
++        let uti: String
++        switch options.inputFormat {
++        case .plainText:
++          uti = "public.utf8-plain-text"
++        case .html:
++          uti = "public.html"
++        }
++        UIPasteboard.general.setItems([[uti: text]], options: pasteOptions)
++      } else {
++        switch options.inputFormat {
++        case .plainText:
++          UIPasteboard.general.string = content
++        case .html:
++          UIPasteboard.general.html = content
++        }
+       }
+ 
+       return true
+diff --git a/node_modules/expo-clipboard/ios/ClipboardOptions.swift b/node_modules/expo-clipboard/ios/ClipboardOptions.swift
+index b1ee5ee..83b0413 100644
+--- a/node_modules/expo-clipboard/ios/ClipboardOptions.swift
++++ b/node_modules/expo-clipboard/ios/ClipboardOptions.swift
+@@ -32,6 +32,14 @@ internal struct GetStringOptions: Record {
+ internal struct SetStringOptions: Record {
+   @Field
+   var inputFormat: StringFormat = .plainText
++
++  // --- PiPass sensitive clipboard ---
++  @Field
++  var isSensitive: Bool = false
++
++  @Field
++  var expirationMs: Double = 0
++  // --- End PiPass sensitive clipboard ---
+ }
+ 
+ internal enum StringFormat: String, Enumerable {

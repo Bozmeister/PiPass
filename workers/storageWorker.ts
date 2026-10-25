@@ -1,5 +1,14 @@
 import type { VaultEntry, SecureNote } from "./vaultWorker";
 import { saveSharedVaultBlob, getSharedVaultBlob, clearSharedVault } from "./sharedVaultStorage";
+// Phase 1 IntentDB outbox. Append-only local ciphertext log. It does not
+// replace SecureStore vault records or the shared autofill blob.
+import {
+  clearIntentdbOutbox,
+  recordSecureNoteDeleted,
+  recordSecureNoteSaved,
+  recordVaultEntryDeleted,
+  recordVaultEntrySaved,
+} from "./intentdbOutbox";
 import { clearDeviceUUID } from "../crypto/deviceUUIDStorage";
 import {
   isValidKdfMetadata as isValidStoredKdfMetadata,
@@ -13,6 +22,7 @@ import {
   readPlatformItem,
   writePlatformItem,
 } from "../lib/platformStorage";
+import { clearChunkedCiphertext } from "../lib/vaultSearchChunks";
 
 const VAULT_KEY_PREFIX = "pipass_vault_";
 const VAULT_INDEX_KEY = "pipass_vault_index";
@@ -32,8 +42,11 @@ export {
   buildArgon2idKdfMetadata,
   buildPbkdf2KdfMetadata,
   isValidKdfMetadata,
+  KDF_DEVICE_BINDING_NONE,
+  KDF_DEVICE_BINDING_UUID_V1,
   type Argon2idKdfMetadata,
   type Argon2idKdfParameters,
+  type KdfDeviceBinding,
   type KdfMetadata,
   type KdfMetadataAlgorithm,
   type KdfMetadataSource,
@@ -149,6 +162,10 @@ export async function saveEntry(entry: VaultEntry): Promise<void> {
     await setVaultIndex(index);
   }
   await syncSharedVaultBlob();
+  // Phase 1: stage a ciphertext manifest after the local save commits.
+  // Refused (non-v4) records are skipped. The shared autofill blob above
+  // is unchanged by the outbox.
+  await recordVaultEntrySaved(entry);
 }
 
 export async function getEntry(id: string): Promise<VaultEntry | null> {
@@ -173,12 +190,16 @@ export async function getAllEntries(): Promise<VaultEntry[]> {
 }
 
 export async function deleteEntry(id: string): Promise<void> {
+  const existing = await getEntry(id);
   const entryKey = VAULT_KEY_PREFIX + id;
   await deleteItem(entryKey);
   const index = await getVaultIndex();
   const newIndex = index.filter((i) => i !== id);
   await setVaultIndex(newIndex);
   await syncSharedVaultBlob();
+  // Phase 1: tombstone after the local delete commits. Hash is taken from
+  // the pre-delete record when that record is authenticated v4.
+  await recordVaultEntryDeleted(id, existing);
 }
 
 export async function updateEntry(entry: VaultEntry): Promise<void> {
@@ -220,12 +241,10 @@ export async function clearVault(): Promise<void> {
   await deleteItem(VAULT_INDEX_KEY);
   await deleteItem(MASTER_KEY_HASH_KEY);
   await clearSharedVault();
+  await clearChunkedCiphertext();
 }
 
-export async function saveRecoveryKeyHash(hash: string): Promise<void> {
-  await setItem(RECOVERY_KEY_HASH_KEY, hash);
-}
-
+/** Legacy key only: recovery-key feature removed. Kept for destroy/wipe of old installs. */
 export async function getRecoveryKeyHash(): Promise<string | null> {
   return await getItem(RECOVERY_KEY_HASH_KEY);
 }
@@ -242,6 +261,9 @@ export async function destroyAllData(): Promise<void> {
   await deleteItem(RECOVERY_KEY_HASH_KEY);
   await deleteItem(MIGRATION_DONE_KEY);
   await clearMasterKeySecurely();
+  // Phase 1 IntentDB outbox holds a second copy of ciphertext manifests.
+  // Nuclear reset removes it. Lock and logout do not.
+  await clearIntentdbOutbox();
   // Nuclear reset is the "fresh install" boundary for local state. Ordinary
   // lock/logout/password-rotation flows must not clear these identifiers.
   await clearCredentials();
@@ -272,19 +294,35 @@ export async function hasLocalEncryptedVaultData(): Promise<boolean> {
 }
 
 export async function saveSecureNote(note: SecureNote): Promise<void> {
-  await setItem(NOTES_KEY_PREFIX + note.id, JSON.stringify(note));
+  // Never persist plaintext label — storage confidentiality for note titles.
+  const stored: SecureNote = {
+    id: note.id,
+    encryptedLabel: note.encryptedLabel,
+    encryptedContent: note.encryptedContent,
+    salt: note.salt,
+    createdAt: note.createdAt,
+    updatedAt: note.updatedAt,
+  };
+  await setItem(NOTES_KEY_PREFIX + note.id, JSON.stringify(stored));
   const index = await getNotesIndex();
   if (!index.includes(note.id)) {
     index.push(note.id);
     await setNotesIndex(index);
   }
+  // Phase 1: stage the stripped ciphertext note. Legacy plaintext labels
+  // are not written to the note row or the outbox.
+  await recordSecureNoteSaved(stored);
 }
 
 export async function getSecureNote(id: string): Promise<SecureNote | null> {
   const str = await getItem(NOTES_KEY_PREFIX + id);
   if (!str) return null;
   try {
-    return JSON.parse(str);
+    const parsed = JSON.parse(str) as SecureNote;
+    // Surface whatever is on disk (including legacy plaintext label) so
+    // decrypt/migration paths can handle it; do not strip on read without
+    // re-save so we do not discard the only label copy if encryptedLabel is bad.
+    return parsed;
   } catch {
     return null;
   }
@@ -301,9 +339,11 @@ export async function getAllSecureNotes(): Promise<SecureNote[]> {
 }
 
 export async function deleteSecureNote(id: string): Promise<void> {
+  const existing = await getSecureNote(id);
   await deleteItem(NOTES_KEY_PREFIX + id);
   const index = await getNotesIndex();
   await setNotesIndex(index.filter((i) => i !== id));
+  await recordSecureNoteDeleted(id, existing);
 }
 
 export async function clearAllNotes(): Promise<void> {
@@ -337,7 +377,8 @@ export async function getShowKeyprints(): Promise<boolean> {
 export interface FractalFingerprintRecord {
   fingerprint: string;
   iterations: number;
-  kdf: "argon2id";
+  /** Algorithm used when the fingerprint was bound (informational metadata only). */
+  kdf: "argon2id" | "pbkdf2-sha256";
   version: 1;
 }
 

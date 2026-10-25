@@ -50,6 +50,31 @@ export function deriveEntryKey(
   return deriveSubkey(masterKeyHex, "pipass-entry-key:" + entryId, entrySaltHex);
 }
 
+/**
+ * Fixed Extract salt for the AES-GCM key expansion (not a per-entry salt).
+ * Entry keys are already high-entropy 256-bit HKDF outputs; this salt only
+ * domain-separates the GCM key from other HKDF uses (entry keys, fractals).
+ */
+const GCM_KEY_SPLIT_SALT_V1 = CryptoJS.SHA256("pipass-gcm-key-split-v1").toString(
+  CryptoJS.enc.Hex,
+);
+
+/**
+ * Derive the 256-bit AES-GCM key from a per-entry key.
+ *
+ * Expand info is "pipass-aes-gcm-v1" so this key is independent of the
+ * retired EtM AES-CBC / HMAC split keys.
+ */
+export function deriveAesGcmKey(entryKeyHex: string): string {
+  if (
+    typeof entryKeyHex !== "string" ||
+    !/^[0-9a-fA-F]{64}$/.test(entryKeyHex)
+  ) {
+    throw new Error("Invalid entry key for AES-GCM (expected 32-byte hex)");
+  }
+  return deriveSubkey(entryKeyHex, "pipass-aes-gcm-v1", GCM_KEY_SPLIT_SALT_V1);
+}
+
 function hexBytesToUint64(hex: string, offset: number): number {
   let value = 0;
   for (let i = 0; i < 8; i++) {

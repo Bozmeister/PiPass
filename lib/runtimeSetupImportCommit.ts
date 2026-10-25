@@ -12,6 +12,7 @@ import {
 } from "./backupVerifier";
 import { decryptData } from "../crypto/encryption";
 import { deriveEntryKey } from "../crypto/hkdf";
+import { resolveFieldKey } from "../crypto/itemEnvelope";
 import type { KeyShares } from "../crypto/secureMemory";
 import { combineShares, hexToBytes, wipeBuffer } from "../crypto/secureMemory";
 import {
@@ -300,9 +301,15 @@ export async function prepareRuntimeStagedBackupCommitContext(
             verifier: verifier.verifier,
             masterKeyHex,
             deriveAndDecryptEntrySentinel: ({ recordId, salt, ciphertext }) =>
-              decryptData(ciphertext, deriveEntryKey(masterKeyHex, recordId, salt)),
+              decryptData(ciphertext, deriveEntryKey(masterKeyHex, recordId, salt), {
+                recordId,
+                field: "sentinel",
+              }),
             deriveAndDecryptNoteSentinel: ({ recordId, salt, ciphertext }) =>
-              decryptData(ciphertext, deriveEntryKey(masterKeyHex, recordId, salt)),
+              decryptData(ciphertext, deriveEntryKey(masterKeyHex, recordId, salt), {
+                recordId,
+                field: "sentinel",
+              }),
           })
         : null;
     const decryptability = await verifyStagedBackupDecryptability({
@@ -363,18 +370,21 @@ export async function prepareRuntimeStagedBackupCommitContext(
 
 function verifyEncryptedEntryWithShares(entry: VaultEntry, keyShares: KeyShares): true {
   const masterKeyHex = combineShares(keyShares);
+  let entryKey = "";
   try {
-    const entryKey = entry.salt
-      ? deriveEntryKey(masterKeyHex, entry.id, entry.salt)
-      : masterKeyHex;
-    decryptData(entry.encryptedPassword, entryKey);
-    decryptOptional(entry.encryptedTitle, entryKey);
-    decryptOptional(entry.encryptedUsername, entryKey);
-    decryptOptional(entry.encryptedUrl, entryKey);
-    decryptOptional(entry.notes, entryKey);
-    decryptOptional(entry.encryptedAux, entryKey);
+    entryKey = resolveFieldKey(entry, masterKeyHex);
+    const id = entry.id;
+    decryptData(entry.encryptedPassword, entryKey, { recordId: id, field: "password" });
+    decryptOptional(entry.encryptedTitle, entryKey, { recordId: id, field: "title" });
+    decryptOptional(entry.encryptedUsername, entryKey, { recordId: id, field: "username" });
+    decryptOptional(entry.encryptedUrl, entryKey, { recordId: id, field: "url" });
+    decryptOptional(entry.notes, entryKey, { recordId: id, field: "notes" });
+    decryptOptional(entry.encryptedAux, entryKey, { recordId: id, field: "aux" });
     return true;
   } finally {
+    if (entryKey && entryKey !== masterKeyHex) {
+      wipeBuffer(hexToBytes(entryKey));
+    }
     const keyBytes = hexToBytes(masterKeyHex);
     wipeBuffer(keyBytes);
   }
@@ -382,22 +392,29 @@ function verifyEncryptedEntryWithShares(entry: VaultEntry, keyShares: KeyShares)
 
 function verifyEncryptedSecureNoteWithShares(note: SecureNote, keyShares: KeyShares): true {
   const masterKeyHex = combineShares(keyShares);
+  let noteKey = "";
   try {
-    const noteKey = note.salt
-      ? deriveEntryKey(masterKeyHex, note.id, note.salt)
-      : masterKeyHex;
-    decryptData(note.encryptedContent, noteKey);
-    decryptData(note.encryptedLabel, noteKey);
+    noteKey = resolveFieldKey(note, masterKeyHex);
+    const id = note.id;
+    decryptData(note.encryptedContent, noteKey, { recordId: id, field: "content" });
+    decryptData(note.encryptedLabel, noteKey, { recordId: id, field: "label" });
     return true;
   } finally {
+    if (noteKey && noteKey !== masterKeyHex) {
+      wipeBuffer(hexToBytes(noteKey));
+    }
     const keyBytes = hexToBytes(masterKeyHex);
     wipeBuffer(keyBytes);
   }
 }
 
-function decryptOptional(value: string | undefined, keyHex: string): void {
+function decryptOptional(
+  value: string | undefined,
+  keyHex: string,
+  aad: { recordId: string; field: string },
+): void {
   if (typeof value === "string" && value.length > 0) {
-    decryptData(value, keyHex);
+    decryptData(value, keyHex, aad);
   }
 }
 

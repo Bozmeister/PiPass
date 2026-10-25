@@ -1,3 +1,10 @@
+import {
+  deleteLegacyWebStorageKey,
+  isWebVaultDisabled,
+  purgeLegacyWebVaultStorage,
+  WebVaultStorageError,
+} from "./webVaultPolicy";
+
 export type PlatformStorageOptions = {
   keychainService?: string;
   requireAuthentication?: boolean;
@@ -35,8 +42,7 @@ export async function isWebStoragePlatform(): Promise<boolean> {
     return testStorageDriver.isWeb ? await testStorageDriver.isWeb() : false;
   }
 
-  const { Platform } = await import("react-native");
-  return Platform.OS === "web";
+  return isWebVaultDisabled();
 }
 
 export async function readPlatformItem(
@@ -48,11 +54,9 @@ export async function readPlatformItem(
   }
 
   if (await isWebStoragePlatform()) {
-    try {
-      return localStorage.getItem(key);
-    } catch {
-      return null;
-    }
+    // Never serve vault/auth material from localStorage.
+    purgeLegacyWebVaultStorage();
+    return null;
   }
 
   const SecureStore = await import("expo-secure-store");
@@ -70,8 +74,8 @@ export async function writePlatformItem(
   }
 
   if (await isWebStoragePlatform()) {
-    localStorage.setItem(key, value);
-    return;
+    purgeLegacyWebVaultStorage();
+    throw new WebVaultStorageError(`write ${key}`);
   }
 
   const SecureStore = await import("expo-secure-store");
@@ -88,10 +92,13 @@ export async function deletePlatformItem(
   }
 
   if (await isWebStoragePlatform()) {
-    localStorage.removeItem(key);
+    // Cleanup only — never persist on web.
+    deleteLegacyWebStorageKey(key);
     return;
   }
 
   const SecureStore = await import("expo-secure-store");
   await SecureStore.deleteItemAsync(key, options);
 }
+
+export { WebVaultStorageError };

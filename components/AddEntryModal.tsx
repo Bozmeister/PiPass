@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { View, Text, TextInput, Pressable, Modal, ScrollView, Platform, KeyboardAvoidingView, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -6,20 +6,32 @@ import { generateSecurePassword } from "../crypto/generateSecurePassword";
 import { sanitizeInput } from "../utils/watchman";
 import { INPUT_BG, INPUT_TEXT, INPUT_PLACEHOLDER, INPUT_BORDER, INPUT_BORDER_ERROR, INPUT_BORDER_FOCUS, LABEL_COLOR } from "../styles/inputTheme";
 
+export interface EntryFormValues {
+  title: string;
+  username: string;
+  password: string;
+  url?: string;
+  notes?: string;
+}
+
 interface AddEntryModalProps {
   visible: boolean;
   onClose: () => void;
-  onSave: (entry: {
-    title: string;
-    username: string;
-    password: string;
-    url?: string;
-    notes?: string;
-  }) => Promise<void>;
+  onSave: (entry: EntryFormValues) => Promise<void>;
   onActivity?: () => void;
+  /** "add" (default) or "edit" — changes title and pre-fills from initialValues */
+  mode?: "add" | "edit";
+  initialValues?: Partial<EntryFormValues>;
 }
 
-export default function AddEntryModal({ visible, onClose, onSave, onActivity }: AddEntryModalProps) {
+export default function AddEntryModal({
+  visible,
+  onClose,
+  onSave,
+  onActivity,
+  mode = "add",
+  initialValues,
+}: AddEntryModalProps) {
   const insets = useSafeAreaInsets();
   const [title, setTitle] = useState("");
   const [username, setUsername] = useState("");
@@ -30,6 +42,30 @@ export default function AddEntryModal({ visible, onClose, onSave, onActivity }: 
   const [saving, setSaving] = useState(false);
   const [showGenerated, setShowGenerated] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
+
+  const isEdit = mode === "edit";
+
+  // Pre-fill when opening in edit mode; reset when closed / switching modes.
+  useEffect(() => {
+    if (!visible) return;
+    if (isEdit && initialValues) {
+      setTitle(initialValues.title ?? "");
+      setUsername(initialValues.username ?? "");
+      setPassword(initialValues.password ?? "");
+      setConfirmPassword(initialValues.password ?? "");
+      setUrl(initialValues.url ?? "");
+      setNotes(initialValues.notes ?? "");
+      setShowGenerated(false);
+    } else if (!isEdit) {
+      setTitle("");
+      setUsername("");
+      setPassword("");
+      setConfirmPassword("");
+      setUrl("");
+      setNotes("");
+      setShowGenerated(false);
+    }
+  }, [visible, isEdit, initialValues?.title, initialValues?.username, initialValues?.password, initialValues?.url, initialValues?.notes]);
 
   function handleGeneratePassword() {
     const strong = generateSecurePassword(16);
@@ -55,25 +91,27 @@ export default function AddEntryModal({ visible, onClose, onSave, onActivity }: 
         notes: notes.trim() || undefined,
       });
 
-      setTitle("");
-      setUsername("");
-      setPassword("");
-      setConfirmPassword("");
-      setUrl("");
-      setNotes("");
-      setShowGenerated(false);
+      if (!isEdit) {
+        setTitle("");
+        setUsername("");
+        setPassword("");
+        setConfirmPassword("");
+        setUrl("");
+        setNotes("");
+        setShowGenerated(false);
+      }
 
       if (Platform.OS === "web") {
-        alert("Entry Saved");
+        alert(isEdit ? "Entry Updated" : "Entry Saved");
       } else {
-        Alert.alert("Success", "Entry Saved");
+        Alert.alert("Success", isEdit ? "Entry Updated" : "Entry Saved");
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       if (Platform.OS === "web") {
-        alert("Failed to save entry: " + message);
+        alert(`Failed to ${isEdit ? "update" : "save"} entry: ` + message);
       } else {
-        Alert.alert("Error", "Failed to save entry: " + message);
+        Alert.alert("Error", `Failed to ${isEdit ? "update" : "save"} entry: ` + message);
       }
     } finally {
       setSaving(false);
@@ -99,10 +137,12 @@ export default function AddEntryModal({ visible, onClose, onSave, onActivity }: 
               <Pressable onPress={onClose}>
                 <Ionicons name="close" size={24} color="#fff" />
               </Pressable>
-              <Text style={{ color: "#fff", fontSize: 17, fontWeight: "600" }}>Add Entry</Text>
-              <Pressable onPress={handleSave} disabled={!isValid || saving}>
+              <Text style={{ color: "#f0f0f0", fontSize: 17, fontWeight: "600" }}>
+                {isEdit ? "Edit Entry" : "Add Entry"}
+              </Text>
+              <Pressable onPress={handleSave} disabled={!isValid || saving} testID={isEdit ? "update-entry-save" : "add-entry-save"}>
                 <Text style={{ color: isValid && !saving ? "#4CAF50" : "#555", fontSize: 16, fontWeight: "600" }}>
-                  {saving ? "Saving..." : "Save"}
+                  {saving ? (isEdit ? "Updating..." : "Saving...") : isEdit ? "Update" : "Save"}
                 </Text>
               </Pressable>
             </View>

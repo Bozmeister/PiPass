@@ -26,9 +26,12 @@ import {
   hashMasterKey,
   planUnlockKdfDerivation,
 } from "../../crypto/keyDerivation";
-import { deriveMasterKeyShares } from "../../workers/vaultWorker";
-import { KeyShares, wipeShares, combineShares, splitKeyIntoShares } from "../../crypto/secureMemory";
-import { performCurrentUnlockVerification } from "../../lib/currentUnlock";
+import { KeyShares, wipeShares, splitKeyIntoShares } from "../../crypto/secureMemory";
+import { clearActiveKeyShares } from "../../lib/vaultSession";
+import {
+  performCurrentUnlockVerification,
+  verifyMasterPasswordWithStoredKdf,
+} from "../../lib/currentUnlock";
 import {
   prepareFirstTimeVaultSetup,
   type PreparedFirstTimeVaultSetupResult,
@@ -44,12 +47,6 @@ import {
   stopPeriodicGuard,
 } from "../../crypto/integrityGuard";
 import { requireFreshBiometric } from "../../crypto/biometricGate";
-import {
-  generateRecoveryKey,
-  formatRecoveryKey,
-  hashRecoveryKey,
-} from "../../crypto/recoveryKey";
-import RecoveryKeyModal from "../../components/RecoveryKeyModal";
 import NuclearResetModal from "../../components/NuclearResetModal";
 import {
   confirmStartupRepairDecision,
@@ -62,6 +59,9 @@ import {
 } from "../../lib/setupImportCommitPlan";
 import { executeSetupImportCommitPlan } from "../../lib/setupImportCommitExecutor";
 import { computeStagedBackupPreflightStatus } from "../../lib/stagedBackupBridgeStatus";
+import { useScreenCaptureProtection } from "../../lib/screenCaptureProtection";
+import { isWebVaultDisabled } from "../../lib/webVaultPolicy";
+import WebVaultDisabledScreen from "../../screens/WebVaultDisabledScreen";
 
 const startupSnapshotDriver = {
   getItem: readPlatformItem,
@@ -101,6 +101,10 @@ const setupCommitStorageDriver = {
 };
 
 export default function HomeScreen() {
+  // Defense-in-depth: cover unlock, setup, vault, and notes while this tree is mounted.
+  // Root layout also enables protection; neither path re-allows capture on unmount.
+  useScreenCaptureProtection();
+
   const [authenticated, setAuthenticated] = useState(false);
   const [vaultExists, setVaultExists] = useState<boolean | null>(null);
   const [startupDecision, setStartupDecision] = useState<StartupRepairDecision | null>(null);
@@ -111,8 +115,6 @@ export default function HomeScreen() {
   const [keyShares, setKeyShares] = useState<KeyShares | null>(null);
   const [masterSalt, setMasterSaltState] = useState<string | null>(null);
   const [tamperLocked, setTamperLocked] = useState(false);
-  const [pendingRecoveryKey, setPendingRecoveryKey] = useState<string | null>(null);
-  const [pendingRecoveryRawHex, setPendingRecoveryRawHex] = useState<string>("");
   const [pendingSetupShares, setPendingSetupShares] = useState<KeyShares | null>(null);
   const [stagedSetupBackup, setStagedSetupBackup] = useState<StagedBackupSelection | null>(null);
   const [committingSetup, setCommittingSetup] = useState(false);
@@ -147,8 +149,6 @@ export default function HomeScreen() {
     pendingSetupCommitRef.current = null;
     committingSetupRef.current = false;
     setPendingSetupShares(null);
-    setPendingRecoveryKey(null);
-    setPendingRecoveryRawHex("");
     setCommittingSetup(false);
   }, []);
 
@@ -157,18 +157,23 @@ export default function HomeScreen() {
       if (keySharesRef.current) {
         wipeShares(keySharesRef.current);
       }
+      if (lockedSharesRef.current) {
+        wipeShares(lockedSharesRef.current);
+        lockedSharesRef.current = null;
+      }
       if (pendingSetupSharesRef.current) {
         wipeShares(pendingSetupSharesRef.current);
       }
+      clearActiveKeyShares();
+      void clearMasterKeySecurely();
       pendingSetupSharesRef.current = null;
       pendingSetupCommitRef.current = null;
       committingSetupRef.current = false;
       setKeyShares(null);
       setPendingSetupShares(null);
-      setPendingRecoveryKey(null);
-      setPendingRecoveryRawHex("");
       setAuthenticated(false);
       setStagedSetupBackup(null);
+      setVaultLocked(false);
       setTamperLocked(true);
     });
 
@@ -221,6 +226,9 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
+    if (isWebVaultDisabled()) {
+      return;
+    }
     if (!authenticated) {
       setVaultExists(null);
       setStartupDecision(null);
@@ -232,6 +240,10 @@ export default function HomeScreen() {
 
     void runStartupRepairDecision();
   }, [authenticated, clearPendingSetupState, runStartupRepairDecision]);
+
+  if (isWebVaultDisabled()) {
+    return <WebVaultDisabledScreen />;
+  }
 
   if (tamperLocked) {
     return (
@@ -325,129 +337,131 @@ export default function HomeScreen() {
 
   if (vaultExists === null) return null;
 
-  if (pendingRecoveryKey !== null) {
-    return (
-      <RecoveryKeyModal
-        visible={true}
-        formattedKey={pendingRecoveryKey}
-        rawKeyHex={pendingRecoveryRawHex}
-        onConfirm={async () => {
-          if (committingSetupRef.current || committingSetup) return;
-          const pendingSetup = pendingSetupCommitRef.current;
-          if (!pendingSetup || !pendingSetupShares) {
-            const message = "PiPass could not complete setup safely. Please restart setup and try again.";
-            if (Platform.OS === "web") { alert(message); } else { Alert.alert("Setup Failed", message); }
-            clearPendingSetupState(true);
-            setVaultExists(false);
-            return;
-          }
-
-          committingSetupRef.current = true;
-          setCommittingSetup(true);
-          let result: Awaited<ReturnType<typeof prepareSetupImportCommitFromRuntimeState>>;
-          try {
-            const setupMetadata = {
-              masterSalt: pendingSetup.salt,
-              masterHash: pendingSetup.masterHash,
-              securityProfile: pendingSetup.iterations,
-              kdfMetadata: pendingSetup.kdfMetadata,
-              recoveryKeyHash: pendingSetup.recoveryKeyHash,
-            };
-            const stagedCommitContext = await prepareRuntimeStagedBackupCommitContext({
-              setupMetadata,
-              stagedBackup: stagedSetupBackup?.backup ?? null,
-              keyShares: pendingSetupShares,
-              masterKeyHex: pendingSetup.masterKeyHex,
-              deviceUUID: await readPlatformItem("deviceUUID"),
-            });
-            result = await prepareSetupImportCommitFromRuntimeState({
-              setupMetadata,
-              stagedBackup: stagedSetupBackup?.backup ?? null,
-              backupVerifier: stagedCommitContext.backupVerifier,
-              eligibilityInput: stagedCommitContext.eligibilityInput,
-              sharedVaultBlob: stagedCommitContext.sharedVaultBlob,
-              includeCachedMasterKey: true,
-              cachedMasterKeyReference: pendingSetup.masterKeyHex,
-              dependencies: {
-                classifyCompatibility: stagedCommitContext.classifyCompatibility,
-                verifySentinel: stagedCommitContext.verifySentinel,
-                verifyDecryptability: stagedCommitContext.verifyDecryptability,
-                buildPlan: buildSetupImportCommitPlan,
-                executePlan: async (plan) => executeSetupImportCommitPlan(plan, setupCommitStorageDriver),
-              },
-            });
-          } catch {
-            result = {
-              ok: false,
-              stage: "eligibility",
-              reason: "runtime-commit-preparation-failed",
-              eligibility: {
-                status: "blocked",
-                reason: "decryptability-not-run",
-                importCommitEnabled: false,
-                setupOnlyAllowed: false,
-                canAttemptImport: false,
-                requiresClearOrDismiss: true,
-                safeTitle: "Setup failed",
-                safeMessage: "PiPass could not prepare setup safely.",
-                warnings: [],
-              },
-              recordsIncluded: false,
-              activeSharesPublished: false,
-              warnings: [],
-            };
-          }
-          committingSetupRef.current = false;
-          setCommittingSetup(false);
-
-          if (!result.ok) {
-            const message = "PiPass could not finish creating your vault safely. No vault was initialized. Please try setup again.";
-            if (Platform.OS === "web") { alert(message); } else { Alert.alert("Setup Failed", message); }
-            setStagedSetupBackup(null);
-            clearPendingSetupState(true);
-            setVaultExists(false);
-            return;
-          }
-
-          setMasterSaltState(pendingSetup.salt);
-          setIterations(pendingSetup.iterations);
-          setStagedSetupBackup(null);
-          pendingSetupCommitRef.current = null;
-          pendingSetupSharesRef.current = null;
-          setPendingSetupShares(null);
-          setPendingRecoveryKey(null);
-          setPendingRecoveryRawHex("");
-          setVaultExists(true);
-          setKeyShares(pendingSetupShares);
-        }}
-      />
-    );
-  }
-
   if (!vaultExists) {
     return (
       <SeedSetupScreen
         onStagedBackupChange={setStagedSetupBackup}
         stagedBackupBridgeStatus={stagedBackupBridgeStatus}
         onSetup={async (password, iters) => {
-          clearPendingSetupState(true);
-          const setup = await prepareFirstTimeVaultSetup(
-            { password, iterations: iters },
-            {
-              generateMasterSalt,
-              deriveMasterKeyWithArgon2id,
-              deriveMasterKeyWithPbkdf2,
-              splitKeyIntoShares,
-              hashMasterKey,
-              generateRecoveryKey,
-              hashRecoveryKey,
-            },
-          );
+          // Crash-proof Create Vault: Argon2id preferred, strong PBKDF2 fallback. Top-level try/catch.
+          // Recovery key UI removed: setup commits immediately after successful prepare.
+          try {
+            clearPendingSetupState(true);
+            const setup = await prepareFirstTimeVaultSetup(
+              { password, iterations: iters },
+              {
+                generateMasterSalt,
+                deriveMasterKeyWithArgon2id,
+                deriveMasterKeyWithPbkdf2,
+                splitKeyIntoShares,
+                hashMasterKey,
+              },
+            );
 
-          pendingSetupCommitRef.current = setup;
-          setPendingSetupShares(setup.shares);
-          setPendingRecoveryRawHex(setup.rawRecoveryKeyHex);
-          setPendingRecoveryKey(formatRecoveryKey(setup.rawRecoveryKeyHex));
+            if (committingSetupRef.current || committingSetup) return;
+            committingSetupRef.current = true;
+            setCommittingSetup(true);
+
+            pendingSetupCommitRef.current = setup;
+            pendingSetupSharesRef.current = setup.shares;
+            setPendingSetupShares(setup.shares);
+
+            let result: Awaited<ReturnType<typeof prepareSetupImportCommitFromRuntimeState>>;
+            try {
+              const setupMetadata = {
+                masterSalt: setup.salt,
+                masterHash: setup.masterHash,
+                securityProfile: setup.iterations,
+                kdfMetadata: setup.kdfMetadata,
+              };
+              const stagedCommitContext = await prepareRuntimeStagedBackupCommitContext({
+                setupMetadata,
+                stagedBackup: stagedSetupBackup?.backup ?? null,
+                keyShares: setup.shares,
+                masterKeyHex: setup.masterKeyHex,
+                deviceUUID: await readPlatformItem("deviceUUID"),
+              });
+              result = await prepareSetupImportCommitFromRuntimeState({
+                setupMetadata,
+                stagedBackup: stagedSetupBackup?.backup ?? null,
+                backupVerifier: stagedCommitContext.backupVerifier,
+                eligibilityInput: stagedCommitContext.eligibilityInput,
+                sharedVaultBlob: stagedCommitContext.sharedVaultBlob,
+                includeCachedMasterKey: true,
+                cachedMasterKeyReference: setup.masterKeyHex,
+                dependencies: {
+                  classifyCompatibility: stagedCommitContext.classifyCompatibility,
+                  verifySentinel: stagedCommitContext.verifySentinel,
+                  verifyDecryptability: stagedCommitContext.verifyDecryptability,
+                  buildPlan: buildSetupImportCommitPlan,
+                  executePlan: async (plan) => executeSetupImportCommitPlan(plan, setupCommitStorageDriver),
+                },
+              });
+            } catch {
+              result = {
+                ok: false,
+                stage: "eligibility",
+                reason: "runtime-commit-preparation-failed",
+                eligibility: {
+                  status: "blocked",
+                  reason: "decryptability-not-run",
+                  importCommitEnabled: false,
+                  setupOnlyAllowed: false,
+                  canAttemptImport: false,
+                  requiresClearOrDismiss: true,
+                  safeTitle: "Setup failed",
+                  safeMessage: "PiPass could not prepare setup safely.",
+                  warnings: [],
+                },
+                recordsIncluded: false,
+                activeSharesPublished: false,
+                warnings: [],
+              };
+            }
+
+            committingSetupRef.current = false;
+            setCommittingSetup(false);
+
+            if (!result.ok) {
+              const message =
+                "PiPass could not finish creating your vault safely. No vault was initialized. Please try setup again.";
+              if (Platform.OS === "web") {
+                alert(message);
+              } else {
+                Alert.alert("Setup Failed", message);
+              }
+              setStagedSetupBackup(null);
+              clearPendingSetupState(true);
+              setVaultExists(false);
+              return;
+            }
+
+            setMasterSaltState(setup.salt);
+            setIterations(setup.iterations);
+            setStagedSetupBackup(null);
+            pendingSetupCommitRef.current = null;
+            pendingSetupSharesRef.current = null;
+            setPendingSetupShares(null);
+            setVaultExists(true);
+            setKeyShares(setup.shares);
+          } catch (err: unknown) {
+            const e = err as { message?: string; stack?: string; name?: string } | null;
+            // Safe: no password length, salt, or KDF params — static label only.
+            console.error("[APP] Create Vault onSetup failed");
+            try {
+              clearPendingSetupState(true);
+            } catch {
+              // ignore cleanup errors
+            }
+            // Controlled rethrow for SeedSetupScreen on-screen error — never a raw TypeError.
+            const message =
+              e?.name === "FirstTimeVaultSetupError" && typeof e?.message === "string"
+                ? e.message
+                : "Vault creation failed on this device. Nothing was saved. Please try again.";
+            const safe = new Error(message);
+            (safe as { name?: string }).name = "FirstTimeVaultSetupError";
+            throw safe;
+          }
         }}
       />
     );
@@ -476,12 +490,14 @@ export default function HomeScreen() {
           verifyPassword={async (pw) => {
             const salt = await getMasterSalt();
             if (!salt) return false;
-            const shares = await deriveMasterKeyShares(pw, salt, iterations);
-            const keyHex = combineShares(shares);
-            const keyHash = hashMasterKey(keyHex);
-            wipeShares(shares);
-            const storedHash = await getMasterKeyHash();
-            return !!storedHash && keyHash === storedHash;
+            return verifyMasterPasswordWithStoredKdf(
+              { password: pw, salt, iterations },
+              {
+                getMasterKeyHash,
+                getKdfMetadataState,
+                planUnlockKdfDerivation,
+              },
+            );
           }}
           requireBiometric={requireFreshBiometric}
         />
@@ -497,9 +513,20 @@ export default function HomeScreen() {
           iterations={iterations}
           locked={vaultLocked}
           onLock={() => {
-            if (keyShares) {
-              lockedSharesRef.current = keyShares;
+            // Cryptographic hard lock: wipe all in-memory key material.
+            // Soft-lock previously retained shares in lockedSharesRef — that
+            // left the vault decryptable without re-deriving from the master
+            // password. After this point, unlock requires full KDF again.
+            const liveShares = keyShares ?? keySharesRef.current;
+            if (liveShares) {
+              wipeShares(liveShares);
             }
+            if (lockedSharesRef.current) {
+              wipeShares(lockedSharesRef.current);
+              lockedSharesRef.current = null;
+            }
+            clearActiveKeyShares();
+            void clearMasterKeySecurely();
             setKeyShares(null);
             setVaultLocked(true);
           }}
@@ -509,8 +536,13 @@ export default function HomeScreen() {
             setIterations(validIters);
           }}
           onReset={() => {
-            lockedSharesRef.current = null;
+            if (lockedSharesRef.current) {
+              wipeShares(lockedSharesRef.current);
+              lockedSharesRef.current = null;
+            }
             if (keyShares) wipeShares(keyShares);
+            clearActiveKeyShares();
+            void clearMasterKeySecurely();
             setKeyShares(null);
             setVaultLocked(false);
             setVaultExists(false);
@@ -526,6 +558,7 @@ export default function HomeScreen() {
             salt={masterSalt!}
             iterations={iterations}
             onUnlocked={(newShares) => {
+              // Defensive: never re-use pre-lock key material.
               if (lockedSharesRef.current) {
                 wipeShares(lockedSharesRef.current);
                 lockedSharesRef.current = null;
@@ -543,6 +576,7 @@ export default function HomeScreen() {
                 wipeShares(lockedSharesRef.current);
                 lockedSharesRef.current = null;
               }
+              clearActiveKeyShares();
               await destroyAllData();
               setShowUnlockNuclearReset(false);
               setKeyShares(null);
@@ -555,12 +589,14 @@ export default function HomeScreen() {
             verifyPassword={async (pw) => {
               const salt = await getMasterSalt();
               if (!salt) return false;
-              const shares = await deriveMasterKeyShares(pw, salt, iterations);
-              const keyHex = combineShares(shares);
-              const keyHash = hashMasterKey(keyHex);
-              wipeShares(shares);
-              const storedHash = await getMasterKeyHash();
-              return !!storedHash && keyHash === storedHash;
+              return verifyMasterPasswordWithStoredKdf(
+                { password: pw, salt, iterations },
+                {
+                  getMasterKeyHash,
+                  getKdfMetadataState,
+                  planUnlockKdfDerivation,
+                },
+              );
             }}
             requireBiometric={requireFreshBiometric}
           />
@@ -720,9 +756,6 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
       const result = await performCurrentUnlockVerification(
         { password, salt, iterations },
         {
-          deriveMasterKeyShares,
-          combineShares,
-          hashMasterKey,
           getMasterKeyHash,
           getKdfMetadataState,
           saveKdfMetadata,
@@ -765,7 +798,7 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
             Forgot Your Password?
           </Text>
           <Text style={{ color: "#aaa", fontSize: 15, marginTop: 16, textAlign: "center", lineHeight: 22 }}>
-            Your vault is encrypted and cannot be recovered without your password or recovery key.
+            Your vault is encrypted on this device. Nobody can open it without your master password. There is no recovery key.
           </Text>
           <Text style={{ color: "#ef4444", fontSize: 15, marginTop: 12, textAlign: "center", lineHeight: 22, fontWeight: "600" as const }}>
             Resetting will permanently erase all stored data.
@@ -783,26 +816,6 @@ function UnlockScreen({ salt, iterations, onUnlocked, onRequestNuclearReset }: {
                 <Ionicons name="key-outline" size={20} color="#fff" />
                 <Text style={{ color: "#fff", fontSize: 16, fontWeight: "600" as const }}>Enter Password Again</Text>
               </View>
-            </Pressable>
-
-            <Pressable
-              onPress={() => {
-                Alert.alert(
-                  "Recovery Key Unlock",
-                  "Recovery key unlock is not yet available.\n\nFor now, use 'Proceed to Secure Reset' below to create a new vault.\n\nThis will permanently delete all current data.",
-                  [{ text: "OK" }]
-                );
-              }}
-              style={{
-                backgroundColor: "#1a0808", paddingVertical: 16, borderRadius: 12,
-                alignItems: "center", width: "100%", borderWidth: 1, borderColor: "#3a1515",
-              }}
-            >
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                <Ionicons name="document-text-outline" size={20} color="#ef4444" />
-                <Text style={{ color: "#ef4444", fontSize: 16, fontWeight: "600" as const }}>Use Recovery Key (Coming Soon)</Text>
-              </View>
-              <Text style={{ color: "#666", fontSize: 12, marginTop: 4 }}>Use Nuclear Reset for now</Text>
             </Pressable>
 
             <Pressable

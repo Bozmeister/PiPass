@@ -125,12 +125,48 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange, stagedB
     Keyboard.dismiss();
     setSetupError(null);
     setSettingUp(true);
+    const profile = PROFILES[selectedProfile];
+    // Absolute top-level protection: no exception from Create Vault may force-close the app.
+    // Do not log password length, profile secrets, or KDF details.
     try {
-      await onSetup(password, PROFILES[selectedProfile].iterations);
-    } catch {
-      setSetupError("PiPass could not start its secure key-derivation engine on this device. Your vault has not been created or changed. Please restart the app, update the app, or try again later.");
+      try {
+        await onSetup(password, profile.iterations);
+      } catch (err: unknown) {
+        const e = err as { message?: string; stack?: string; name?: string } | null;
+        console.error("[UI] Create Vault failed");
+        const friendly =
+          (e?.name === "FirstTimeVaultSetupError" && e?.message) ||
+          (typeof e?.message === "string" && e.message.length > 0 && e.message.length < 220
+            ? e.message
+            : null) ||
+          "PiPass could not create your vault on this device. Your vault has not been created or changed. Please try again.";
+        setSetupError(friendly);
+        try {
+          if (Platform.OS === "web") {
+            alert(friendly);
+          } else {
+            Alert.alert("Vault Not Created", friendly);
+          }
+        } catch {
+          // ignore alert failures — on-screen setupError is enough
+        }
+      }
+    } catch (_fatal: unknown) {
+      // Last resort: even setState / Alert failures must not kill the process.
+      console.error("[UI] Create Vault unexpected failure");
+      try {
+        setSetupError(
+          "Vault creation failed unexpectedly. Nothing was saved. Please try again.",
+        );
+      } catch {
+        // ignore
+      }
     } finally {
-      setSettingUp(false);
+      try {
+        setSettingUp(false);
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -292,11 +328,11 @@ export default function SeedSetupScreen({ onSetup, onStagedBackupChange, stagedB
             <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 4 }}>
               <Ionicons name="warning-outline" size={16} color="#fbbf24" />
               <Text style={{ color: "#fbbf24", fontSize: 13, fontWeight: "600" as const, marginLeft: 6 }}>
-                Zero-Knowledge Security
+                On-device encryption
               </Text>
             </View>
             <Text style={{ color: "#aaa", fontSize: 12, lineHeight: 18 }}>
-              Your master password is never stored. All encryption happens on your device. If you forget your password, your vault cannot be recovered.
+              Your master password is not stored. Vault entries are encrypted on this device. If you forget the password, the vault cannot be recovered. An optional account can see metadata and activity, not your vault plaintext.
             </Text>
           </View>
 

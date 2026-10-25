@@ -4,6 +4,8 @@ import {
   users,
   vaultBlobs,
   vaultBlobHistory,
+  vaultItems,
+  vaultItemReceipts,
   sessions,
   vaultAuditLog,
   webauthnCredentials,
@@ -14,6 +16,7 @@ import {
   type Session,
   type WebauthnCredential,
 } from "../shared/schema";
+import { decideVaultWriteProof } from "./vaultKeyProof";
 
 // Maximum historical encrypted blobs retained per user. Bounded to keep
 // storage growth O(N) per user — without a cap, a malicious creds-holder
@@ -35,6 +38,49 @@ export type VaultHistoryEntry = {
   blobSize: number;
 };
 
+/** Ciphertext item row. Fields stay opaque v4 strings. No plaintext. */
+export type VaultItemRecord = {
+  schema: string;
+  itemId: string;
+  kind: string;
+  version: number;
+  salt: string;
+  createdAt: number;
+  updatedAt: number;
+  fields: { name: string; ciphertext: string }[];
+  contentSha256: string;
+  locator: string;
+  tombstone: boolean;
+};
+
+export type VaultItemWrite = VaultItemRecord;
+
+/** Tombstone row. Ciphertext fields and locator are cleared by storage. */
+export type VaultItemTombstoneWrite = {
+  itemId: string;
+  kind: string;
+  version: number;
+  contentSha256: string;
+  deletedAt: number;
+};
+
+/** Latest signed receipt for one item. `canonical` is the unsigned body. */
+export type VaultItemReceiptRecord = {
+  v: number;
+  op: string;
+  itemId: string;
+  itemVersion: number;
+  contentSha256: string;
+  fromLocator: string;
+  toLocator: string;
+  botId: string;
+  issuedAt: number;
+  prevReceiptHash: string;
+  sigAlg: string;
+  signature: string;
+  canonical: string;
+};
+
 // `previousVersion` is the version that was current in vault_blobs
 // immediately BEFORE this sync committed (null on first-ever write for
 // the user). Captured inside the same transaction as the CAS so it is
@@ -43,7 +89,9 @@ export type VaultHistoryEntry = {
 // by the audit log to populate version_before.
 export type SyncVaultResult =
   | { ok: true; blob: VaultBlob; previousVersion: number | null }
-  | { ok: false; code: "version_conflict"; serverVersion: number };
+  | { ok: false; code: "version_conflict"; serverVersion: number }
+  | { ok: false; code: "key_proof_invalid" }
+  | { ok: false; code: "key_proof_unbound" };
 
 // `previousVersion` is the version that was current BEFORE the restore
 // overwrote it (null if the user had no current vault yet — restoring
@@ -57,7 +105,9 @@ export type RestoreVaultResult =
       previousVersion: number | null;
     }
   | { ok: false; code: "not_found" }
-  | { ok: false; code: "version_conflict"; serverVersion: number };
+  | { ok: false; code: "version_conflict"; serverVersion: number }
+  | { ok: false; code: "key_proof_invalid" }
+  | { ok: false; code: "key_proof_unbound" };
 
 // Public shape for GET /api/auth/sessions. The token_hash column is
 // deliberately omitted — it would let a DB-leak attacker invert the hash
@@ -251,16 +301,44 @@ export interface IStorage {
     salt: string;
     iterations: number;
   }): Promise<User>;
+  deleteUser(userId: string): Promise<boolean>;
   getVaultBlob(userId: string): Promise<VaultBlob | undefined>;
+  getVaultItem(
+    userId: string,
+    itemId: string,
+  ): Promise<VaultItemRecord | undefined>;
+  putVaultItem(userId: string, item: VaultItemWrite): Promise<VaultItemRecord>;
+  putVaultItemTombstone(
+    userId: string,
+    item: VaultItemTombstoneWrite,
+  ): Promise<VaultItemRecord>;
+  /** Update locator only when the row still has fromLocator and is not a tombstone. */
+  moveVaultItemLocator(
+    userId: string,
+    itemId: string,
+    fromLocator: string,
+    toLocator: string,
+  ): Promise<VaultItemRecord | undefined>;
+  getVaultItemReceipt(
+    userId: string,
+    itemId: string,
+  ): Promise<VaultItemReceiptRecord | undefined>;
+  putVaultItemReceipt(
+    userId: string,
+    receipt: VaultItemReceiptRecord,
+  ): Promise<VaultItemReceiptRecord>;
   syncVault(
     userId: string,
     encryptedBlob: string,
     expectedPrevVersion: number,
+    keyProof: string,
+    nextKeyProof?: string,
   ): Promise<SyncVaultResult>;
   getVaultHistory(userId: string): Promise<VaultHistoryEntry[]>;
   restoreVault(
     userId: string,
     targetVersion: number,
+    keyProof: string,
   ): Promise<RestoreVaultResult>;
 
   createSession(input: {
@@ -284,6 +362,15 @@ export interface IStorage {
   deleteSessionById(id: string): Promise<boolean>;
   deleteAllSessionsForUser(userId: string): Promise<number>;
   listActiveSessionsForUser(userId: string): Promise<SessionListItem[]>;
+
+  // Bind the device Ed25519 public key (64 lowercase hex) to the login
+  // session. Replaces a key already stored on that session. Does not
+  // write vault_blobs. The private key is never accepted here.
+  bindSessionRetrievalKey(sessionId: string, publicKey: string): Promise<boolean>;
+
+  // User ids of active sessions that registered this public key.
+  // Expired and logged-out sessions are omitted, which revokes the key.
+  listActiveRetrievalKeyUserIds(publicKey: string): Promise<string[]>;
 
   // Returns true if this user has at least one EXISTING session row with
   // the given device fingerprint. Drives the "is this a new device?"
@@ -542,6 +629,55 @@ export interface IStorage {
   ): Promise<HoneytokenDisableResult | null>;
 }
 
+function vaultItemRowToRecord(row: {
+  itemSchema: string;
+  itemId: string;
+  kind: string;
+  version: number;
+  salt: string;
+  createdAt: number;
+  updatedAt: number;
+  fields: string;
+  contentSha256: string;
+  locator: string;
+  tombstone: boolean;
+}): VaultItemRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.fields);
+  } catch {
+    throw new Error("vault item fields are not JSON");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error("vault item fields are not an array");
+  }
+  const fields = parsed.map((field) => {
+    if (
+      !field ||
+      typeof field !== "object" ||
+      typeof (field as { name?: unknown }).name !== "string" ||
+      typeof (field as { ciphertext?: unknown }).ciphertext !== "string"
+    ) {
+      throw new Error("vault item field is malformed");
+    }
+    const value = field as { name: string; ciphertext: string };
+    return { name: value.name, ciphertext: value.ciphertext };
+  });
+  return {
+    schema: row.itemSchema,
+    itemId: row.itemId,
+    kind: row.kind,
+    version: row.version,
+    salt: row.salt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    fields,
+    contentSha256: row.contentSha256,
+    locator: row.locator,
+    tombstone: row.tombstone,
+  };
+}
+
 export class DatabaseStorage implements IStorage {
   async getUser(id: string): Promise<User | undefined> {
     const rows = await db.select().from(users).where(eq(users.id, id)).limit(1);
@@ -575,6 +711,14 @@ export class DatabaseStorage implements IStorage {
     return rows[0];
   }
 
+  async deleteUser(userId: string): Promise<boolean> {
+    const rows = await db
+      .delete(users)
+      .where(eq(users.id, userId))
+      .returning({ id: users.id });
+    return rows.length > 0;
+  }
+
   async getVaultBlob(userId: string): Promise<VaultBlob | undefined> {
     const rows = await db
       .select()
@@ -582,6 +726,200 @@ export class DatabaseStorage implements IStorage {
       .where(eq(vaultBlobs.userId, userId))
       .limit(1);
     return rows[0];
+  }
+
+  // Opaque per-item manifest. Does not read or write vault_blobs.
+  async getVaultItem(
+    userId: string,
+    itemId: string,
+  ): Promise<VaultItemRecord | undefined> {
+    const rows = await db
+      .select()
+      .from(vaultItems)
+      .where(and(eq(vaultItems.userId, userId), eq(vaultItems.itemId, itemId)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return undefined;
+    return vaultItemRowToRecord(row);
+  }
+
+  async putVaultItem(
+    userId: string,
+    item: VaultItemWrite,
+  ): Promise<VaultItemRecord> {
+    const fieldsJson = JSON.stringify(item.fields);
+    const now = Date.now();
+    const rows = await db
+      .insert(vaultItems)
+      .values({
+        userId,
+        itemId: item.itemId,
+        kind: item.kind,
+        itemSchema: item.schema,
+        version: item.version,
+        contentSha256: item.contentSha256,
+        fields: fieldsJson,
+        salt: item.salt,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+        locator: item.locator,
+        tombstone: item.tombstone,
+        storedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [vaultItems.userId, vaultItems.itemId],
+        set: {
+          kind: item.kind,
+          itemSchema: item.schema,
+          version: item.version,
+          contentSha256: item.contentSha256,
+          fields: fieldsJson,
+          salt: item.salt,
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt,
+          locator: item.locator,
+          tombstone: item.tombstone,
+          storedAt: now,
+        },
+      })
+      .returning();
+    return vaultItemRowToRecord(rows[0]);
+  }
+
+  // Mark one item deleted. Clears ciphertext fields, salt, and locator.
+  // Does not read or write vault_blobs. Keeps createdAt when the row exists.
+  async putVaultItemTombstone(
+    userId: string,
+    item: VaultItemTombstoneWrite,
+  ): Promise<VaultItemRecord> {
+    const existing = await this.getVaultItem(userId, item.itemId);
+    return this.putVaultItem(userId, {
+      schema: "pipass-tombstone-v1",
+      itemId: item.itemId,
+      kind: item.kind,
+      version: item.version,
+      salt: "",
+      createdAt: existing?.createdAt ?? item.deletedAt,
+      updatedAt: item.deletedAt,
+      fields: [],
+      contentSha256: item.contentSha256,
+      locator: "",
+      tombstone: true,
+    });
+  }
+
+  // Locator-only update. content hash, fields, version, and vault_blobs
+  // are not written. A tombstone or a row whose locator already changed
+  // matches nothing and returns undefined.
+  async moveVaultItemLocator(
+    userId: string,
+    itemId: string,
+    fromLocator: string,
+    toLocator: string,
+  ): Promise<VaultItemRecord | undefined> {
+    const rows = await db
+      .update(vaultItems)
+      .set({ locator: toLocator })
+      .where(
+        and(
+          eq(vaultItems.userId, userId),
+          eq(vaultItems.itemId, itemId),
+          eq(vaultItems.tombstone, false),
+          eq(vaultItems.locator, fromLocator),
+        ),
+      )
+      .returning();
+    const row = rows[0];
+    if (!row) return undefined;
+    return vaultItemRowToRecord(row);
+  }
+
+  async getVaultItemReceipt(
+    userId: string,
+    itemId: string,
+  ): Promise<VaultItemReceiptRecord | undefined> {
+    const rows = await db
+      .select()
+      .from(vaultItemReceipts)
+      .where(
+        and(eq(vaultItemReceipts.userId, userId), eq(vaultItemReceipts.itemId, itemId)),
+      )
+      .limit(1);
+    const row = rows[0];
+    if (!row) return undefined;
+    return {
+      v: row.v,
+      op: row.op,
+      itemId: row.itemId,
+      itemVersion: row.itemVersion,
+      contentSha256: row.contentSha256,
+      fromLocator: row.fromLocator,
+      toLocator: row.toLocator,
+      botId: row.botId,
+      issuedAt: row.issuedAt,
+      prevReceiptHash: row.prevReceiptHash,
+      sigAlg: row.sigAlg,
+      signature: row.signature,
+      canonical: row.canonical,
+    };
+  }
+
+  async putVaultItemReceipt(
+    userId: string,
+    receipt: VaultItemReceiptRecord,
+  ): Promise<VaultItemReceiptRecord> {
+    const rows = await db
+      .insert(vaultItemReceipts)
+      .values({
+        userId,
+        itemId: receipt.itemId,
+        op: receipt.op,
+        itemVersion: receipt.itemVersion,
+        contentSha256: receipt.contentSha256,
+        fromLocator: receipt.fromLocator,
+        toLocator: receipt.toLocator,
+        botId: receipt.botId,
+        issuedAt: receipt.issuedAt,
+        prevReceiptHash: receipt.prevReceiptHash,
+        sigAlg: receipt.sigAlg,
+        signature: receipt.signature,
+        canonical: receipt.canonical,
+        v: receipt.v,
+      })
+      .onConflictDoUpdate({
+        target: [vaultItemReceipts.userId, vaultItemReceipts.itemId],
+        set: {
+          op: receipt.op,
+          itemVersion: receipt.itemVersion,
+          contentSha256: receipt.contentSha256,
+          fromLocator: receipt.fromLocator,
+          toLocator: receipt.toLocator,
+          botId: receipt.botId,
+          issuedAt: receipt.issuedAt,
+          prevReceiptHash: receipt.prevReceiptHash,
+          sigAlg: receipt.sigAlg,
+          signature: receipt.signature,
+          canonical: receipt.canonical,
+          v: receipt.v,
+        },
+      })
+      .returning();
+    const row = rows[0];
+    return {
+      v: row.v,
+      op: row.op,
+      itemId: row.itemId,
+      itemVersion: row.itemVersion,
+      contentSha256: row.contentSha256,
+      fromLocator: row.fromLocator,
+      toLocator: row.toLocator,
+      botId: row.botId,
+      issuedAt: row.issuedAt,
+      prevReceiptHash: row.prevReceiptHash,
+      sigAlg: row.sigAlg,
+      signature: row.signature,
+      canonical: row.canonical,
+    };
   }
 
   // Atomic sync — all of (lock + expected-version check + server-minted next
@@ -608,6 +946,8 @@ export class DatabaseStorage implements IStorage {
     userId: string,
     encryptedBlob: string,
     expectedPrevVersion: number,
+    keyProof: string,
+    nextKeyProof?: string,
   ): Promise<SyncVaultResult> {
     return await db.transaction(async (tx) => {
       // Lock the existing row (if any) so concurrent syncs serialize.
@@ -620,6 +960,20 @@ export class DatabaseStorage implements IStorage {
         .for("update")
         .limit(1);
       const existing = existingRows[0];
+
+      const proof = decideVaultWriteProof({
+        storedVerifier: existing?.keyVerifier,
+        hasExistingBlob: !!existing,
+        providedProof: keyProof,
+        nextProof: nextKeyProof,
+      });
+      if (!proof.ok) {
+        return {
+          ok: false as const,
+          code: proof.code === "unbound" ? "key_proof_unbound" as const : "key_proof_invalid" as const,
+        };
+      }
+
       const currentVersion = existing?.version ?? 0;
 
       if (currentVersion !== expectedPrevVersion) {
@@ -661,10 +1015,21 @@ export class DatabaseStorage implements IStorage {
       const now = Date.now();
       const writtenRows = await tx
         .insert(vaultBlobs)
-        .values({ userId, encryptedBlob, version: nextVersion, updatedAt: now })
+        .values({
+          userId,
+          encryptedBlob,
+          version: nextVersion,
+          updatedAt: now,
+          keyVerifier: proof.verifierToStore,
+        })
         .onConflictDoUpdate({
           target: vaultBlobs.userId,
-          set: { encryptedBlob, version: nextVersion, updatedAt: now },
+          set: {
+            encryptedBlob,
+            version: nextVersion,
+            updatedAt: now,
+            keyVerifier: proof.verifierToStore,
+          },
           where: sql`${vaultBlobs.version} = ${expectedPrevVersion}`,
         })
         .returning();
@@ -736,6 +1101,7 @@ export class DatabaseStorage implements IStorage {
   async restoreVault(
     userId: string,
     targetVersion: number,
+    keyProof: string,
   ): Promise<RestoreVaultResult> {
     return await db.transaction(async (tx) => {
       const historyRows = await tx
@@ -760,6 +1126,18 @@ export class DatabaseStorage implements IStorage {
         .for("update")
         .limit(1);
       const existing = existingRows[0];
+
+      const proof = decideVaultWriteProof({
+        storedVerifier: existing?.keyVerifier,
+        hasExistingBlob: !!existing,
+        providedProof: keyProof,
+      });
+      if (!proof.ok) {
+        return {
+          ok: false as const,
+          code: proof.code === "unbound" ? "key_proof_unbound" as const : "key_proof_invalid" as const,
+        };
+      }
 
       const baseVersion = Math.max(existing?.version ?? 0, targetVersion);
       const newVersion = baseVersion + 1;
@@ -786,6 +1164,7 @@ export class DatabaseStorage implements IStorage {
           encryptedBlob: historyEntry.encryptedBlob,
           version: newVersion,
           updatedAt: now,
+          keyVerifier: proof.verifierToStore,
         })
         .onConflictDoUpdate({
           target: vaultBlobs.userId,
@@ -793,6 +1172,7 @@ export class DatabaseStorage implements IStorage {
             encryptedBlob: historyEntry.encryptedBlob,
             version: newVersion,
             updatedAt: now,
+            keyVerifier: proof.verifierToStore,
           },
           where: sql`${vaultBlobs.version} < ${newVersion}`,
         })
@@ -1040,6 +1420,26 @@ export class DatabaseStorage implements IStorage {
   // We deliberately do not gate on the current value: the UPDATE is
   // idempotent and PG will simply rewrite the row with the same value
   // on a no-op call, which is cheaper than the round-trip + branch.
+  async bindSessionRetrievalKey(sessionId: string, publicKey: string): Promise<boolean> {
+    const rows = await db
+      .update(sessions)
+      .set({ retrievalPublicKey: publicKey })
+      .where(eq(sessions.id, sessionId))
+      .returning({ id: sessions.id });
+    return rows.length > 0;
+  }
+
+  async listActiveRetrievalKeyUserIds(publicKey: string): Promise<string[]> {
+    const now = Date.now();
+    const rows = await db
+      .select({ userId: sessions.userId })
+      .from(sessions)
+      .where(
+        and(eq(sessions.retrievalPublicKey, publicKey), gt(sessions.expiresAt, now)),
+      );
+    return rows.map((row) => row.userId);
+  }
+
   async markSessionTrusted(sessionId: string): Promise<void> {
     try {
       await db

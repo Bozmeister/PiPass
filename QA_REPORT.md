@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-A comprehensive quality assurance audit was performed on the PiPass mobile password manager covering functional correctness, security architecture, code quality, edge case handling, and production readiness. The audit identified and resolved **14 issues** across the codebase. The application's zero-knowledge cryptographic architecture is sound, and the app is stable after all fixes.
+A comprehensive quality assurance audit was performed on the PiPass mobile password manager covering functional correctness, security architecture, code quality, edge case handling, and production readiness. The audit identified and resolved **14 issues** across the codebase. The application's local-first encryption architecture is sound, and the app is stable after all fixes. This is not a claim that the optional server learns nothing.
 
 ## Test Coverage
 
@@ -54,13 +54,13 @@ No critical bugs were found.
 
 ### Architecture Assessment: Strong
 
-The zero-knowledge architecture is well-implemented:
+On-device encryption is well-implemented:
 
 - **Encryption**: AES-256-CBC with HMAC-SHA256 (Encrypt-then-MAC). MAC covers IV + ciphertext. Verification occurs before decryption.
 - **Key Derivation**: Argon2id (primary) with PBKDF2-SHA256 fallback. Device UUID bound into key material.
 - **Key Management**: XOR-based secret sharing keeps master key split in memory. `useKeyBriefly` pattern limits exposure window. Buffer wiping after use.
 - **Per-Entry Keys**: HKDF derives unique subkeys per entry. Compromise of one entry key does not compromise others.
-- **Server-Side**: Zero-knowledge design — server never sees plaintext passwords or encryption keys. Auth hash is double-hashed (client Argon2/PBKDF2, then server SHA-256).
+- **Server-Side**: Does not receive vault plaintext or the master password. Can see account/activity metadata. Auth hash is hashed again server-side (SHA-256).
 - **Integrity Guard**: Periodic tamper detection (30s interval) with automatic lockout on detection.
 - **Recovery Key**: Only SHA-256 hash stored. Raw key displayed once. Shamir 2-of-3 splitting available.
 
@@ -92,7 +92,7 @@ The zero-knowledge architecture is well-implemented:
 - All destructive actions are properly guarded (biometric + confirmation + undo)
 - All async operations have error handling with user-facing feedback
 - All timer/listener resources have proper cleanup (no memory leaks)
-- Zero-knowledge cryptographic architecture is sound
+- Local-first encryption architecture is sound; do not describe the product as fully zero-knowledge
 - Keyboard handling works correctly on iOS
 - Dark theme is consistent throughout
 - Edge cases (lock during operations, rapid actions, storage failures) are handled

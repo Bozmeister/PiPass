@@ -2,15 +2,13 @@ import React, { useState, useRef, useEffect } from "react";
 import { View, Text, Pressable, Modal, ScrollView, Platform, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import * as Clipboard from "expo-clipboard";
 import { VaultEntry, DecryptedVaultEntry } from "../workers/vaultWorker";
 import FractalBackground from "./FractalBackground";
 import FaviconImage from "./FaviconImage";
 import { FractalParams } from "../crypto/hkdf";
 import { fireHoneytokenTrigger } from "../lib/honeytokenTrigger";
+import { copyPlain, copySecret, SECRET_CLIPBOARD_TTL_MS } from "../lib/secureClipboard";
 import type { HoneytokenTriggerContext } from "./security/api";
-
-const CLIPBOARD_CLEAR_MS = 30000;
 
 interface EntryDetailModalProps {
   visible: boolean;
@@ -21,6 +19,7 @@ interface EntryDetailModalProps {
   fractalParams?: FractalParams;
   onClose: () => void;
   onRequestDelete: (entryId: string) => void;
+  onRequestEdit?: () => void;
   onActivity?: () => void;
 }
 
@@ -33,18 +32,17 @@ export default function EntryDetailModal({
   fractalParams,
   onClose,
   onRequestDelete,
+  onRequestEdit,
   onActivity,
 }: EntryDetailModalProps) {
   const insets = useSafeAreaInsets();
   const [showPassword, setShowPassword] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [showOverflowMenu, setShowOverflowMenu] = useState(false);
-  const clipboardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
-      if (clipboardTimerRef.current) clearTimeout(clipboardTimerRef.current);
       if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current);
     };
   }, []);
@@ -88,18 +86,14 @@ export default function EntryDetailModal({
 
   async function handleCopy(value: string, fieldName: string) {
     try {
-      await Clipboard.setStringAsync(value);
+      if (fieldName === "password") {
+        await copySecret(value);
+      } else {
+        await copyPlain(value);
+      }
       setCopiedField(fieldName);
       if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current);
       copyFeedbackTimerRef.current = setTimeout(() => { setCopiedField(null); copyFeedbackTimerRef.current = null; }, 2000);
-
-      if (clipboardTimerRef.current) clearTimeout(clipboardTimerRef.current);
-      clipboardTimerRef.current = setTimeout(async () => {
-        try {
-          await Clipboard.setStringAsync("");
-        } catch {}
-        clipboardTimerRef.current = null;
-      }, CLIPBOARD_CLEAR_MS);
 
       // T004 — Copy trigger. Silent, fire-and-forget. Only fires
       // for honeytoken entries; no-op for normal entries. Placed
@@ -118,6 +112,11 @@ export default function EntryDetailModal({
   function handleDeleteTap() {
     setShowOverflowMenu(false);
     onRequestDelete(entry.id);
+  }
+
+  function handleEditTap() {
+    setShowOverflowMenu(false);
+    onRequestEdit?.();
   }
 
   const displayTitle = decryptedEntry?.title || entry.title || "";
@@ -192,6 +191,23 @@ export default function EntryDetailModal({
                   </Pressable>
                 </View>
               )}
+              {decryptedEntry && (
+                <View style={{
+                  backgroundColor: "#1e1e1e",
+                  borderRadius: 8,
+                  padding: 10,
+                  marginTop: 10,
+                  flexDirection: "row",
+                  alignItems: "center",
+                  borderWidth: 1,
+                  borderColor: "#3a3a3a",
+                }}>
+                  <Ionicons name="timer-outline" size={14} color="#888" />
+                  <Text style={{ color: "#999", fontSize: 11, marginLeft: 6 }}>
+                    Password copies auto-clear after {Math.round(SECRET_CLIPBOARD_TTL_MS / 1000)}s
+                  </Text>
+                </View>
+              )}
             </View>
 
             {displayUrl && (
@@ -220,24 +236,6 @@ export default function EntryDetailModal({
               </View>
             )}
 
-            {decryptedEntry && (
-              <View style={{
-                backgroundColor: "#1e1e1e",
-                borderRadius: 8,
-                padding: 10,
-                marginBottom: 20,
-                flexDirection: "row",
-                alignItems: "center",
-                borderWidth: 1,
-                borderColor: "#3a3a3a",
-              }}>
-                <Ionicons name="timer-outline" size={14} color="#888" />
-                <Text style={{ color: "#999", fontSize: 11, marginLeft: 6 }}>
-                  Clipboard auto-clears 30s after copy
-                </Text>
-              </View>
-            )}
-
             <View style={{ marginBottom: 20 }}>
               <Text style={{ color: "#999", fontSize: 12, textTransform: "uppercase" as const, marginBottom: 4 }}>Created</Text>
               <Text style={{ color: "#f0f0f0", fontSize: 14 }}>{new Date(entry.createdAt).toLocaleString()}</Text>
@@ -262,6 +260,24 @@ export default function EntryDetailModal({
           >
             <View style={{ width: 36, height: 4, backgroundColor: "#444", borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
 
+            {onRequestEdit && decryptedEntry && (
+              <Pressable
+                onPress={handleEditTap}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  paddingVertical: 16,
+                  paddingHorizontal: 20,
+                }}
+                testID="edit-entry-button"
+              >
+                <Ionicons name="create-outline" size={22} color="#4CAF50" />
+                <Text style={{ color: "#f0f0f0", fontSize: 17, marginLeft: 14, fontWeight: "500" as const }}>
+                  Edit Entry
+                </Text>
+              </Pressable>
+            )}
+
             <Pressable
               onPress={handleDeleteTap}
               style={{
@@ -269,7 +285,10 @@ export default function EntryDetailModal({
                 alignItems: "center",
                 paddingVertical: 16,
                 paddingHorizontal: 20,
+                borderTopWidth: onRequestEdit && decryptedEntry ? 1 : 0,
+                borderTopColor: "#2a2a2a",
               }}
+              testID="delete-entry-button"
             >
               <Ionicons name="trash-outline" size={22} color="#ef4444" />
               <Text style={{ color: "#ef4444", fontSize: 17, marginLeft: 14, fontWeight: "500" as const }}>
@@ -289,7 +308,7 @@ export default function EntryDetailModal({
               }}
             >
               <Ionicons name="close-circle-outline" size={22} color="#888" />
-              <Text style={{ color: "#888", fontSize: 17, marginLeft: 14 }}>
+              <Text style={{ color: "#aaaaaa", fontSize: 17, marginLeft: 14 }}>
                 Cancel
               </Text>
             </Pressable>

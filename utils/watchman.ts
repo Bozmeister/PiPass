@@ -1,3 +1,4 @@
+// Strip only for non-secret UI fields. Passwords/notes must keep user-entered characters.
 const DANGEROUS_CHARS = /[<>{}\[\]\\\/]/g;
 
 const MAX_LENGTHS: Record<string, number> = {
@@ -8,9 +9,18 @@ const MAX_LENGTHS: Record<string, number> = {
   password: 256,
 };
 
+const SECRET_FIELDS = new Set(["password", "notes"]);
+
 export function sanitizeInput(text: string, field?: string): string {
-  let sanitized = text.replace(DANGEROUS_CHARS, "");
   const maxLen = field ? (MAX_LENGTHS[field] || 256) : 256;
+  const isSecret = field ? SECRET_FIELDS.has(field) : false;
+
+  if (isSecret) {
+    // Exact user input for secrets — length cap only (no character stripping).
+    return text.length > maxLen ? text.slice(0, maxLen) : text;
+  }
+
+  let sanitized = text.replace(DANGEROUS_CHARS, "");
   if (sanitized.length > maxLen) {
     sanitized = sanitized.slice(0, maxLen);
   }

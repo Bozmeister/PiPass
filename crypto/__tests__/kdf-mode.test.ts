@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   buildArgon2idKdfMetadata,
   buildPbkdf2KdfMetadata,
+  isValidKdfMetadata,
+  KDF_DEVICE_BINDING_NONE,
 } from "../kdfMetadata";
 import {
   detectLegacyKdfFromMasterHash,
@@ -39,7 +41,8 @@ const ARGON2ID_PARAMS = {
 const LEGACY_ARGON2ID_PARAMS = {
   memoryKiB: 65536,
   timeCost: 3,
-  parallelism: 4,
+  // Matches getArgon2idKdfParameters() for Balanced-tier profileIterations (Pixel-stable p=2)
+  parallelism: 2,
   outputBytes: 32 as const,
 };
 
@@ -78,6 +81,59 @@ test("explicit PBKDF2 helper is deterministic", async () => {
   });
 
   assert.equal(first, second);
+});
+
+test("unbound PBKDF2 (new vaults) ignores deviceUUID and differs from bound material", async () => {
+  const unboundA = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS);
+  const unboundB = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS, {
+    bindDeviceUUID: false,
+    deviceUUID: TEST_DEVICE_UUID,
+  });
+  const bound = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS, {
+    deviceUUID: TEST_DEVICE_UUID,
+  });
+
+  assert.equal(unboundA, unboundB);
+  assert.notEqual(unboundA, bound);
+});
+
+test("metadata with deviceBinding none unlocks without mixing deviceUUID", async () => {
+  const metadata = buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "setup", {
+    createdAt: 1234567890,
+    deviceBinding: KDF_DEVICE_BINDING_NONE,
+  });
+  assert.equal(isValidKdfMetadata(metadata), true);
+
+  const expected = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS, {
+    bindDeviceUUID: false,
+  });
+  const fromMetadata = await deriveMasterKeyFromKdfMetadata(
+    TEST_PASSWORD,
+    TEST_SALT,
+    metadata,
+    { deviceUUID: OTHER_DEVICE_UUID },
+  );
+
+  assert.equal(fromMetadata, expected);
+});
+
+test("metadata with deviceBinding deviceUUID:v1 still mixes the UUID", async () => {
+  const metadata = buildPbkdf2KdfMetadata(1000, PBKDF2_PARAMS, "legacy-detected", {
+    createdAt: 1234567890,
+    deviceBinding: "deviceUUID:v1",
+  });
+
+  const expected = await deriveMasterKeyWithPbkdf2(TEST_PASSWORD, TEST_SALT, PBKDF2_PARAMS, {
+    deviceUUID: TEST_DEVICE_UUID,
+  });
+  const fromMetadata = await deriveMasterKeyFromKdfMetadata(
+    TEST_PASSWORD,
+    TEST_SALT,
+    metadata,
+    { deviceUUID: TEST_DEVICE_UUID },
+  );
+
+  assert.equal(fromMetadata, expected);
 });
 
 test("explicit PBKDF2 helper changes output when deviceUUID changes", async () => {
@@ -554,15 +610,7 @@ test("current unlock verification succeeds when the derived hash matches the sto
   const result = await performCurrentUnlockVerification(
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
-      deriveMasterKeyShares: async () => {
-        throw new Error("legacy derivation should not run");
-      },
-      combineShares: () => {
-        throw new Error("legacy combine should not run");
-      },
-      hashMasterKey: () => {
-        throw new Error("legacy hash should not run");
-      },
+
       getMasterKeyHash: async () => {
         events.push("get-stored-hash");
         return "stored-hash";
@@ -621,15 +669,7 @@ test("current unlock verification uses valid Argon2id metadata without persistin
   const result = await performCurrentUnlockVerification(
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
-      deriveMasterKeyShares: async () => {
-        throw new Error("legacy derivation should not run");
-      },
-      combineShares: () => {
-        throw new Error("legacy combine should not run");
-      },
-      hashMasterKey: () => {
-        throw new Error("legacy hash should not run");
-      },
+
       getMasterKeyHash: async () => "stored-hash",
       getKdfMetadataState: async () => ({ status: "valid", metadata }),
       saveKdfMetadata: async () => {
@@ -667,15 +707,7 @@ test("current unlock verification fails missing-metadata no-match without writin
   const result = await performCurrentUnlockVerification(
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
-      deriveMasterKeyShares: async () => {
-        throw new Error("legacy derivation should not run");
-      },
-      combineShares: () => {
-        throw new Error("legacy combine should not run");
-      },
-      hashMasterKey: () => {
-        throw new Error("legacy hash should not run");
-      },
+
       getMasterKeyHash: async () => "stored-hash",
       getKdfMetadataState: async () => ({ status: "missing", metadata: null }),
       saveKdfMetadata: async () => {
@@ -710,15 +742,7 @@ test("current unlock verification fails and wipes newly derived shares when the 
   const result = await performCurrentUnlockVerification(
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
-      deriveMasterKeyShares: async () => {
-        throw new Error("legacy derivation should not run");
-      },
-      combineShares: () => {
-        throw new Error("legacy combine should not run");
-      },
-      hashMasterKey: () => {
-        throw new Error("legacy hash should not run");
-      },
+
       getMasterKeyHash: async () => {
         events.push("get-stored-hash");
         return "stored-hash";
@@ -756,25 +780,12 @@ test("current unlock verification fails and wipes newly derived shares when the 
   assert.deepEqual(events, ["get-stored-hash", "get-kdf-metadata", "plan"]);
 });
 
-test("current unlock verification preserves legacy tolerance when stored master hash is missing", async () => {
-  const shares = fakeShares();
+test("current unlock verification fails closed when stored master hash is missing", async () => {
   const events: string[] = [];
 
   const result = await performCurrentUnlockVerification(
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
-      deriveMasterKeyShares: async () => {
-        events.push("derive");
-        return shares;
-      },
-      combineShares: () => {
-        events.push("combine");
-        return "c".repeat(64);
-      },
-      hashMasterKey: () => {
-        events.push("hash");
-        return "candidate-hash";
-      },
       getMasterKeyHash: async () => {
         events.push("get-stored-hash");
         return null;
@@ -803,8 +814,8 @@ test("current unlock verification preserves legacy tolerance when stored master 
     },
   );
 
-  assert.deepEqual(result, { ok: true, shares });
-  assert.deepEqual(events, ["get-stored-hash", "derive", "combine", "hash", "cache"]);
+  assert.deepEqual(result, { ok: false, reason: "kdf-derivation-failed" });
+  assert.deepEqual(events, ["get-stored-hash"]);
 });
 
 test("current unlock verification propagates cached-key failures before publishing shares", async () => {
@@ -815,15 +826,7 @@ test("current unlock verification propagates cached-key failures before publishi
     performCurrentUnlockVerification(
       { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
       {
-        deriveMasterKeyShares: async () => {
-          throw new Error("legacy derivation should not run");
-        },
-        combineShares: () => {
-          throw new Error("legacy combine should not run");
-        },
-        hashMasterKey: () => {
-          throw new Error("legacy hash should not run");
-        },
+
         getMasterKeyHash: async () => {
           events.push("get-stored-hash");
           return "stored-hash";
@@ -880,9 +883,6 @@ test("current unlock verification does not read or write KDF metadata when store
     const result = await performCurrentUnlockVerification(
       { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
       {
-        deriveMasterKeyShares: async () => fakeShares(),
-        combineShares: () => "e".repeat(64),
-        hashMasterKey: () => "stored-hash",
         getMasterKeyHash: async () => null,
         getKdfMetadataState: async () => {
           throw new Error("KDF metadata should not be read without a stored master hash");
@@ -901,7 +901,8 @@ test("current unlock verification does not read or write KDF metadata when store
       },
     );
 
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "kdf-derivation-failed");
     assert.equal(storage.items.has("pipass_kdf_metadata"), false);
   } finally {
     setPlatformStorageDriverForTests(null);
@@ -918,15 +919,7 @@ test("current unlock verification saves metadataToPersist after verified missing
   const result = await performCurrentUnlockVerification(
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
-      deriveMasterKeyShares: async () => {
-        throw new Error("legacy derivation should not run");
-      },
-      combineShares: () => {
-        throw new Error("legacy combine should not run");
-      },
-      hashMasterKey: () => {
-        throw new Error("legacy hash should not run");
-      },
+
       getMasterKeyHash: async () => {
         events.push("get-stored-hash");
         return "stored-hash";
@@ -983,15 +976,7 @@ test("current unlock verification saves metadataToPersist after verified missing
   const result = await performCurrentUnlockVerification(
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
-      deriveMasterKeyShares: async () => {
-        throw new Error("legacy derivation should not run");
-      },
-      combineShares: () => {
-        throw new Error("legacy combine should not run");
-      },
-      hashMasterKey: () => {
-        throw new Error("legacy hash should not run");
-      },
+
       getMasterKeyHash: async () => "stored-hash",
       getKdfMetadataState: async () => ({ status: "missing", metadata: null }),
       saveKdfMetadata: async (metadataToSave) => {
@@ -1023,15 +1008,7 @@ test("current unlock verification fails invalid KDF metadata closed without writ
   const result = await performCurrentUnlockVerification(
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
-      deriveMasterKeyShares: async () => {
-        throw new Error("legacy derivation should not run");
-      },
-      combineShares: () => {
-        throw new Error("legacy combine should not run");
-      },
-      hashMasterKey: () => {
-        throw new Error("legacy hash should not run");
-      },
+
       getMasterKeyHash: async () => "stored-hash",
       getKdfMetadataState: async () => ({ status: "invalid", metadata: null }),
       saveKdfMetadata: async () => {
@@ -1068,15 +1045,7 @@ test("current unlock verification allows unlock with warning when KDF metadata p
   const result = await performCurrentUnlockVerification(
     { password: TEST_PASSWORD, salt: TEST_SALT, iterations: 1000 },
     {
-      deriveMasterKeyShares: async () => {
-        throw new Error("legacy derivation should not run");
-      },
-      combineShares: () => {
-        throw new Error("legacy combine should not run");
-      },
-      hashMasterKey: () => {
-        throw new Error("legacy hash should not run");
-      },
+
       getMasterKeyHash: async () => "stored-hash",
       getKdfMetadataState: async () => ({ status: "missing", metadata: null }),
       saveKdfMetadata: async () => {
@@ -1132,14 +1101,6 @@ test("first-time vault setup preparation derives setup data without storage writ
         events.push(`hash-${masterKeyHex}`);
         return "master-hash";
       },
-      generateRecoveryKey: () => {
-        events.push("recovery-key");
-        return "4".repeat(64);
-      },
-      hashRecoveryKey: (rawKeyHex) => {
-        events.push(`recovery-hash-${rawKeyHex}`);
-        return "recovery-hash";
-      },
     },
   );
 
@@ -1148,17 +1109,14 @@ test("first-time vault setup preparation derives setup data without storage writ
   assert.equal(result.shares, shares);
   assert.equal(result.masterKeyHex, "3".repeat(64));
   assert.equal(result.masterHash, "master-hash");
-  assert.equal(result.recoveryKeyHash, "recovery-hash");
-  assert.equal(result.rawRecoveryKeyHex, "4".repeat(64));
   assert.equal(result.kdfMetadata.algorithm, "argon2id");
   assert.equal(result.kdfMetadata.source, "setup");
+  assert.equal(result.kdfMetadata.deviceBinding, "none");
   assert.deepEqual(events, [
     "salt",
-    "argon2id-65536-3-4",
+    "argon2id-65536-3-2",
     `split-${"3".repeat(64)}`,
     `hash-${"3".repeat(64)}`,
-    "recovery-key",
-    `recovery-hash-${"4".repeat(64)}`,
   ]);
 });
 
@@ -1186,14 +1144,6 @@ test("first-time vault setup derives with explicit Argon2id and writes setup met
         events.push(`hash-${masterKeyHex}`);
         return "master-hash";
       },
-      generateRecoveryKey: () => {
-        events.push("recovery-key");
-        return "4".repeat(64);
-      },
-      hashRecoveryKey: (rawKeyHex) => {
-        events.push(`recovery-hash-${rawKeyHex}`);
-        return "recovery-hash";
-      },
       saveMasterSalt: async (salt) => {
         events.push(`save-salt-${salt}`);
       },
@@ -1207,9 +1157,6 @@ test("first-time vault setup derives with explicit Argon2id and writes setup met
         savedMetadata = metadata;
         events.push(`save-kdf-${metadata.algorithm}-${metadata.source}`);
       },
-      saveRecoveryKeyHash: async (hash) => {
-        events.push(`save-recovery-hash-${hash}`);
-      },
       storeMasterKeySecurely: async (masterKeyHex) => {
         events.push(`cache-${masterKeyHex}`);
       },
@@ -1222,29 +1169,26 @@ test("first-time vault setup derives with explicit Argon2id and writes setup met
   assert.equal(result.salt, TEST_SALT);
   assert.equal(result.iterations, 1000);
   assert.equal(result.shares, shares);
-  assert.equal(result.rawRecoveryKeyHex, "4".repeat(64));
   assert.equal(result.kdfMetadata.algorithm, "argon2id");
   assert.equal(result.kdfMetadata.source, "setup");
+  assert.equal(result.kdfMetadata.deviceBinding, "none");
   assert.equal(result.kdfMetadata.profileIterations, 1000);
   assert.deepEqual(result.kdfMetadata.parameters, {
     memoryKiB: 65536,
     timeCost: 3,
-    parallelism: 4,
+    parallelism: 2,
     outputBytes: 32,
   });
   assert.deepEqual(savedMetadata, result.kdfMetadata);
   assert.deepEqual(events, [
     "salt",
-    "argon2id-65536-3-4",
+    "argon2id-65536-3-2",
     `split-${"3".repeat(64)}`,
     `hash-${"3".repeat(64)}`,
-    "recovery-key",
-    `recovery-hash-${"4".repeat(64)}`,
     `save-salt-${TEST_SALT}`,
     "save-master-hash-master-hash",
     "save-profile-1000",
     "save-kdf-argon2id-setup",
-    "save-recovery-hash-recovery-hash",
     `cache-${"3".repeat(64)}`,
   ]);
 });
@@ -1272,14 +1216,6 @@ test("first-time vault setup failure does not fall back or write partial setup s
           events.push("hash");
           return "master-hash";
         },
-        generateRecoveryKey: () => {
-          events.push("recovery-key");
-          return "4".repeat(64);
-        },
-        hashRecoveryKey: () => {
-          events.push("recovery-hash");
-          return "recovery-hash";
-        },
         saveMasterSalt: async () => {
           events.push("save-salt");
         },
@@ -1291,9 +1227,6 @@ test("first-time vault setup failure does not fall back or write partial setup s
         },
         saveKdfMetadata: async () => {
           events.push("save-kdf");
-        },
-        saveRecoveryKeyHash: async () => {
-          events.push("save-recovery-hash");
         },
         storeMasterKeySecurely: async () => {
           events.push("cache");
@@ -1326,17 +1259,12 @@ test("first-time vault setup wipes derived shares if setup commit fails", async 
           return shares;
         },
         hashMasterKey: () => "master-hash",
-        generateRecoveryKey: () => "6".repeat(64),
-        hashRecoveryKey: () => "recovery-hash",
         saveMasterSalt: async () => {},
         saveMasterKeyHash: async () => {},
         saveSecurityProfile: async () => {},
         saveKdfMetadata: async () => {
           events.push("save-kdf");
           throw new Error("write failed");
-        },
-        saveRecoveryKeyHash: async () => {
-          events.push("save-recovery-hash");
         },
         storeMasterKeySecurely: async () => {
           events.push("cache");

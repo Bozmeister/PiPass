@@ -1,6 +1,36 @@
 export { deriveMasterKey, generateMasterSalt, hashMasterKey } from "./keyDerivation";
-export { encryptData, decryptData } from "./encryption";
-export { deriveSubkey, deriveEntryKey, generateSaltHex } from "./hkdf";
+export { createVaultKeyProof, isWellFormedVaultKeyProof } from "./vaultKeyProof";
+export {
+  encryptData,
+  decryptData,
+  canonicalizeFieldAad,
+  isAuthenticatedCiphertext,
+  isLegacyUnsupportedCiphertext,
+  isLegacyUnauthenticatedCiphertext,
+  CiphertextFormatError,
+} from "./encryption";
+export type { FieldAad, VaultCipherField } from "./encryption";
+export {
+  deriveSubkey,
+  deriveEntryKey,
+  deriveAesGcmKey,
+  generateSaltHex,
+} from "./hkdf";
+export {
+  ITEM_WRAP_HKDF_INFO,
+  ITEM_KEY_FIELD,
+  INTENTDB_ENVELOPE_ENV,
+  intentdbEnvelopeEnabled,
+  envelopeMigrationAllowed,
+  recordHasWrappedItemKey,
+  deriveItemWrapKey,
+  generateItemKeyHex,
+  wrapItemKey,
+  unwrapItemKey,
+  resolveFieldKey,
+  rewrapItemKey,
+} from "./itemEnvelope";
+export type { EnvelopeRecord, EnvelopeMigrationOptions } from "./itemEnvelope";
 export {
   wipeBuffer,
   stringToBytes,

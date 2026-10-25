@@ -1,16 +1,17 @@
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "../shared/schema";
+import { poolConfigFromResolved, resolveDatabaseConfig } from "./dbConfig";
 
-if (!process.env.DATABASE_URL) {
-  throw new Error(
-    "DATABASE_URL is not set. Provision a database before starting the server."
+const databaseConfig = resolveDatabaseConfig();
+
+export const pool = new Pool(poolConfigFromResolved(databaseConfig));
+
+if (process.env.NODE_ENV === "production") {
+  console.info(
+    `[db] TLS mode=${databaseConfig.sslMode} host=${databaseConfig.hostLabel}`,
   );
 }
-
-export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
 
 export const db = drizzle(pool, { schema });
 

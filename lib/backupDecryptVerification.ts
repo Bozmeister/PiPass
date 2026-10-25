@@ -158,6 +158,8 @@ function isDecryptableSecureNoteShape(note: SecureNote): boolean {
     note !== null &&
     typeof note.id === "string" &&
     note.id.length > 0 &&
+    typeof note.encryptedLabel === "string" &&
+    note.encryptedLabel.length > 0 &&
     typeof note.encryptedContent === "string" &&
     note.encryptedContent.length > 0
   );

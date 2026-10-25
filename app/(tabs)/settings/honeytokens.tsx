@@ -305,8 +305,8 @@ export default function HoneytokensScreen() {
       // (see vaultWorker.ts comments) so we have no plaintext index
       // to filter against — we must decrypt each candidate. This is
       // O(N) AES-GCM per disable, which is fine for the disable
-      // codepath (rare, user-initiated) and is the price of the
-      // zero-knowledge indistinguishability guarantee.
+      // codepath (rare, user-initiated) and keeps decoy ids out of
+      // plaintext local indexes. The server still sees trigger metadata.
       //
       // Vault may be locked: without the master key we can't
       // decrypt anything, so the local row will keep looking like a

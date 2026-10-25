@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import Module from "node:module";
 import test from "node:test";
-import CryptoJS from "crypto-js";
+
 import {
   hexToBytes,
   type KeyShares,
@@ -12,11 +12,11 @@ import {
   wipeShares,
 } from "../../crypto/secureMemory";
 import { decryptData, encryptData } from "../../crypto/encryption";
-import { deriveEntryKey } from "../../crypto/hkdf";
-import { generateSaltHex } from "../../crypto/hkdf";
+import { deriveEntryKey, generateSaltHex } from "../../crypto/hkdf";
 import {
   buildArgon2idKdfMetadata,
   buildPbkdf2KdfMetadata,
+  KDF_DEVICE_BINDING_NONE,
   clearKdfMetadata,
   clearVault,
   destroyAllData,
@@ -209,7 +209,6 @@ function seedBaseState(storage: MemoryStorage): void {
     "pipass_note_note-a",
     JSON.stringify({
       id: "note-a",
-      label: "encrypted-label-placeholder",
       encryptedLabel: "encrypted-label-placeholder",
       encryptedContent: "encrypted-content-placeholder",
       salt: "salt-placeholder",
@@ -270,7 +269,6 @@ function validBackupFixture(overrides: Record<string, unknown> = {}): Record<str
     secureNotes: [
       {
         id: "note-a",
-        label: "encrypted-label-placeholder",
         encryptedLabel: "encrypted-label-ciphertext",
         encryptedContent: "encrypted-content-ciphertext",
         salt: "note-salt-placeholder",
@@ -355,27 +353,42 @@ function decryptableStagedBackupFixture(masterKeyHex: string): {
   const shares = keySharesForHex(masterKeyHex);
   const entrySalt = "a".repeat(32);
   const noteSalt = "b".repeat(32);
-  const entryKey = deriveEntryKey(masterKeyHex, "entry-a", entrySalt);
-  const noteKey = deriveEntryKey(masterKeyHex, "note-a", noteSalt);
+  const entryId = "entry-a";
+  const noteId = "note-a";
+  const entryKey = deriveEntryKey(masterKeyHex, entryId, entrySalt);
+  const noteKey = deriveEntryKey(masterKeyHex, noteId, noteSalt);
+  const entryAad = (field: string) => ({ recordId: entryId, field });
+  const noteAad = (field: string) => ({ recordId: noteId, field });
   const entry = {
-    id: "entry-a",
+    id: entryId,
     title: "encrypted-title-placeholder",
     username: "encrypted-username-placeholder",
-    encryptedPassword: legacyEncryptData("PLAINTEXT_SECRET", entryKey),
-    encryptedTitle: legacyEncryptData("TITLE_SECRET", entryKey),
-    encryptedUsername: legacyEncryptData("USER_SECRET", entryKey),
-    encryptedUrl: legacyEncryptData("https://example.test", entryKey),
+    encryptedPassword: authenticatedEncryptData(
+      "PLAINTEXT_SECRET",
+      entryKey,
+      entryAad("password"),
+    ),
+    encryptedTitle: authenticatedEncryptData("TITLE_SECRET", entryKey, entryAad("title")),
+    encryptedUsername: authenticatedEncryptData(
+      "USER_SECRET",
+      entryKey,
+      entryAad("username"),
+    ),
+    encryptedUrl: authenticatedEncryptData(
+      "https://example.test",
+      entryKey,
+      entryAad("url"),
+    ),
     url: "encrypted-url-display-placeholder",
-    notes: legacyEncryptData("notes", entryKey),
+    notes: authenticatedEncryptData("notes", entryKey, entryAad("notes")),
     salt: entrySalt,
     createdAt: 1,
     updatedAt: 2,
   };
   const note = {
-    id: "note-a",
-    label: "encrypted-label-placeholder",
-    encryptedLabel: legacyEncryptData("Note", noteKey),
-    encryptedContent: legacyEncryptData("content", noteKey),
+    id: noteId,
+    encryptedLabel: authenticatedEncryptData("Note", noteKey, noteAad("label")),
+    encryptedContent: authenticatedEncryptData("content", noteKey, noteAad("content")),
     salt: noteSalt,
     createdAt: 3,
     updatedAt: 4,
@@ -403,15 +416,19 @@ function keySharesForHex(masterKeyHex: string): KeyShares {
   };
 }
 
-function legacyEncryptData(plaintext: string, keyHex: string): string {
-  const ivHex = "0".repeat(32);
-  const encrypted = CryptoJS.AES.encrypt(plaintext, CryptoJS.enc.Hex.parse(keyHex), {
-    iv: CryptoJS.enc.Hex.parse(ivHex),
-    mode: CryptoJS.mode.CBC,
-    padding: CryptoJS.pad.Pkcs7,
-  });
-
-  return `${ivHex}:${encrypted.ciphertext.toString(CryptoJS.enc.Hex)}`;
+/**
+ * Test helper: AES-256-GCM v4 via the production encryptData path.
+ * Defaults to password/test-record AAD so decryptData(..., aad) matches.
+ */
+function authenticatedEncryptData(
+  plaintext: string,
+  keyHex: string,
+  aad: { recordId: string; field: string } = {
+    recordId: "test-record",
+    field: "password",
+  },
+): string {
+  return encryptData(plaintext, keyHex, aad);
 }
 
 function localCompatibilityContext(overrides: Record<string, unknown> = {}) {
@@ -990,6 +1007,36 @@ test("backup parser rejects secure notes missing encrypted content", () => {
   }
   assert.equal(result.error.code, "invalid-secure-note");
   assert.equal(result.error.path, "secureNotes[0].encryptedContent");
+});
+
+test("backup parser accepts secure notes without plaintext label", () => {
+  const backup = validBackupFixture();
+  const secureNotes = backup.secureNotes as Array<Record<string, unknown>>;
+  delete secureNotes[0].label;
+
+  const result = parsePipassBackup(backup);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error("expected backup parser success without plaintext label");
+  }
+  assert.equal(result.backup.secureNotes[0].label, undefined);
+  assert.ok(result.backup.secureNotes[0].encryptedLabel.length > 0);
+});
+
+test("backup parser rejects secure notes missing encryptedLabel", () => {
+  const backup = validBackupFixture();
+  const secureNotes = backup.secureNotes as Array<Record<string, unknown>>;
+  delete secureNotes[0].encryptedLabel;
+
+  const result = parsePipassBackup(backup);
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected backup parser failure");
+  }
+  assert.equal(result.error.code, "invalid-secure-note");
+  assert.equal(result.error.path, "secureNotes[0].encryptedLabel");
 });
 
 test("backup parser returns a controlled error for invalid JSON", () => {
@@ -3277,7 +3324,6 @@ test("setup/import commit plan builds setup-only operations with initialized mar
     SETUP_IMPORT_STORAGE_KEYS.securityProfile,
     SETUP_IMPORT_STORAGE_KEYS.kdfMetadata,
     SETUP_IMPORT_STORAGE_KEYS.masterHash,
-    SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash,
     SETUP_IMPORT_STORAGE_KEYS.vaultInitialized,
   ]);
   assert.equal(result.plan.operations.at(-1)?.category, "initialized-marker");
@@ -3308,7 +3354,6 @@ test("setup/import commit plan orders entries notes indexes shared vault cache a
       "setup-metadata",
       "setup-metadata",
       "setup-metadata",
-      "setup-metadata",
       "vault-entry",
       "vault-index",
       "secure-note",
@@ -3325,7 +3370,6 @@ test("setup/import commit plan orders entries notes indexes shared vault cache a
       SETUP_IMPORT_STORAGE_KEYS.securityProfile,
       SETUP_IMPORT_STORAGE_KEYS.kdfMetadata,
       SETUP_IMPORT_STORAGE_KEYS.masterHash,
-      SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash,
       "pipass_vault_entry-a",
       SETUP_IMPORT_STORAGE_KEYS.vaultIndex,
       "pipass_note_note-a",
@@ -3573,7 +3617,8 @@ test("setup/import atomic executor failure on first write leaves new key state c
 
 test("setup/import atomic executor middle failure restores previous values and deletes new keys", async () => {
   const plan = commitPlanFixture({ includeEntries: true });
-  const failingKey = SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash;
+  // Fail after salt/profile/kdf writes, before master hash and entries.
+  const failingKey = SETUP_IMPORT_STORAGE_KEYS.masterHash;
   const storage = new CommitPlanMemoryStorage({
     [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "previous-master-salt",
   });
@@ -3618,7 +3663,7 @@ test("setup/import atomic executor rollback restores previous overwritten value"
   const storage = new CommitPlanMemoryStorage({
     [SETUP_IMPORT_STORAGE_KEYS.securityProfile]: "25000",
   });
-  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash}#1`);
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.masterHash}#1`);
 
   const result = await executeSetupImportCommitPlan(plan, storage);
 
@@ -3629,7 +3674,7 @@ test("setup/import atomic executor rollback restores previous overwritten value"
 test("setup/import atomic executor rollback deletes newly created key", async () => {
   const plan = commitPlanFixture();
   const storage = new CommitPlanMemoryStorage();
-  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash}#1`);
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.masterHash}#1`);
 
   const result = await executeSetupImportCommitPlan(plan, storage);
 
@@ -3642,7 +3687,7 @@ test("setup/import atomic executor reports rollback failures with safe key-only 
   const storage = new CommitPlanMemoryStorage({
     [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: "previous-master-salt",
   });
-  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash}#1`);
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.masterHash}#1`);
   storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.masterSalt}#2`);
 
   const result = await executeSetupImportCommitPlan(plan, storage);
@@ -3731,7 +3776,7 @@ test("setup/import atomic executor omits values and secret-like content from fai
   const storage = new CommitPlanMemoryStorage({
     [SETUP_IMPORT_STORAGE_KEYS.masterSalt]: secretValue,
   });
-  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.recoveryKeyHash}#1`);
+  storage.failSetAttempts.add(`${SETUP_IMPORT_STORAGE_KEYS.masterHash}#1`);
 
   const result = await executeSetupImportCommitPlan(plan, storage);
   const serialized = JSON.stringify(result);
@@ -4511,8 +4556,54 @@ test("build backup compatibility context from setup state without device UUID", 
 
   assert.equal(context.format, "encrypted-local-records");
   assert.equal(context.masterSaltPresent, true);
-  assert.equal(context.deviceBinding, "unknown");
+  assert.equal(context.deviceBinding, "deviceUUID:v1");
   assert.equal(context.deviceUUIDPresent, false);
+});
+
+test("build backup compatibility context uses portable none binding from KDF metadata", () => {
+  const kdfMetadata = buildArgon2idKdfMetadata(
+    100000,
+    { memoryKiB: 65536, timeCost: 4, parallelism: 2, outputBytes: 32 },
+    "setup",
+    { createdAt: 1234567890, deviceBinding: KDF_DEVICE_BINDING_NONE },
+  );
+  const context = buildBackupCompatibilityContextFromSetup({
+    setupMetadata: {
+      masterSalt: "master-salt-placeholder",
+      kdfMetadata,
+    },
+    deviceUUIDPresent: false,
+  });
+
+  assert.equal(context.deviceBinding, "none");
+  assert.equal(context.deviceUUIDPresent, false);
+});
+
+test("backup compatibility classifier accepts matching portable none device binding", () => {
+  const kdfMetadata = buildArgon2idKdfMetadata(
+    100000,
+    { memoryKiB: 131072, timeCost: 4, parallelism: 4, outputBytes: 32 },
+    "setup",
+    { createdAt: 1234567890, deviceBinding: KDF_DEVICE_BINDING_NONE },
+  );
+  const backup = stagedBackupWithCompatibility(
+    compatibilityMetadata({
+      kdfMetadata,
+      deviceBinding: "none",
+      requiresSameDeviceUUID: false,
+    }),
+  );
+  const result = classifyBackupCompatibility(
+    backup,
+    localCompatibilityContext({
+      kdfMetadata,
+      deviceBinding: "none",
+      deviceUUIDPresent: false,
+    }),
+  );
+
+  assert.equal(result.status, "compatible");
+  assert.equal(result.reason, "same-install-metadata-match");
 });
 
 test("build backup compatibility context detects empty master salt", () => {
@@ -4913,15 +5004,18 @@ test("lazy crypto loading preserves ciphertext salt and share formats", () => {
     return originalLoad.call(this, request, parent, isMain);
   };
   const keyHex = "6".repeat(64);
+  const aad = { recordId: "lazy-entry", field: "password" as const };
   try {
-    const ciphertext = encryptData("lazy-load-round-trip", keyHex);
+    const ciphertext = encryptData("lazy-load-round-trip", keyHex, aad);
     const parts = ciphertext.split(":");
 
-    assert.equal(parts.length, 3);
-    assert.equal(parts[0].length, 32);
-    assert.equal(parts[0], "07".repeat(16));
-    assert.equal(parts[2].length, 64);
-    assert.equal(decryptData(ciphertext, keyHex), "lazy-load-round-trip");
+    // v4 format: v4:nonce(12B):ciphertext:tag(16B) — nonce comes from
+    // node:crypto, not the expo-crypto stub used for salt/shares below.
+    assert.equal(parts.length, 4);
+    assert.equal(parts[0], "v4");
+    assert.equal(parts[1].length, 24);
+    assert.equal(parts[3].length, 32);
+    assert.equal(decryptData(ciphertext, keyHex, aad), "lazy-load-round-trip");
 
     const salt = generateSaltHex(16);
     assert.equal(salt, "07".repeat(16));

@@ -2,7 +2,7 @@
 
 ## Overview
 
-PiPass is a mobile password manager built with Expo (React Native) that uses a zero-knowledge security architecture with industry-standard cryptographic primitives. The app stores encrypted vault entries locally on-device using Expo SecureStore (with localStorage fallback on web), protected by a master password and optional biometric authentication. An Express backend server provides user registration, authentication, and encrypted vault blob sync — the server never sees plaintext passwords or vault data.
+PiPass is a local-first encrypted password manager built with Expo (React Native). Vault entries are encrypted on-device with Expo SecureStore on native (the web vault is disabled), protected by a master password and optional biometric authentication. An optional Express backend provides accounts, authentication, and encrypted blob hosting. The server does not receive vault plaintext or the master password; it can see account metadata, activity, blob sizes, and (if enabled) escrowed TOTP secrets.
 
 ## User Preferences
 
@@ -66,7 +66,7 @@ Preferred communication style: Simple, everyday language.
 - **Storage Worker** (`storageWorker.ts`): Password-based with no piSeed. Stores master salt, master key hash, security profile, recovery key hash. Uses `expo-secure-store` on native, `localStorage` on web. Includes `destroyAllData()` for nuclear wipe.
 - **Vault Worker** (`vaultWorker.ts`): Uses per-entry HKDF subkeys with `KeyShares` throughout. `deriveMasterKeyShares()` returns XOR-split key shares. Encrypt/decrypt operations use per-entry keys derived from master key + entry ID via HKDF.
 
-### Backend (Express server) — Zero-Knowledge API
+### Backend (Express server) — optional account / blob API
 - **Location**: `server/` directory
 - **Validation** (`server/validation.ts` + `shared/schema.ts`): every input source on every endpoint flows through a zod schema derived from the Drizzle table definitions (`drizzle-zod`'s `createInsertSchema` — single source of truth). The adapters in `server/validation.ts` call `safeParse` and map the first issue back to a `{error: "Invalid <field>"}` 400 response (with `encryptedBlob` → `"blob"`).
   - **Body schemas use `.strict()`** — unknown fields are REJECTED with 400 `"Unknown field"`, not silently stripped. A client that sends an unrecognized field needs to know the request shape is wrong.
@@ -100,7 +100,7 @@ Preferred communication style: Simple, everyday language.
   - Error handlers never log error objects/stack traces to prevent information leakage
   - Request logging omits response bodies
   - Rate limit map auto-cleaned every 5 minutes to prevent memory leaks
-  - Server never sees plaintext passwords or vault data
+  - Server does not receive vault plaintext or the master password; it does see account and activity metadata
   - **Device Trust** (`sessions.deviceFingerprint` + `sessions.trusted`): Every new login captures `SHA-256(userAgent || \0 || ip || \0 || x-platform)` as an opaque per-device fingerprint. A login is automatically trusted iff the user has a prior session row with the same fingerprint (indexed by `sessions_user_fingerprint_idx`); first-ever device for a user starts untrusted. Untrusted sessions are blocked from `/api/vault/sync` and `/api/vault/restore` with 403 `"Untrusted device - approval required"` (BELOW the 423 recovery-mode and 423 soft-lock gates), bump `securityLevel` floor to `elevated`, and emit `new_device_detected` + `untrusted_device_blocked` audit events. The user clears the gate by calling `POST /api/auth/trust-device` from the new device, which writes `trusted=true` on the current session row, clears the in-memory untrusted set, and audits `device_trusted`. `markSessionTrusted` is fail-open (never throws) and the in-memory `untrustedSessions` cache is rebuilt by `authenticate()` from each session row on every request, so a server restart cannot weaken the gate. `/api/vault/fetch` returns `deviceTrusted` so the client can show an in-app banner.
 - **CORS**: Configured for Replit dev/deployment domains and localhost
 - **IMPORTANT**: Server files must use `node:crypto` (not `crypto`) to avoid resolving to the local `crypto/` directory

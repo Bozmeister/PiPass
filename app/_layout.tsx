@@ -7,9 +7,13 @@ import React, { useEffect } from "react";
 import { Platform } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { queryClient } from "@/lib/query-client";
 import { SecurityProvider } from "@/context/SecurityContext";
+import { useScreenCaptureProtection } from "@/lib/screenCaptureProtection";
+import { purgeLegacyWebVaultStorage } from "@/lib/webVaultPolicy";
+import WebVaultDisabledScreen from "@/screens/WebVaultDisabledScreen";
 
 // Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
@@ -23,25 +27,27 @@ function RootLayoutNav() {
   );
 }
 
-export default function RootLayout() {
+function WebAppDisabledRoot() {
+  useEffect(() => {
+    purgeLegacyWebVaultStorage();
+    SplashScreen.hideAsync();
+  }, []);
+
+  return (
+    <ErrorBoundary>
+      <SafeAreaProvider>
+        <WebVaultDisabledScreen />
+      </SafeAreaProvider>
+    </ErrorBoundary>
+  );
+}
+
+function NativeRootLayout() {
+  // Block screenshots/recording for unlock, setup, vault, notes, settings (native production).
+  useScreenCaptureProtection();
+
   useEffect(() => {
     SplashScreen.hideAsync();
-    if (Platform.OS === "web" && typeof document !== "undefined") {
-      const style = document.createElement("style");
-      style.textContent = `
-        input:-webkit-autofill,
-        input:-webkit-autofill:hover,
-        input:-webkit-autofill:focus,
-        input:-webkit-autofill:active {
-          -webkit-box-shadow: 0 0 0px 1000px #1e1e1e inset !important;
-          box-shadow: 0 0 0px 1000px #1e1e1e inset !important;
-          -webkit-text-fill-color: #f0f0f0 !important;
-          caret-color: #f0f0f0 !important;
-          transition: background-color 5000s ease-in-out 0s;
-        }
-      `;
-      document.head.appendChild(style);
-    }
   }, []);
 
   return (
@@ -57,4 +63,11 @@ export default function RootLayout() {
       </QueryClientProvider>
     </ErrorBoundary>
   );
+}
+
+export default function RootLayout() {
+  if (Platform.OS === "web") {
+    return <WebAppDisabledRoot />;
+  }
+  return <NativeRootLayout />;
 }

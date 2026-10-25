@@ -1,12 +1,14 @@
 import {
   buildArgon2idKdfMetadata,
   buildPbkdf2KdfMetadata,
+  KDF_DEVICE_BINDING_NONE,
   type KdfMetadata,
   type Pbkdf2KdfParameters,
 } from "../crypto/kdfMetadata";
 import {
   getArgon2idKdfParameters,
-  getPbkdf2Parameters,
+  getStrongPbkdf2FallbackParameters,
+  STRONG_PBKDF2_FALLBACK_FLOOR,
   type KdfVersion,
 } from "../crypto/keyDerivation";
 import type { KeyShares } from "../crypto/secureMemory";
@@ -38,8 +40,6 @@ export interface FirstTimeVaultSetupPrepareDependencies {
   ) => Promise<string>;
   splitKeyIntoShares: (masterKeyHex: string) => KeyShares;
   hashMasterKey: (masterKeyHex: string) => string;
-  generateRecoveryKey: () => string;
-  hashRecoveryKey: (rawKeyHex: string) => string;
 }
 
 export interface FirstTimeVaultSetupDependencies extends FirstTimeVaultSetupPrepareDependencies {
@@ -47,7 +47,6 @@ export interface FirstTimeVaultSetupDependencies extends FirstTimeVaultSetupPrep
   saveMasterKeyHash: (hashHex: string) => Promise<void>;
   saveSecurityProfile: (iterations: number) => Promise<void>;
   saveKdfMetadata: (metadata: KdfMetadata) => Promise<void>;
-  saveRecoveryKeyHash: (hashHex: string) => Promise<void>;
   storeMasterKeySecurely: (masterKeyHex: string) => Promise<void>;
   wipeShares: (shares: KeyShares) => void;
 }
@@ -56,97 +55,168 @@ export interface FirstTimeVaultSetupResult {
   salt: string;
   iterations: number;
   shares: KeyShares;
-  rawRecoveryKeyHex: string;
   kdfMetadata: KdfMetadata;
 }
 
 export interface PreparedFirstTimeVaultSetupResult extends FirstTimeVaultSetupResult {
   masterKeyHex: string;
   masterHash: string;
-  recoveryKeyHash: string;
 }
 
+/** Production-safe: static label only — no password lengths, salts, or KDF params. */
+function logSetupError(label: string, _err?: unknown): void {
+  try {
+    console.error(label);
+  } catch {
+    // never throw from logging
+  }
+}
+
+/**
+ * Prepare first-time vault setup (derive keys, build metadata) without writing storage.
+ *
+ * Security preference (v2.0+):
+ * 1. Prefer Argon2id (Android native pipass-argon2, else hash-wasm).
+ *    Fortress profile parameters are used for the selected iteration tier.
+ * 2. On any Argon2 failure/unavailability: strong pure-JS PBKDF2-SHA256
+ *    (OWASP-aligned high iteration count).
+ * 3. Always store the actual algorithm in kdfMetadata so unlock matches.
+ *
+ * Crash-proof: only throws FirstTimeVaultSetupError; never requires Sphereon.
+ */
 export async function prepareFirstTimeVaultSetup(
   input: FirstTimeVaultSetupInput,
   dependencies: FirstTimeVaultSetupPrepareDependencies,
 ): Promise<PreparedFirstTimeVaultSetupResult> {
-  const validIterations = Math.max(input.iterations || 100000, 3);
-  const kdfVersion = input.kdfVersion ?? "v1";
-  const salt = dependencies.generateMasterSalt();
-  const argon2idParameters = getArgon2idKdfParameters(validIterations, kdfVersion);
-
-  let masterKeyHex: string;
-  let kdfMetadata: KdfMetadata;
   try {
-    masterKeyHex = await dependencies.deriveMasterKeyWithArgon2id(
-      input.password,
-      salt,
-      argon2idParameters,
-    );
-    kdfMetadata = buildArgon2idKdfMetadata(
-      validIterations,
-      argon2idParameters,
-      "setup",
-      { kdfVersion },
-    );
-  } catch (err: any) {
-    // Critical: log the exact underlying exception so root cause (e.g. native/WASM init on Pixel arm64) is visible
-    console.error(
-      "[SETUP] deriveMasterKeyWithArgon2id failed during vault creation (Create Vault). Exact underlying exception:",
-      err && (err.stack || err.message || String(err))
-    );
-    const pbDerive = dependencies.deriveMasterKeyWithPbkdf2;
-    if (!pbDerive) {
-      // Preserve legacy error for callers/tests that do not provide fallback (minimal change)
-      throw new FirstTimeVaultSetupError("Argon2id setup derivation failed");
+    const validIterations = Math.max(input.iterations || 100000, 3);
+    const kdfVersion = input.kdfVersion ?? "v1";
+
+    if (typeof input.password !== "string" || input.password.length === 0) {
+      throw new FirstTimeVaultSetupError("Master password is required to create a vault.");
     }
-    console.log("[SETUP] Falling back to PBKDF2-SHA256 (Fortress/selected profile iters preserved) so vault creation never fails due to KDF engine init.");
-    const pbkdf2Parameters = getPbkdf2Parameters(validIterations);
-    masterKeyHex = await pbDerive(
-      input.password,
+
+    let salt: string;
+    try {
+      salt = dependencies.generateMasterSalt();
+    } catch (saltErr: unknown) {
+      logSetupError("[SETUP] generateMasterSalt failed", saltErr);
+      throw new FirstTimeVaultSetupError(
+        "Could not generate a secure salt on this device. Vault was not created.",
+      );
+    }
+
+    const argon2idParameters = getArgon2idKdfParameters(validIterations, kdfVersion);
+    // Strong PBKDF2 for fallback only — actual count stored in metadata for unlock.
+    let pbkdf2Parameters = getStrongPbkdf2FallbackParameters(validIterations);
+    if (pbkdf2Parameters.iterations < STRONG_PBKDF2_FALLBACK_FLOOR) {
+      pbkdf2Parameters = {
+        iterations: STRONG_PBKDF2_FALLBACK_FLOOR,
+        outputBytes: 32,
+      };
+    }
+
+    // Assigned in Argon2 success path or strong PBKDF2 fallback; both failures throw.
+    let masterKeyHex!: string;
+    let kdfMetadata!: KdfMetadata;
+    const pbDerive = dependencies.deriveMasterKeyWithPbkdf2;
+
+    const runPbkdf2 = async (_reason: string): Promise<void> => {
+      if (!pbDerive) {
+        throw new FirstTimeVaultSetupError("Argon2id setup derivation failed");
+      }
+      masterKeyHex = await pbDerive(input.password, salt, pbkdf2Parameters);
+      kdfMetadata = buildPbkdf2KdfMetadata(validIterations, pbkdf2Parameters, "setup", {
+        kdfVersion,
+        deviceBinding: KDF_DEVICE_BINDING_NONE,
+      });
+    };
+
+    // Primary: Argon2id (null-safe native path inside deriveMasterKeyWithArgon2id / loadArgon2)
+    try {
+      masterKeyHex = await dependencies.deriveMasterKeyWithArgon2id(
+        input.password,
+        salt,
+        argon2idParameters,
+      );
+      kdfMetadata = buildArgon2idKdfMetadata(
+        validIterations,
+        argon2idParameters,
+        "setup",
+        { kdfVersion, deviceBinding: KDF_DEVICE_BINDING_NONE },
+      );
+    } catch (err: unknown) {
+      logSetupError("[SETUP] Argon2id failed; trying strong PBKDF2 fallback", err);
+      try {
+        await runPbkdf2("after Argon2id unavailable or failure");
+      } catch (pbErr: unknown) {
+        if (pbErr instanceof FirstTimeVaultSetupError) throw pbErr;
+        logSetupError("[SETUP] Strong PBKDF2 fallback failed", pbErr);
+        throw new FirstTimeVaultSetupError(
+          "Key derivation failed on this device (Argon2 and PBKDF2). Vault was not created.",
+        );
+      }
+    }
+
+    let shares: KeyShares;
+    let masterHash: string;
+    try {
+      shares = dependencies.splitKeyIntoShares(masterKeyHex);
+      masterHash = dependencies.hashMasterKey(masterKeyHex);
+    } catch (materialErr: unknown) {
+      logSetupError("[SETUP] Vault material creation failed", materialErr);
+      throw new FirstTimeVaultSetupError(
+        "Vault could not be prepared safely after key derivation. Nothing was saved.",
+      );
+    }
+
+    return {
       salt,
-      pbkdf2Parameters,
-    );
-    kdfMetadata = buildPbkdf2KdfMetadata(
-      validIterations,
-      pbkdf2Parameters,
-      "setup",
-      { kdfVersion },
+      iterations: validIterations,
+      shares,
+      kdfMetadata,
+      masterKeyHex,
+      masterHash,
+    };
+  } catch (outer: unknown) {
+    if (outer instanceof FirstTimeVaultSetupError) {
+      logSetupError("[SETUP] Create Vault prepare failed", outer);
+      throw outer;
+    }
+    logSetupError("[SETUP] Create Vault prepare unexpected failure", outer);
+    throw new FirstTimeVaultSetupError(
+      "Vault creation failed unexpectedly. Nothing was saved. Please try again.",
     );
   }
-
-  const shares = dependencies.splitKeyIntoShares(masterKeyHex);
-  const masterHash = dependencies.hashMasterKey(masterKeyHex);
-  const rawRecoveryKeyHex = dependencies.generateRecoveryKey();
-  const recoveryKeyHash = dependencies.hashRecoveryKey(rawRecoveryKeyHex);
-
-  return {
-    salt,
-    iterations: validIterations,
-    shares,
-    rawRecoveryKeyHex,
-    kdfMetadata,
-    masterKeyHex,
-    masterHash,
-    recoveryKeyHash,
-  };
 }
 
 export async function performFirstTimeVaultSetup(
   input: FirstTimeVaultSetupInput,
   dependencies: FirstTimeVaultSetupDependencies,
 ): Promise<FirstTimeVaultSetupResult> {
-  const prepared = await prepareFirstTimeVaultSetup(input, dependencies);
+  let prepared: PreparedFirstTimeVaultSetupResult;
+  try {
+    prepared = await prepareFirstTimeVaultSetup(input, dependencies);
+  } catch (prepErr: unknown) {
+    logSetupError("[SETUP] prepare stage failed", prepErr);
+    throw prepErr instanceof FirstTimeVaultSetupError
+      ? prepErr
+      : new FirstTimeVaultSetupError("Vault creation failed during key derivation.");
+  }
 
   try {
     await dependencies.saveMasterSalt(prepared.salt);
     await dependencies.saveMasterKeyHash(prepared.masterHash);
     await dependencies.saveSecurityProfile(prepared.iterations);
     await dependencies.saveKdfMetadata(prepared.kdfMetadata);
-    await dependencies.saveRecoveryKeyHash(prepared.recoveryKeyHash);
     await dependencies.storeMasterKeySecurely(prepared.masterKeyHex);
-  } catch (err) {
-    dependencies.wipeShares(prepared.shares);
+  } catch (err: unknown) {
+    logSetupError("[SETUP] Vault storage writes failed", err);
+    try {
+      dependencies.wipeShares(prepared.shares);
+    } catch (wipeErr: unknown) {
+      logSetupError("[SETUP] wipeShares after storage failure failed", wipeErr);
+    }
     throw err;
   }
 
@@ -154,7 +224,6 @@ export async function performFirstTimeVaultSetup(
     salt: prepared.salt,
     iterations: prepared.iterations,
     shares: prepared.shares,
-    rawRecoveryKeyHex: prepared.rawRecoveryKeyHex,
     kdfMetadata: prepared.kdfMetadata,
   };
 }
