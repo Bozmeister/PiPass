@@ -213,7 +213,15 @@ def pipassReleaseSigningConfigured = (pipassStorePassword.length() > 0) && (pipa
 logger.lifecycle("[pipass] release signing configured=" + pipassReleaseSigningConfigured + " storePassword=" + (pipassStorePassword.length() > 0) + " keyPassword=" + (pipassKeyPassword.length() > 0) + " alias=" + (pipassKeyAlias.length() > 0) + " storeFile=" + (${RELEASE_SIGNING_LOADER_MARKER} != null))
 gradle.taskGraph.whenReady { graph ->
     def signingRelease = graph.allTasks.any { it.name.toLowerCase().contains("signrelease") }
-    if (signingRelease && !pipassReleaseSigningConfigured) {
+    // EAS fallback: eas-build.gradle fills signingConfigs.release from credentials.json
+    // before this hook. A local release with no keystore and no injected store file still fails.
+    def easInjectedStoreFile = null
+    try {
+        easInjectedStoreFile = project.android.signingConfigs.release.storeFile
+    } catch (Exception ignored) {
+        easInjectedStoreFile = null
+    }
+    if (signingRelease && !pipassReleaseSigningConfigured && easInjectedStoreFile == null) {
         throw new GradleException(
             "Release signing is not configured (storePassword=" + (pipassStorePassword.length() > 0) + ", keyPassword=" + (pipassKeyPassword.length() > 0) + ", storeFile=" + (${RELEASE_SIGNING_LOADER_MARKER} != null) + "). Put storePassword/keyPassword/keyAlias/storeFile in android/app/keystore.properties (or set PIPASS_UPLOAD_*)."
         )
@@ -225,6 +233,8 @@ ${RELEASE_SIGNING_END}
 
 const RELEASE_SIGNING_CONFIG_BLOCK = `        release {
             // ${RELEASE_SIGNING_CONFIG_MARKER}
+            // Local builds use keystore.properties or PIPASS_UPLOAD_*.
+            // When those are absent, leave this empty so EAS eas-build.gradle can fill it.
             if (pipassReleaseSigningConfigured) {
                 storeFile ${RELEASE_SIGNING_LOADER_MARKER}
                 storePassword pipassStorePassword
@@ -235,9 +245,34 @@ const RELEASE_SIGNING_CONFIG_BLOCK = `        release {
 `;
 
 /**
+ * Replace the signingConfigs.release block that carries the marker.
+ * A later prebuild must refresh an older block, not leave it in place.
+ */
+function replaceMarkedReleaseBlock(contents, replacement) {
+  const marker = `// ${RELEASE_SIGNING_CONFIG_MARKER}`;
+  const markerAt = contents.indexOf(marker);
+  if (markerAt < 0) return contents;
+  const releaseAt = contents.lastIndexOf("release", markerAt);
+  const open = contents.indexOf("{", releaseAt);
+  if (releaseAt < 0 || open < 0) return contents;
+  let depth = 0;
+  for (let i = open; i < contents.length; i++) {
+    if (contents[i] === "{") depth += 1;
+    else if (contents[i] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return contents.slice(0, releaseAt) + replacement.trim() + contents.slice(i + 1);
+      }
+    }
+  }
+  return contents;
+}
+
+/**
  * Ensure signingConfigs.release exists and buildTypes.release points at it.
- * Passwords come from keystore.properties / PIPASS_UPLOAD_* — never hardcoded.
- * Exported for unit tests.
+ * Local secrets come from keystore.properties / PIPASS_UPLOAD_* — never hardcoded.
+ * When those are absent the release block stays empty so EAS eas-build.gradle
+ * can inject the remote keystore. Exported for unit tests.
  */
 function applyReleaseSigningToGradle(contents) {
   let next = contents;
@@ -269,11 +304,9 @@ function applyReleaseSigningToGradle(contents) {
     }
   }
 
-  // Upgrade a hollow / relative-path release signingConfig.
-  next = next.replace(
-    /release\s*\{\s*\/\/ pipass-signingConfigs-release[\s\S]*?storeFile file\(pipassStoreFileName\)[\s\S]*?\n\s*\}/,
-    RELEASE_SIGNING_CONFIG_BLOCK.trim(),
-  );
+  if (next.includes(RELEASE_SIGNING_CONFIG_MARKER)) {
+    next = replaceMarkedReleaseBlock(next, RELEASE_SIGNING_CONFIG_BLOCK);
+  }
 
   if (!next.includes(RELEASE_SIGNING_CONFIG_MARKER)) {
     const hardcodedRelease =
@@ -297,7 +330,7 @@ function applyReleaseSigningToGradle(contents) {
   if (next.includes(RELEASE_SIGNING_CONFIG_MARKER)) {
     next = next.replace(
       /(buildTypes\s*\{[\s\S]*?\brelease\s*\{[\s\S]*?)signingConfig signingConfigs\.(?:debug|release)\b/,
-      "$1signingConfig (pipassReleaseSigningConfigured ? signingConfigs.release : signingConfigs.debug)",
+      "$1signingConfig signingConfigs.release",
     );
   }
 
